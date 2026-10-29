@@ -1,0 +1,6 @@
+{
+  "name": "Blaize — The Accountable AI Desktop",
+  "description": "Memory-efficient accountable AI desktop environment with Trust Kernel, hash-chained Memory Ledger, Blaize Browser with Teach & Replay, L3xi money assistant, Meta Muse model router, and Morrow companion.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

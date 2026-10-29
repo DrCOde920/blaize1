@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 280" width="220" height="280">
+  <defs>
+    <linearGradient id="hairGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#7DD3FC" />
+      <stop offset="45%" stop-color="#38BDF8" />
+      <stop offset="100%" stop-color="#0369A1" />
+    </linearGradient>
+    <linearGradient id="jacketGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#1E293B" />
+      <stop offset="100%" stop-color="#0F172A" />
+    </linearGradient>
+  </defs>
+  <ellipse cx="110" cy="264" rx="42" ry="6" fill="#020617" fill-opacity="0.4" />
+  <!-- Dynamic Streaming Twin-Tails (Running Motion) -->
+  <path d="M62 66 C14 72, 6 118, 18 168 C34 152, 48 118, 68 88 Z" fill="url(#hairGrad)" />
+  <path d="M154 66 C198 78, 210 128, 196 176 C180 156, 166 122, 148 88 Z" fill="url(#hairGrad)" />
+  <polygon points="60,64 42,52 48,74" fill="#F43F5E" />
+  <polygon points="156,64 174,52 168,74" fill="#F43F5E" />
+  <!-- Dynamic Running Stride Legs -->
+  <path d="M92 178 L60 238 L74 244 L104 184 Z" fill="#0F172A" stroke="#38BDF8" stroke-width="1.5" />
+  <path d="M120 178 L154 228 L166 220 L132 174 Z" fill="#0F172A" stroke="#38BDF8" stroke-width="1.5" />
+  <!-- Flared Pleated Skirt in Stride -->
+  <polygon points="76,148 144,148 168,184 52,184" fill="#0F172A" stroke="#38BDF8" stroke-width="1.5" />
+  <!-- Forward-Leaning Torso -->
+  <path d="M82 100 L138 100 L144 150 L76 150 Z" fill="url(#jacketGrad)" stroke="#64748B" stroke-width="1.5" />
+  <polygon points="105,104 115,104 122,138 112,138" fill="#F43F5E" />
+  <!-- Pumping Arms -->
+  <path d="M82 106 L50 132 L58 142 L88 118 Z" fill="url(#jacketGrad)" stroke="#38BDF8" stroke-width="1.4" />
+  <path d="M138 106 L168 128 L160 138 L132 118 Z" fill="url(#jacketGrad)" stroke="#38BDF8" stroke-width="1.4" />
+  <circle cx="52" cy="136" r="5" fill="#FFE4D6" />
+  <circle cx="164" cy="132" r="5" fill="#FFE4D6" />
+  <!-- Focused Determined Anime Face -->
+  <path d="M78 60 C78 34, 146 34, 146 60 C146 84, 130 96, 112 96 C94 96, 78 84, 78 60 Z" fill="#FFF0E5" />
+  <ellipse cx="96" cy="67" rx="6.5" ry="8" fill="#0F172A" />
+  <ellipse cx="96" cy="68" rx="5" ry="6" fill="#0EA5E9" />
+  <circle cx="94" cy="64" r="2.2" fill="#FFFFFF" />
+  <ellipse cx="128" cy="67" rx="6.5" ry="8" fill="#0F172A" />
+  <ellipse cx="128" cy="68" rx="5" ry="6" fill="#0EA5E9" />
+  <circle cx="126" cy="64" r="2.2" fill="#FFFFFF" />
+  <ellipse cx="109" cy="82" rx="4" ry="4.5" fill="#E11D48" />
+  <path d="M74 62 C74 26, 150 26, 150 62 C140 44, 130 58, 122 42 C116 58, 106 56, 100 42 C92 58, 82 46, 74 62 Z" fill="url(#hairGrad)" />
+</svg>

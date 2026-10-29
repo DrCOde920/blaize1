@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 280" width="220" height="280">
+  <defs>
+    <linearGradient id="hairGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#7DD3FC" />
+      <stop offset="45%" stop-color="#38BDF8" />
+      <stop offset="100%" stop-color="#0369A1" />
+    </linearGradient>
+    <linearGradient id="jacketGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#1E293B" />
+      <stop offset="100%" stop-color="#0F172A" />
+    </linearGradient>
+  </defs>
+  <ellipse cx="110" cy="266" rx="38" ry="6" fill="#020617" fill-opacity="0.45" />
+  <path d="M62 66 C28 88, 18 158, 34 218 C46 196, 54 148, 68 94 Z" fill="url(#hairGrad)" />
+  <path d="M158 66 C192 88, 202 158, 186 218 C174 196, 166 148, 152 94 Z" fill="url(#hairGrad)" />
+  <polygon points="60,64 42,52 48,74" fill="#F43F5E" />
+  <polygon points="160,64 178,52 172,74" fill="#F43F5E" />
+  <!-- Standing Legs -->
+  <rect x="89" y="186" width="14" height="70" rx="5" fill="#0F172A" stroke="#38BDF8" stroke-width="1.4" />
+  <rect x="117" y="186" width="14" height="70" rx="5" fill="#0F172A" stroke="#38BDF8" stroke-width="1.4" />
+  <polygon points="74,154 146,154 162,192 58,192" fill="#0F172A" stroke="#38BDF8" stroke-width="1.5" />
+  <path d="M80 104 L140 104 L146 156 L74 156 Z" fill="url(#jacketGrad)" stroke="#64748B" stroke-width="1.5" />
+  <!-- Typing Arms & Floating Holographic Keyboard -->
+  <path d="M80 108 L68 142 L94 144 L88 118 Z" fill="url(#jacketGrad)" stroke="#38BDF8" stroke-width="1.3" />
+  <path d="M140 108 L152 142 L126 144 L132 118 Z" fill="url(#jacketGrad)" stroke="#38BDF8" stroke-width="1.3" />
+  <rect x="56" y="142" width="108" height="14" rx="4" fill="#0EA5E9" fill-opacity="0.28" stroke="#38BDF8" stroke-width="1.5" />
+  <!-- Focused Anime Face & Glasses Glint -->
+  <path d="M76 62 C76 36, 144 36, 144 62 C144 86, 128 98, 110 98 C92 98, 76 86, 76 62 Z" fill="#FFF0E5" />
+  <ellipse cx="94" cy="69" rx="6.5" ry="8" fill="#0F172A" />
+  <ellipse cx="94" cy="70" rx="5" ry="6" fill="#10B981" />
+  <circle cx="92" cy="66" r="2.2" fill="#FFFFFF" />
+  <ellipse cx="126" cy="69" rx="6.5" ry="8" fill="#0F172A" />
+  <ellipse cx="126" cy="70" rx="5" ry="6" fill="#10B981" />
+  <circle cx="124" cy="66" r="2.2" fill="#FFFFFF" />
+  <line x1="104" y1="84" x2="116" y2="84" stroke="#0F172A" stroke-width="2" stroke-linecap="round" />
+  <path d="M72 64 C72 28, 148 28, 148 64 C138 46, 128 60, 120 44 C114 60, 104 58, 98 44 C90 60, 80 48, 72 64 Z" fill="url(#hairGrad)" />
+</svg>

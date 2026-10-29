@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 280" width="220" height="280">
+  <defs>
+    <linearGradient id="hairGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#7DD3FC" />
+      <stop offset="45%" stop-color="#38BDF8" />
+      <stop offset="100%" stop-color="#0369A1" />
+    </linearGradient>
+    <linearGradient id="jacketGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#1E293B" />
+      <stop offset="100%" stop-color="#0F172A" />
+    </linearGradient>
+    <linearGradient id="skirtGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#0F172A" />
+      <stop offset="100%" stop-color="#1E3A8A" />
+    </linearGradient>
+  </defs>
+  <!-- Ground Soft Shadow (No circular orb or AssistiveTouch ring) -->
+  <ellipse cx="110" cy="266" rx="38" ry="6" fill="#020617" fill-opacity="0.45" />
+  <!-- Flowing Twin-Tails (Back Layer) -->
+  <path d="M62 66 C28 88, 18 158, 34 218 C46 196, 54 148, 68 94 Z" fill="url(#hairGrad)" stroke="#0284C7" stroke-width="1.2" />
+  <path d="M158 66 C192 88, 202 158, 186 218 C174 196, 166 148, 152 94 Z" fill="url(#hairGrad)" stroke="#0284C7" stroke-width="1.2" />
+  <!-- Twin-Tail Crimson Ribbons -->
+  <polygon points="60,64 42,52 48,74" fill="#F43F5E" />
+  <polygon points="160,64 178,52 172,74" fill="#F43F5E" />
+  <!-- Anime Legs & Thigh-High Stockings -->
+  <path d="M92 184 L90 254 L102 254 L103 184 Z" fill="#FFE4D6" />
+  <path d="M117 184 L118 254 L130 254 L128 184 Z" fill="#FFE4D6" />
+  <rect x="89" y="210" width="14" height="48" rx="5" fill="#0F172A" stroke="#38BDF8" stroke-width="1.4" />
+  <rect x="117" y="210" width="14" height="48" rx="5" fill="#0F172A" stroke="#38BDF8" stroke-width="1.4" />
+  <line x1="89" y1="216" x2="103" y2="216" stroke="#38BDF8" stroke-width="2" />
+  <line x1="117" y1="216" x2="131" y2="216" stroke="#38BDF8" stroke-width="2" />
+  <!-- Pleated Layered Anime Skirt -->
+  <polygon points="74,154 146,154 162,192 58,192" fill="url(#skirtGrad)" stroke="#38BDF8" stroke-width="1.5" />
+  <line x1="90" y1="154" x2="82" y2="192" stroke="#38BDF8" stroke-opacity="0.5" stroke-width="1.2" />
+  <line x1="110" y1="154" x2="110" y2="192" stroke="#38BDF8" stroke-opacity="0.5" stroke-width="1.2" />
+  <line x1="130" y1="154" x2="138" y2="192" stroke="#38BDF8" stroke-opacity="0.5" stroke-width="1.2" />
+  <!-- Tailored Anime Sailor-Tech Jacket & Tie -->
+  <path d="M80 104 L140 104 L146 156 L74 156 Z" fill="url(#jacketGrad)" stroke="#64748B" stroke-width="1.5" />
+  <polygon points="94,104 126,104 110,124" fill="#F8FAFC" />
+  <polygon points="105,116 115,116 113,148 107,148" fill="#F43F5E" />
+  <!-- Relaxed Expressive Arms & Hands -->
+  <path d="M80 108 L60 152 L70 156 L86 118 Z" fill="url(#jacketGrad)" stroke="#38BDF8" stroke-width="1.3" />
+  <circle cx="64" cy="155" r="5" fill="#FFE4D6" />
+  <path d="M140 108 L160 152 L150 156 L134 118 Z" fill="url(#jacketGrad)" stroke="#38BDF8" stroke-width="1.3" />
+  <circle cx="156" cy="155" r="5" fill="#FFE4D6" />
+  <!-- Neck & Anime Head -->
+  <rect x="104" y="94" width="12" height="14" rx="4" fill="#FFE4D6" />
+  <path d="M76 62 C76 36, 144 36, 144 62 C144 86, 128 98, 110 98 C92 98, 76 86, 76 62 Z" fill="#FFF0E5" />
+  <!-- Detailed Anime Eyes (Irises, Specular Highlights & Lashes) -->
+  <path d="M86 62 Q95 57 102 62" fill="none" stroke="#0F172A" stroke-width="2.4" stroke-linecap="round" />
+  <ellipse cx="94" cy="69" rx="6.5" ry="8.5" fill="#0F172A" />
+  <ellipse cx="94" cy="70" rx="5.2" ry="6.5" fill="#0EA5E9" />
+  <ellipse cx="94" cy="73" rx="3.2" ry="3" fill="#7DD3FC" />
+  <circle cx="91.5" cy="65.5" r="2.3" fill="#FFFFFF" />
+  <circle cx="96.5" cy="72.5" r="1.1" fill="#FFFFFF" />
+  <path d="M118 62 Q125 57 134 62" fill="none" stroke="#0F172A" stroke-width="2.4" stroke-linecap="round" />
+  <ellipse cx="126" cy="69" rx="6.5" ry="8.5" fill="#0F172A" />
+  <ellipse cx="126" cy="70" rx="5.2" ry="6.5" fill="#0EA5E9" />
+  <ellipse cx="126" cy="73" rx="3.2" ry="3" fill="#7DD3FC" />
+  <circle cx="123.5" cy="65.5" r="2.3" fill="#FFFFFF" />
+  <circle cx="128.5" cy="72.5" r="1.1" fill="#FFFFFF" />
+  <!-- Soft Cheek Blush & Warm Anime Smile -->
+  <ellipse cx="83" cy="79" rx="5" ry="2.2" fill="#FB7185" fill-opacity="0.55" />
+  <ellipse cx="137" cy="79" rx="5" ry="2.2" fill="#FB7185" fill-opacity="0.55" />
+  <path d="M105 84 Q110 89 115 84" fill="none" stroke="#E11D48" stroke-width="2" stroke-linecap="round" />
+  <!-- Layered Anime Bangs & Ahoge Hair Crest -->
+  <path d="M110 28 Q118 14 126 22 Q118 24 114 30 Z" fill="#7DD3FC" />
+  <path d="M72 64 C72 28, 148 28, 148 64 C138 46, 128 60, 120 44 C114 60, 104 58, 98 44 C90 60, 80 48, 72 64 Z" fill="url(#hairGrad)" />
+</svg>
