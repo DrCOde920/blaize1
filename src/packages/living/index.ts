@@ -2550,8 +2550,8 @@ export function compileNaturalLanguageToScheduleSpec(params: {
   const tz: ScheduleSpec['timezone'] = params.timezone || 'Europe/London';
   const refNow = params.referenceNowIso || '2026-10-28T09:00:00.000Z';
 
-  const isWatchBalance =
-    lower.includes('balance falls below') || lower.includes('below') || lower.includes('watch');
+  const isWatchResource =
+    lower.includes('watch') || lower.includes('monitor') || lower.includes('alert if') || lower.includes('below');
   const isFriday = lower.includes('friday');
   const isWeekday = lower.includes('weekday');
   const isEvening = lower.includes('7 pm') || lower.includes('19:00');
@@ -2571,6 +2571,17 @@ export function compileNaturalLanguageToScheduleSpec(params: {
     ? 'draft'
     : 'read';
 
+  const isPlaylist = lower.includes('playlist') || lower.includes('music');
+  const isResearch = lower.includes('research') || lower.includes('sources') || lower.includes('citations');
+
+  const allowedTools = isPlaylist
+    ? ['music.play_local_playlist', 'companion.perform_action']
+    : isResearch
+      ? ['browser.navigate', 'browser.extract_a11y', 'research.verify_citations']
+      : ['workspace.list_dir', 'workspace.run_tests', 'browser.navigate'];
+
+  const allowedDomains = isPlaylist ? [] : isResearch ? ['en.wikipedia.org', 'arxiv.org'] : ['localhost', 'developer.mozilla.org'];
+
   const spec: ScheduleSpec = {
     id: `spec_${Math.abs(
       raw.split('').reduce((a, c) => ((a << 5) - a + c.charCodeAt(0)) | 0, 0)
@@ -2580,16 +2591,16 @@ export function compileNaturalLanguageToScheduleSpec(params: {
     name: raw.length > 56 ? `${raw.slice(0, 56)}...` : raw,
     version: 1,
     task: {
-      kind: isWatchBalance ? 'skill' : 'mission_template',
-      targetId: isWatchBalance ? 'skill-mockbank-reconcile-v1' : 'mission-scheduled-summary',
+      kind: isWatchResource ? 'skill' : 'mission_template',
+      targetId: isWatchResource ? 'skill-resource-monitor-v1' : isResearch ? 'skill-research-digest-v1' : 'mission-scheduled-summary',
       objective: raw,
     },
-    trigger: isWatchBalance
+    trigger: isWatchResource
       ? {
           kind: 'watch_condition',
-          cronOrIso: 'WATCH balance < 500 GHS (poll 08:00)',
+          cronOrIso: 'WATCH resource metrics (poll 08:00)',
           watchCondition: {
-            metric: 'account_balance_ghs',
+            metric: 'disk_or_budget_threshold',
             operator: 'lt',
             threshold: 500,
           },
@@ -2607,14 +2618,12 @@ export function compileNaturalLanguageToScheduleSpec(params: {
     conditions: {
       onAcPower: true,
       appIdle: false,
-      networkAvailable: !lower.includes('playlist'),
+      networkAvailable: !isPlaylist,
       quietHours: '22:00–08:00',
     },
     authority: {
-      allowedTools: lower.includes('playlist')
-        ? ['music.play_local_playlist', 'companion.perform_action']
-        : ['browser.navigate', 'browser.extract_a11y', 'l3xi.reconcile_statements'],
-      allowedDomains: lower.includes('playlist') ? [] : ['portal.mockbank.local'],
+      allowedTools,
+      allowedDomains,
       riskCeiling,
       moneyExecutesAutomatically: false,
     },
@@ -2654,7 +2663,7 @@ export function compileNaturalLanguageToScheduleSpec(params: {
       `Write hash-chained start/result events and produce a short brief ('Did X, verified Y, needs approval for Z')`,
     ],
     willNotHappen: [
-      'Will NEVER execute live money transfers or click Pay/Transfer buttons automatically',
+      'Will NEVER execute unapproved write, spend, or destructive actions automatically',
       'Will NEVER auto-approve on timeout (approval timeout strictly resolves to SKIP)',
       'Will NEVER run during quiet hours (22:00–08:00) or duplicate an idempotency key',
       'Cannot wake a sleeping computer (requires Blaize Desktop running in tray)',
@@ -3242,13 +3251,50 @@ export function proposeRuleFromUserCorrection(
   };
 }
 
-export const LOCAL_DEMO_MODEL_PROVIDER_STATUS = {
-  activeMode: 'LOCAL_DEMO_SIMULATED' as const,
-  liveApiCallsMade: 0,
-  apiKeysRequired: false,
-  bannerNotice:
-    'LOCAL_DEMO_SIMULATED Mode Active — Zero live Meta API calls or API keys required. Adapter interfaces are pre-wired for muse-spark-1.3, muse-wonder-1.0, muse-image-1.0, muse-voice-transcribe-1.0, sam-3.1, muse-glimmer, and muse-spark-open-1.0.',
-};
+export interface LocalDemoModelItem {
+  role: string;
+  modelId: string;
+  honestNote: string;
+}
+
+export const LOCAL_DEMO_MODELS_ROSTER: LocalDemoModelItem[] = [
+  {
+    role: 'loop',
+    modelId: 'muse-spark-1.3',
+    honestNote:
+      'Primary loop execution, computer-use actions, and structured data extraction. Fast and cost-effective.',
+  },
+  {
+    role: 'planning',
+    modelId: 'muse-wonder-1.0',
+    honestNote:
+      'Long-horizon mission planning, failure recovery, and independent Verifier pass.',
+  },
+  {
+    role: 'voice',
+    modelId: 'muse-voice-transcribe-1.0',
+    honestNote:
+      'Push-to-talk speech-to-text transcription (supports 25 languages and code-switching).',
+  },
+  {
+    role: 'offline',
+    modelId: 'muse-glimmer (Local)',
+    honestNote:
+      'Offline fallback model; permanently blocked and dormant on machines with <24 GB RAM.',
+  },
+];
+
+export const LOCAL_DEMO_MODEL_PROVIDER_STATUS = Object.assign(
+  [...LOCAL_DEMO_MODELS_ROSTER],
+  {
+    activeMode: 'LOCAL_DEMO_SIMULATED' as const,
+    liveApiCallsMade: 0,
+    apiKeysRequired: false,
+    bannerNotice:
+      'LOCAL_DEMO_SIMULATED Mode Active — Zero live Meta API calls or API keys required. Adapter interfaces are pre-wired for muse-spark-1.3, muse-wonder-1.0, muse-image-1.0, muse-voice-transcribe-1.0, sam-3.1, muse-glimmer, and muse-spark-open-1.0.',
+    models: LOCAL_DEMO_MODELS_ROSTER,
+  }
+);
 
 /**
  * ============================================================================
@@ -4507,5 +4553,719 @@ export const SIMULATED_PLATFORM_BRIDGE: SimulatedPlatformCapability[] = [
   },
 ];
 
+/**
+ * Chair Stage Coordinates & Graceful Crossfade Transition Calculator
+ * Detects when `activeView === 'chat'` and calculates the exact coordinates of the
+ * top-center chair stage above the Chat panel (using DOM stage rect when measured,
+ * or deterministic layout math as fallback), plus the crossfade & sit_down animation state.
+ */
+export interface ChairStageRectMeasurement {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
+export interface ChairStageTargetCoordinates {
+  isSeatedInChat: boolean;
+  centerX: number;
+  chairTopY: number;
+  companionTopY: number;
+  source: 'dom_stage_rect' | 'layout_fallback' | 'corner_perch';
+}
+
+export function calculateChairStageTargetCoordinates(input: {
+  activeView: string;
+  stageRect?: ChairStageRectMeasurement | null;
+  viewportWidth: number;
+  viewportHeight: number;
+  sidebarCollapsed?: boolean;
+  chatArtifactDrawerOpen?: boolean;
+  artifactDrawerWidthPx?: number;
+  compactChatStage?: boolean;
+}): ChairStageTargetCoordinates {
+  const isChat = input.activeView === 'chat';
+  const vw = Math.max(320, input.viewportWidth || 1440);
+  const vh = Math.max(320, input.viewportHeight || 900);
+
+  if (!isChat) {
+    return {
+      isSeatedInChat: false,
+      centerX: Math.round(vw - 72),
+      chairTopY: Math.round(vh - 180),
+      companionTopY: Math.round(vh - 176),
+      source: 'corner_perch',
+    };
+  }
+
+  // Prefer live DOM measurement of `[data-testid="chat-top-center-chair-stage"]`
+  if (input.stageRect && input.stageRect.width > 0) {
+    const centerX = Math.round(input.stageRect.left + input.stageRect.width / 2);
+    const chairTopY = input.compactChatStage
+      ? Math.round(input.stageRect.top + 8)
+      : Math.max(42, Math.round(input.stageRect.top + 6));
+    const companionTopY = input.compactChatStage ? chairTopY : Math.max(38, chairTopY - 6);
+    return {
+      isSeatedInChat: true,
+      centerX,
+      chairTopY,
+      companionTopY,
+      source: 'dom_stage_rect',
+    };
+  }
+
+  // Deterministic layout calculation when stageRect is not yet measured
+  const sidebarWidth = input.sidebarCollapsed ? 56 : 240;
+  const drawerWidth = input.chatArtifactDrawerOpen ? input.artifactDrawerWidthPx ?? 500 : 0;
+  const chatWidth = Math.max(240, vw - sidebarWidth - drawerWidth);
+  const centerX = Math.round(sidebarWidth + chatWidth / 2);
+  const chairTopY = input.compactChatStage ? 54 : 50;
+  const companionTopY = input.compactChatStage ? 54 : 44;
+
+  return {
+    isSeatedInChat: true,
+    centerX,
+    chairTopY,
+    companionTopY,
+    source: 'layout_fallback',
+  };
+}
+
+export type ChairTransitionPhase =
+  | 'walking_to_chat'
+  | 'sitting_down'
+  | 'seated_in_chat'
+  | 'corner_perch';
+
+export interface ChairCrossfadeSnapshot {
+  phase: ChairTransitionPhase;
+  opacity: number;
+  scaleY: number;
+  seatOffsetY: number;
+  offsetX: number;
+  offsetY: number;
+  presenceState: MorrowPresenceState;
+  rigAction: MorrowAnimationAction;
+}
+
+export function computeCrossfadeTransitionToChair(input: {
+  phase: ChairTransitionPhase;
+  fromPosition?: { x: number; y: number } | null;
+  targetPosition: { x: number; y: number };
+}): ChairCrossfadeSnapshot {
+  const { phase, fromPosition, targetPosition } = input;
+
+  if (phase === 'walking_to_chat') {
+    const rawDx = fromPosition ? fromPosition.x - targetPosition.x : 140;
+    const rawDy = fromPosition ? fromPosition.y - targetPosition.y : 80;
+    const clampedDx = Math.max(-220, Math.min(220, Math.round(rawDx * 0.45)));
+    const clampedDy = Math.max(-120, Math.min(140, Math.round(rawDy * 0.35)));
+    return {
+      phase,
+      opacity: 0.78,
+      scaleY: 0.98,
+      seatOffsetY: 2,
+      offsetX: clampedDx === 0 ? 96 : clampedDx,
+      offsetY: clampedDy,
+      presenceState: 'walk_left',
+      rigAction: 'run',
+    };
+  }
+
+  if (phase === 'sitting_down') {
+    return {
+      phase,
+      opacity: 0.94,
+      scaleY: 0.93,
+      seatOffsetY: 12,
+      offsetX: 0,
+      offsetY: 0,
+      presenceState: 'sit_down',
+      rigAction: 'sit',
+    };
+  }
+
+  if (phase === 'seated_in_chat') {
+    return {
+      phase,
+      opacity: 1,
+      scaleY: 1,
+      seatOffsetY: 10,
+      offsetX: 0,
+      offsetY: 0,
+      presenceState: 'sit_idle',
+      rigAction: 'sit',
+    };
+  }
+
+  return {
+    phase: 'corner_perch',
+    opacity: 1,
+    scaleY: 1,
+    seatOffsetY: 0,
+    offsetX: 0,
+    offsetY: 0,
+    presenceState: 'stand_idle',
+    rigAction: 'idle',
+  };
+}
+
+// ============================================================================
+// ARGON MASTER PROMPT — PLATFORM ADAPTER CONTRACT & FEATURE WIRING INVENTORY
+// ============================================================================
+
+export type ImplementationRealismMode = 'real' | 'local' | 'simulated' | 'missing';
+
+export interface PlatformCapabilityDescriptor {
+  capabilityId: string;
+  label: string;
+  mode: ImplementationRealismMode;
+  honestStatusBadge: string;
+  description: string;
+}
+
+export interface PlatformAdapterContract {
+  adapterId: 'WebPreviewPlatformAdapter' | 'ElectronDesktopPlatformAdapter';
+  runtimeName: string;
+  isNativeElectronShell: boolean;
+  capabilities: {
+    companionOverlay: PlatformCapabilityDescriptor;
+    globalSummonShortcut: PlatformCapabilityDescriptor;
+    osAppDiscovery: PlatformCapabilityDescriptor;
+    chromiumSessionIsolation: PlatformCapabilityDescriptor;
+    pluginWorkerSandbox: PlatformCapabilityDescriptor;
+    audioBeatAnalysis: PlatformCapabilityDescriptor;
+    trustLedgerHashChain: PlatformCapabilityDescriptor;
+    l3xiFinanceReconciler: PlatformCapabilityDescriptor;
+  };
+}
+
+export const WEB_PREVIEW_PLATFORM_ADAPTER: PlatformAdapterContract = {
+  adapterId: 'WebPreviewPlatformAdapter',
+  runtimeName: 'Browser Preview Runtime (Simulated Native Desktop Shell)',
+  isNativeElectronShell: false,
+  capabilities: {
+    companionOverlay: {
+      capabilityId: 'companion_overlay',
+      label: 'Morrow 2D Companion Overlay & Chat Nook',
+      mode: 'simulated',
+      honestStatusBadge: 'Web Preview Overlay (Simulated Always-on-Top)',
+      description:
+        'Renders Morrow in a compact right-aligned Chat Nook inside Chat and a safe bottom-right viewport perch outside Chat with pointer-events pass-through.',
+    },
+    globalSummonShortcut: {
+      capabilityId: 'global_shortcut',
+      label: 'Summon Companion Shortcut (Alt+M)',
+      mode: 'local',
+      honestStatusBadge: 'Browser Window Listener (Alt+M)',
+      description:
+        'Listens for Alt+M within the active browser tab instead of OS-wide electron.globalShortcut.',
+    },
+    osAppDiscovery: {
+      capabilityId: 'os_app_discovery',
+      label: 'Desktop App & Window Discovery',
+      mode: 'simulated',
+      honestStatusBadge: 'Simulated Registry Catalog',
+      description:
+        'Displays representative desktop app support tiers (Full Adapter, Assisted, Manual Guidance) without scanning host OS processes.',
+    },
+    chromiumSessionIsolation: {
+      capabilityId: 'chromium_sessions',
+      label: 'Isolated Browser Profiles (Personal / Work / Testing)',
+      mode: 'simulated',
+      honestStatusBadge: 'Sandboxed In-App Session Partition',
+      description:
+        'Isolates profile state, cookies, and PolicyGuard rules in local application state rather than native Chromium BrowserContext partitions.',
+    },
+    pluginWorkerSandbox: {
+      capabilityId: 'plugin_sandbox',
+      label: 'Plugin & Skill Execution Sandbox',
+      mode: 'local',
+      honestStatusBadge: 'Deterministic In-Memory PolicyGuard',
+      description:
+        'Enforces default-deny capability checks, static code inspection, and memory caps in-process.',
+    },
+    audioBeatAnalysis: {
+      capabilityId: 'audio_beat_sync',
+      label: 'Local Audio & BPM Dance Sync',
+      mode: 'real',
+      honestStatusBadge: 'Web Audio API + Offline BPM Cache',
+      description:
+        'Synthesizes CC0 audio locally and drives Morrow dance cadence at 0 LLM tokens.',
+    },
+    trustLedgerHashChain: {
+      capabilityId: 'trust_ledger',
+      label: 'SHA-256 Hash-Chained Trust Ledger & PolicyGuard',
+      mode: 'real',
+      honestStatusBadge: 'Cryptographic Hash Chain Active',
+      description:
+        'Appends real hash-chained audit events, detects payload tampering, and enforces redaction.',
+    },
+    l3xiFinanceReconciler: {
+      capabilityId: 'l3xi_finance',
+      label: 'L3xi Integer-Cent Statement Reconciler',
+      mode: 'real',
+      honestStatusBadge: 'Deterministic Integer-Cent Engine',
+      description:
+        'Validates Opening + Credits - Debits == Closing in integer cents and prepares SIMULATION drafts.',
+    },
+  },
+};
+
+export const ELECTRON_DESKTOP_PLATFORM_ADAPTER: PlatformAdapterContract = {
+  adapterId: 'ElectronDesktopPlatformAdapter',
+  runtimeName: 'Native Electron Desktop Shell (Target Production Contract)',
+  isNativeElectronShell: true,
+  capabilities: {
+    companionOverlay: {
+      capabilityId: 'companion_overlay',
+      label: 'Morrow 2D Companion Overlay & Chat Nook',
+      mode: 'real',
+      honestStatusBadge: 'Native Frameless Always-on-Top Window',
+      description:
+        'Uses electron.BrowserWindow({ transparent: true, frame: false, alwaysOnTop: true }) bounded to display.workArea.',
+    },
+    globalSummonShortcut: {
+      capabilityId: 'global_shortcut',
+      label: 'Summon Companion Shortcut (Alt+M)',
+      mode: 'real',
+      honestStatusBadge: 'OS Global Shortcut Registered',
+      description: 'Registered via electron.globalShortcut.register("Alt+M").',
+    },
+    osAppDiscovery: {
+      capabilityId: 'os_app_discovery',
+      label: 'Desktop App & Window Discovery',
+      mode: 'real',
+      honestStatusBadge: 'Native OS Adapter Bridge',
+      description: 'Queries installed desktop application manifests and accessibility trees.',
+    },
+    chromiumSessionIsolation: {
+      capabilityId: 'chromium_sessions',
+      label: 'Isolated Browser Profiles (Personal / Work / Testing)',
+      mode: 'real',
+      honestStatusBadge: 'Persistent Chromium Partitions',
+      description: 'Uses session.fromPartition("persist:<profile>") per profile.',
+    },
+    pluginWorkerSandbox: {
+      capabilityId: 'plugin_sandbox',
+      label: 'Plugin & Skill Execution Sandbox',
+      mode: 'real',
+      honestStatusBadge: 'Isolated UtilityProcess Worker',
+      description: 'Runs each plugin inside electron.utilityProcess.fork() with V8 heap limits.',
+    },
+    audioBeatAnalysis: WEB_PREVIEW_PLATFORM_ADAPTER.capabilities.audioBeatAnalysis,
+    trustLedgerHashChain: WEB_PREVIEW_PLATFORM_ADAPTER.capabilities.trustLedgerHashChain,
+    l3xiFinanceReconciler: WEB_PREVIEW_PLATFORM_ADAPTER.capabilities.l3xiFinanceReconciler,
+  },
+};
+
+export function getActivePlatformAdapter(isElectronEnv = false): PlatformAdapterContract {
+  return isElectronEnv ? ELECTRON_DESKTOP_PLATFORM_ADAPTER : WEB_PREVIEW_PLATFORM_ADAPTER;
+}
+
+export interface FeatureWiringInventoryRow {
+  feature: string;
+  currentImplementation: string;
+  realismStatus: ImplementationRealismMode;
+  uiEntryPoint: string;
+  stateDataSource: string;
+  handlerService: string;
+  testReference: string;
+  workRequired: string;
+}
+
+export const FEATURE_WIRING_INVENTORY: FeatureWiringInventoryRow[] = [
+  {
+    feature: "Morrow's Nook (Chat Companion Scene)",
+    currentImplementation:
+      'Compact 128px borderless right-aligned companion nook in Chat header/top-right with collapsible presence pill and persisted preference.',
+    realismStatus: 'real',
+    uiEntryPoint: 'Chat Header / Top-Right Morrow Nook ([data-testid="morrow-chat-nook"])',
+    stateDataSource: 'MorrowCompanion + calculateMorrowNookPlacement + BehaviorDirector',
+    handlerService: 'onToggleCompactChatStage, setPopoutChatOpen, routeNaturalLanguageAnimationCommand',
+    testReference: 'src/packages/living/living.test.ts (Morrow Nook & Idle Ladder)',
+    workRequired: 'Wired end-to-end; replaces oversized top-center chair banner.',
+  },
+  {
+    feature: 'Floating Desktop Companion & Popover (Outside Chat)',
+    currentImplementation:
+      'Safe bottom-right corner perch with drag/snap, Focus Mode, Hide/Show, Never Sit/Sleep, and shared Chat Popover.',
+    realismStatus: 'simulated',
+    uiEntryPoint: 'Bottom-right Morrow Companion ([data-testid="morrow-floating-companion"])',
+    stateDataSource: 'WEB_PREVIEW_PLATFORM_ADAPTER + activeThread.messages',
+    handlerService: 'computePopoverPlacement, handleSendFromPopout, setFocusMode',
+    testReference: 'src/packages/living/living.test.ts (computePopoverPlacement)',
+    workRequired: 'Labeled honestly as Web Preview Overlay.',
+  },
+  {
+    feature: 'Morrow Soul (~/.blaize/SOUL.md) & Persona Studio',
+    currentImplementation:
+      'Human-readable summary + NL change description + diff preview + Apply + Restore default + Export/Import template + Version history.',
+    realismStatus: 'real',
+    uiEntryPoint: 'Sidebar -> Morrow\'s Soul & Projects -> SOUL.md Editor Panel',
+    stateDataSource: 'soulDocument + soulVersionHistory (src/packages/workspace)',
+    handlerService: 'proposeSoulChangeFromNaturalLanguage, parseAndValidateSoulDocument, revalidateSoulAgainstSkills',
+    testReference: 'src/packages/workspace/workspace.test.ts (SOUL.md NL diff & revalidation)',
+    workRequired: 'Wired end-to-end across Chat Slot #1, IDE, and Skills.',
+  },
+  {
+    feature: 'Mission Engine & Mission Control',
+    currentImplementation:
+      'Dynamic-step mission state machine (CREATED, PLANNING, RUNNING, WAITING_FOR_USER, COMPLETED, FAILED, CANCELLED) with Pause/Resume/Cancel/Emergency Stop.',
+    realismStatus: 'real',
+    uiEntryPoint: 'Chat Active Mission Bar + Sidebar -> Mission Control',
+    stateDataSource: 'activeMission (App.tsx) + MissionSteps + TrustLedger',
+    handlerService: 'handlePauseMission, handleResumeMission, handleCancelMission, handleEmergencyStop',
+    testReference: 'src/packages/trust/trust.test.ts',
+    workRequired: 'Wired with deterministic verifier gating before COMPLETED.',
+  },
+  {
+    feature: 'Artifact Split Drawer (Preview / Code / History)',
+    currentImplementation:
+      'Resizable right split drawer in Chat and Projects with live iframe preview, source editor, v1/v2/v3 rollback, and Open in IDE.',
+    realismStatus: 'real',
+    uiEntryPoint: 'Chat Header -> Artifacts button & Projects -> Artifact Library',
+    stateDataSource: 'artifacts + activeArtifactId (src/packages/workspace)',
+    handlerService: 'createOrUpdateArtifact, rollbackArtifactVersion, handleOpenArtifactInIde',
+    testReference: 'src/packages/workspace/workspace.test.ts (Artifact versioning & rollback)',
+    workRequired: 'Wired end-to-end.',
+  },
+  {
+    feature: 'Reusable Skills (SKILL.md) & Hermes skill_manage',
+    currentImplementation:
+      'Searchable library, typed parameter inputs, Sandbox/Dry-Run toggle, NL create/patch/edit/delete, Export/Import template, and Chat crystallization.',
+    realismStatus: 'real',
+    uiEntryPoint: 'Sidebar -> Reusable Skills & Chat -> Crystallize into SKILL.md',
+    stateDataSource: 'reusableSkills (INITIAL_REUSABLE_SKILLS)',
+    handlerService: 'compileAndExecuteReusableSkill, executeSkillManage',
+    testReference: 'src/packages/workspace/workspace.test.ts (skill_manage & execution)',
+    workRequired: 'Wired with PolicyGuard static scan and artifact emission.',
+  },
+  {
+    feature: 'VS Code IDE & Marketplace Addons',
+    currentImplementation:
+      'Monaco-style editor with Prettier, ESLint, Themes, Snippets, Live Server, Git commits, and Proposed AI Patch Diff + Checkpoint Rollback.',
+    realismStatus: 'local',
+    uiEntryPoint: 'Sidebar -> Code IDE ([data-testid="vscode-ide-workbench"])',
+    stateDataSource: 'ideFiles + vscodeExtensions',
+    handlerService: 'formatCodeWithPrettierAddon, analyzeCodeWithESLintAddon, proposeIdePatchWithDiff',
+    testReference: 'src/packages/workspace/workspace.test.ts (IDE & ESLint/Prettier)',
+    workRequired: 'Honest Built-in Adapter vs Catalog status labels.',
+  },
+  {
+    feature: 'AI Browser (Manual & AI Modes + Profile Isolation)',
+    currentImplementation:
+      'Interactive MockBank & Research tabs, Manual/AI mode toggle, Personal/Work/Testing profiles, OTP/Password takeover lock, and Ask Morrow in Chat.',
+    realismStatus: 'simulated',
+    uiEntryPoint: 'Sidebar -> AI Browser',
+    stateDataSource: 'policyConfig.activeProfileId + BlaizeBrowserView state',
+    handlerService: 'PolicyGuard.evaluateAction, onAskMorrowInChat',
+    testReference: 'src/packages/trust/trust.test.ts (Domain & credential guards)',
+    workRequired: 'Clearly labeled as Sandboxed In-App Browser Preview.',
+  },
+  {
+    feature: 'Connectors & Project Scopes',
+    currentImplementation:
+      'Service rows with honest status (Simulated Sandbox, Disconnected, Connected Local Bridge), Project binding, Write approval gate, and Dry-Run test.',
+    realismStatus: 'simulated',
+    uiEntryPoint: 'Sidebar -> Connectors',
+    stateDataSource: 'connectors (INITIAL_WORKSPACE_CONNECTORS)',
+    handlerService: 'onToggleConnectorStatus, onToggleConnectorProjectBind, testConnectorReadSandbox',
+    testReference: 'src/packages/workspace/workspace.test.ts (Connector sandbox test)',
+    workRequired: 'Never labels mock connectors as live external OAuth.',
+  },
+  {
+    feature: 'Scheduler & Offline Missed-Run Policy',
+    currentImplementation:
+      'Local-time schedule table, UTC Next-5-Runs expander, Offline policy selector (Skip / Run once on wake / Ask), and PolicyGuard money block.',
+    realismStatus: 'local',
+    uiEntryPoint: 'Sidebar -> Scheduler',
+    stateDataSource: 'scheduledTasks (INITIAL_SCHEDULED_TASKS)',
+    handlerService: 'createScheduledTask, onRunScheduleNow, evaluateMissedRunBehavior',
+    testReference: 'src/packages/living/living.test.ts & workspace.test.ts',
+    workRequired: 'Routes Run Now through Mission Engine + Ledger.',
+  },
+  {
+    feature: 'Plugins & Tools Hub + Security Sandbox',
+    currentImplementation:
+      'Standalone plugin launcher, Chat tool coordination toggles, NL Plugin SDK builder, static inspection, and evil-test security block.',
+    realismStatus: 'local',
+    uiEntryPoint: 'Sidebar -> Plugins & Tools',
+    stateDataSource: 'plugins (INITIAL_MODULAR_PLUGINS)',
+    handlerService: 'draftPluginFromNaturalLanguage, onLogPluginGuardBlock',
+    testReference: 'src/packages/trust/trust.test.ts (evil-test blocked)',
+    workRequired: 'Wired end-to-end.',
+  },
+  {
+    feature: 'L3xi Finance &Corrupted Statement Twin Detector',
+    currentImplementation:
+      'Integer-cent statement reconciler, Safe-to-Spend calculator, Corrupted Statement Twin mismatch detector, and guarded SIMULATION bill drafts.',
+    realismStatus: 'real',
+    uiEntryPoint: 'Sidebar -> L3xi Finance (Standalone Workspace)',
+    stateDataSource: 'OCT_STATEMENT_CLEAN / OCT_STATEMENT_CORRUPTED_TWIN',
+    handlerService: 'reconcileStatement, computeSafeToSpend, prepareMoneyDraft',
+    testReference: 'src/packages/l3xi/l3xi.test.ts',
+    workRequired: 'Wired end-to-end.',
+  },
+  {
+    feature: 'Trust & Audit Ledger + Standing Rules',
+    currentImplementation:
+      'SHA-256 hash-chained event ledger, Tamper simulation & verification, Content redaction, and NL Standing Rule compiler.',
+    realismStatus: 'real',
+    uiEntryPoint: 'Sidebar -> Trust & Ledger',
+    stateDataSource: 'TrustLedger instance + policyConfig.standingRules',
+    handlerService: 'ledger.appendEvent, ledger.verifyChain, ledger.simulateTamper',
+    testReference: 'src/packages/trust/trust.test.ts',
+    workRequired: 'Wired end-to-end.',
+  },
+  {
+    feature: 'Evaluations & Sleep Cycle Consolidation',
+    currentImplementation:
+      'Conservative/paused-by-default offline consolidation with candidate rule diffs, benchmark suite runner, and one-click rollback.',
+    realismStatus: 'local',
+    uiEntryPoint: 'Sidebar -> Evaluations & Sleep Cycle',
+    stateDataSource: 'EvalsAndSleepView + MEMORY.md',
+    handlerService: 'runAdversarialPersonaEvaluation, runAddendumAFullMetricsSuite',
+    testReference: 'src/packages/living/living.test.ts',
+    workRequired: 'Wired end-to-end.',
+  },
+];
+
+export interface MorrowNookPlacement {
+  mode: 'chat_nook_expanded' | 'chat_nook_collapsed' | 'floating_corner_perch' | 'hidden';
+  nookHeightPx: number;
+  nookWidthPx: number;
+  autoCollapsedForNarrowViewport: boolean;
+  overlapsComposerOrMessages: false;
+  rightOffsetPx: number;
+  topOffsetPx: number;
+  platformBadge: string;
+}
+
+/**
+ * Argon Master Prompt Section 2:
+ * Calculates Morrow's compact right-aligned Chat Nook placement (110–150px height when expanded,
+ * 36px pill when collapsed or on narrow screens < 768px) or her safe bottom-right perch outside Chat.
+ */
+export function calculateMorrowNookPlacement(input: {
+  activeView: string;
+  viewportWidth: number;
+  viewportHeight: number;
+  nookCollapsedPreference?: boolean;
+  chatArtifactDrawerOpen?: boolean;
+  artifactDrawerWidthPx?: number;
+  companionHidden?: boolean;
+}): MorrowNookPlacement {
+  if (input.companionHidden) {
+    return {
+      mode: 'hidden',
+      nookHeightPx: 0,
+      nookWidthPx: 0,
+      autoCollapsedForNarrowViewport: false,
+      overlapsComposerOrMessages: false,
+      rightOffsetPx: 0,
+      topOffsetPx: 0,
+      platformBadge: WEB_PREVIEW_PLATFORM_ADAPTER.capabilities.companionOverlay.honestStatusBadge,
+    };
+  }
+
+  const vw = Math.max(320, input.viewportWidth || 1440);
+  const drawerWidth = input.chatArtifactDrawerOpen ? input.artifactDrawerWidthPx ?? 500 : 0;
+  const availableChatWidth = vw - drawerWidth;
+  const isNarrow = availableChatWidth < 760;
+
+  if (input.activeView === 'chat') {
+    const collapsed = Boolean(input.nookCollapsedPreference) || isNarrow;
+    return {
+      mode: collapsed ? 'chat_nook_collapsed' : 'chat_nook_expanded',
+      nookHeightPx: collapsed ? 36 : 132,
+      nookWidthPx: collapsed ? 196 : 228,
+      autoCollapsedForNarrowViewport: isNarrow,
+      overlapsComposerOrMessages: false,
+      rightOffsetPx: drawerWidth + 20,
+      topOffsetPx: 52,
+      platformBadge: 'Morrow Nook · Grounded 2D Companion',
+    };
+  }
+
+  return {
+    mode: 'floating_corner_perch',
+    nookHeightPx: 148,
+    nookWidthPx: 136,
+    autoCollapsedForNarrowViewport: isNarrow,
+    overlapsComposerOrMessages: false,
+    rightOffsetPx: 18,
+    topOffsetPx: Math.max(120, (input.viewportHeight || 900) - 172),
+    platformBadge: WEB_PREVIEW_PLATFORM_ADAPTER.capabilities.companionOverlay.honestStatusBadge,
+  };
+}
+
+export type PerchTargetId = 'composer-top' | 'panel-top-right' | 'sidebar-footer' | 'screen-floor';
+
+export interface PerchTargetSpec {
+  id: PerchTargetId;
+  label: string;
+  elementSelector: string;
+  anchorOffset: { x: number; y: number };
+  allowedPoses: MorrowPresenceState[];
+  defaultForViews: string[];
+}
+
+export const PERCH_TARGETS_REGISTRY: Record<PerchTargetId, PerchTargetSpec> = {
+  'composer-top': {
+    id: 'composer-top',
+    label: 'Composer top edge',
+    elementSelector: '[data-perch-id="composer-top"]',
+    anchorOffset: { x: -24, y: -64 },
+    allowedPoses: ['sit_idle', 'sit_down', 'think', 'listen_mic', 'speak', 'celebrate_verified', 'concerned_error', 'sleep'],
+    defaultForViews: ['chat'],
+  },
+  'panel-top-right': {
+    id: 'panel-top-right',
+    label: 'Panel top edge',
+    elementSelector: '[data-perch-id="panel-top-right"]',
+    anchorOffset: { x: -16, y: -48 },
+    allowedPoses: ['sit_idle', 'stand_idle', 'think', 'work_coding', 'speak', 'celebrate_verified', 'concerned_error', 'sleep'],
+    defaultForViews: ['library', 'workbench', 'automations', 'proof', 'settings', 'projects_artifacts', 'vscode_ide', 'browser', 'skills_hub', 'studio', 'trust_ledger', 'evals_sleep', 'l3xi_lane'],
+  },
+  'sidebar-footer': {
+    id: 'sidebar-footer',
+    label: 'Sidebar footer',
+    elementSelector: '[data-perch-id="sidebar-footer"]',
+    anchorOffset: { x: 12, y: -54 },
+    allowedPoses: ['sit_idle', 'stand_idle', 'rest_idle', 'sleep'],
+    defaultForViews: [],
+  },
+  'screen-floor': {
+    id: 'screen-floor',
+    label: 'Screen floor',
+    elementSelector: '[data-perch-id="screen-floor"]',
+    anchorOffset: { x: -28, y: -68 },
+    allowedPoses: ['stand_idle', 'walk_left', 'walk_right', 'dance_groove', 'celebrate_verified', 'sit_idle', 'sleep'],
+    defaultForViews: [],
+  },
+};
+
+export interface PerchPlacementResult {
+  perchId: PerchTargetId;
+  x: number;
+  y: number;
+  pose: MorrowPresenceState;
+  gazeDirection: 'cursor' | 'up_thinking' | 'forward';
+  legsDangling: boolean;
+  movedAsideForObstacle: boolean;
+  consumesExtraLayoutSpace: false;
+}
+
+/**
+ * Calculates Morrow's exact perch placement from the PerchTargets registry.
+ * - On Chat: defaults to 'composer-top' with legs dangling on the top edge of the prompt box,
+ *   looking at the text cursor while typing and looking up while thinking. Zero extra layout space.
+ * - On other pages: defaults to 'panel-top-right' or 'screen-floor', respecting per-page user overrides.
+ * - Moves aside automatically when an approval sheet is open or an input near her perch is focused.
+ */
+export function computePerchPlacement(params: {
+  pageId: string;
+  rememberedPerchByPage?: Partial<Record<string, PerchTargetId>>;
+  targetRect?: { left: number; top: number; width: number; height: number } | null;
+  viewport: { width: number; height: number };
+  isTypingInComposer?: boolean;
+  isAiThinking?: boolean;
+  hasActiveApprovalSheet?: boolean;
+  isInputFocusedNearPerch?: boolean;
+  idlePoseOverride?: MorrowPresenceState;
+}): PerchPlacementResult {
+  const vw = Math.max(320, params.viewport.width || 1440);
+  const vh = Math.max(480, params.viewport.height || 900);
+
+  const remembered = params.rememberedPerchByPage?.[params.pageId];
+  let perchId: PerchTargetId =
+    remembered && PERCH_TARGETS_REGISTRY[remembered]
+      ? remembered
+      : params.pageId === 'chat'
+        ? 'composer-top'
+        : 'panel-top-right';
+
+  const spec = PERCH_TARGETS_REGISTRY[perchId];
+  let x = vw - 108;
+  let y = vh - 124;
+
+  if (params.targetRect && params.targetRect.width > 0) {
+    if (perchId === 'composer-top') {
+      // Sit on the right-side top edge of the composer with legs dangling
+      x = Math.round(params.targetRect.left + params.targetRect.width - 88 + spec.anchorOffset.x);
+      y = Math.round(params.targetRect.top + spec.anchorOffset.y);
+    } else if (perchId === 'panel-top-right') {
+      x = Math.round(params.targetRect.left + params.targetRect.width - 96 + spec.anchorOffset.x);
+      y = Math.round(params.targetRect.top + spec.anchorOffset.y);
+    } else if (perchId === 'sidebar-footer') {
+      x = Math.round(params.targetRect.left + spec.anchorOffset.x);
+      y = Math.round(params.targetRect.top + spec.anchorOffset.y);
+    } else {
+      x = Math.round(vw - 96 + spec.anchorOffset.x);
+      y = Math.round(vh + spec.anchorOffset.y);
+    }
+  } else {
+    if (perchId === 'composer-top') {
+      x = Math.round(Math.min(vw - 96, vw * 0.5 + 260));
+      y = Math.round(vh - 148);
+    } else if (perchId === 'panel-top-right') {
+      x = Math.round(vw - 104);
+      y = Math.round(vh - 118);
+    } else if (perchId === 'sidebar-footer') {
+      x = 24;
+      y = Math.round(vh - 132);
+    } else {
+      x = Math.round(vw - 104);
+      y = Math.round(vh - 84);
+    }
+  }
+
+  let movedAsideForObstacle = false;
+  if (params.hasActiveApprovalSheet) {
+    // Move aside to the open left gutter outside the centered chat column so approval text and buttons are never covered
+    const columnLeft = params.targetRect && params.targetRect.width > 0 ? params.targetRect.left : 340;
+    x = Math.max(248, Math.min(x - 180, columnLeft - 82));
+    movedAsideForObstacle = true;
+  } else if (params.isInputFocusedNearPerch && perchId !== 'composer-top') {
+    x = Math.max(16, x - 120);
+    movedAsideForObstacle = true;
+  }
+
+  // Clamp within viewport bounds
+  x = Math.max(12, Math.min(vw - 76, x));
+  y = Math.max(40, Math.min(vh - 72, y));
+
+  let gazeDirection: 'cursor' | 'up_thinking' | 'forward' = 'forward';
+  if (params.isAiThinking) {
+    gazeDirection = 'up_thinking';
+  } else if (params.isTypingInComposer) {
+    gazeDirection = 'cursor';
+  }
+
+  let pose: MorrowPresenceState =
+    params.idlePoseOverride && spec.allowedPoses.includes(params.idlePoseOverride)
+      ? params.idlePoseOverride
+      : perchId === 'composer-top'
+        ? 'sit_idle'
+        : perchId === 'screen-floor'
+          ? 'stand_idle'
+          : 'sit_idle';
+
+  if (params.isAiThinking) {
+    pose = 'think';
+  }
+
+  return {
+    perchId,
+    x,
+    y,
+    pose,
+    gazeDirection,
+    legsDangling: perchId === 'composer-top' || perchId === 'panel-top-right',
+    movedAsideForObstacle,
+    consumesExtraLayoutSpace: false,
+  };
+}
 
 

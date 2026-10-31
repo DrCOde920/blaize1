@@ -7,7 +7,18 @@
  * for IPC, Actions, PolicyGuard, MemoryLedger, Skills, Plugins, and L3xi records.
  */
 
-export type RiskLevel = 'read' | 'write' | 'sensitive' | 'money';
+export type GenericRiskClass =
+  | 'read'
+  | 'write'
+  | 'destructive'
+  | 'external_send'
+  | 'credential'
+  | 'spend'
+  | 'system';
+
+// RiskLevel aliases GenericRiskClass with backward-compatible legacy aliases ('sensitive' -> credential, 'money' -> spend)
+export type RiskLevel = GenericRiskClass | 'sensitive' | 'money';
+
 export type ActionSource = 'user' | 'skill' | 'model' | 'plugin';
 export type BrowserProfileId = 'personal' | 'work' | 'testing';
 
@@ -23,8 +34,86 @@ export type ComputerActionType =
   | 'wait'
   | 'navigate'
   | 'extract_a11y'
+  | 'file_read'
+  | 'file_write'
+  | 'file_delete'
+  | 'run_command'
+  | 'draft_action'
   | 'draft_money'
   | 'plugin_call';
+
+/**
+ * Standard Core Verifier Strategy IDs:
+ * 1. dom_assertion: verifies expected selector or accessibility text exists
+ * 2. url_check: verifies browser URL or domain matches expected pattern
+ * 3. file_exists_hash: verifies file existence and cryptographic content hash in workspace
+ * 4. test_suite_pass: verifies test command exited 0 with all assertions passed
+ * 5. screenshot_check: verifies visual capture evidence was captured and spooled
+ * 6. schedule_preview: verifies next run times, timezone, and cron validity
+ */
+export type CoreVerifierStrategyId =
+  | 'dom_assertion'
+  | 'url_check'
+  | 'file_exists_hash'
+  | 'test_suite_pass'
+  | 'screenshot_check'
+  | 'schedule_preview';
+
+export type VerifierStrategyId = CoreVerifierStrategyId | string;
+
+export interface VerifierExecutionContext {
+  toolName: string;
+  target: string;
+  inputPayload?: unknown;
+  outputPayload?: unknown;
+  expectedState?: string;
+  workspaceRoot?: string;
+  domSnapshot?: string;
+  currentUrl?: string;
+  evidenceHash?: string;
+  customParams?: Record<string, unknown>;
+}
+
+export interface VerifierExecutionResult {
+  status: 'pass' | 'fail' | 'uncertain';
+  reason: string;
+  evidenceHash: string;
+  details?: Record<string, unknown>;
+}
+
+export interface VerifierStrategy {
+  id: VerifierStrategyId;
+  name: string;
+  description: string;
+  verify: (context: VerifierExecutionContext) => VerifierExecutionResult;
+}
+
+/**
+ * PolicyPack:
+ * A plugin may ship a PolicyPack to add extra deny/approval rules, domain allowlists,
+ * and spend caps. Active only while the plugin is installed and enabled; can only tighten core rules.
+ */
+export interface PolicyPackRule {
+  id: string;
+  description: string;
+  matches: (proposal: ActionProposal) => boolean;
+  reason: string;
+  targetRisk?: GenericRiskClass;
+}
+
+export interface PolicyPack {
+  id: string;
+  name: string;
+  pluginId: string;
+  version: string;
+  description: string;
+  domainAllowlist?: string[];
+  readOnlyDomains?: string[];
+  spendCapUsd?: number;
+  blockedUiPatterns?: string[];
+  extraDenyRules?: PolicyPackRule[];
+  extraApprovalRules?: PolicyPackRule[];
+}
 
 export interface ResolvedElement {
   tagName: string;
@@ -274,7 +363,8 @@ export interface CompiledSkill {
 export interface PluginToolSchema {
   name: string;
   description: string;
-  risk: RiskLevel;
+  risk: GenericRiskClass | RiskLevel;
+  verifier: VerifierStrategyId;
   inputSchema: Record<string, string>;
   outputSchema: Record<string, string>;
   loadedInContext: boolean;
@@ -287,21 +377,28 @@ export interface PluginManifest {
   publisher: string;
   compatibility: string;
   description: string;
+  category?: string;
   processIsolation: 'restricted_worker';
   capabilityToken: string;
   status: 'active' | 'disabled' | 'blocked_by_guard';
   permissions: {
     domains: string[];
     folders: string[];
-    canPrepareMoneyDrafts: boolean;
+    canPrepareMoneyDrafts?: boolean;
+    scopes?: string[];
   };
   resourceNeeds: {
     maxMemoryMb: number;
     timeoutMs: number;
   };
+  policyPack?: PolicyPack;
+  verifiers?: VerifierStrategy[];
   tools: PluginToolSchema[];
 }
 
+/**
+ * UniversalFinancialRecord and MoneyActionDraft (Provided by L3xi Plugin)
+ */
 export interface UniversalFinancialRecord {
   id: string;
   date: string; // ISO YYYY-MM-DD
@@ -336,6 +433,16 @@ export interface MoneyActionDraft {
   environmentLabel: 'SIMULATION' | 'READ_ONLY_REAL_ACCOUNT';
 }
 
+export const VALID_RISK_CLASSES: GenericRiskClass[] = [
+  'read',
+  'write',
+  'destructive',
+  'external_send',
+  'credential',
+  'spend',
+  'system',
+];
+
 /**
  * Lightweight, zero-allocation runtime validator for ActionProposal & PluginManifest boundaries
  */
@@ -348,7 +455,17 @@ export function validateActionProposal(input: unknown): {
     return { success: false, error: 'ActionProposal must be a non-null object' };
   }
   const obj = input as Record<string, unknown>;
-  const validRisks: RiskLevel[] = ['read', 'write', 'sensitive', 'money'];
+  const validRisks: RiskLevel[] = [
+    'read',
+    'write',
+    'destructive',
+    'external_send',
+    'credential',
+    'spend',
+    'system',
+    'sensitive',
+    'money',
+  ];
   const validSources: ActionSource[] = ['user', 'skill', 'model', 'plugin'];
 
   if (typeof obj.id !== 'string' || obj.id.length === 0) {

@@ -689,6 +689,178 @@ test('UI/UX PROMPT B.3: mapModelActivityToPresence maps all 14 events, 5 persona
   assert.equal(SIMULATED_PLATFORM_BRIDGE.length >= 5, true);
 });
 
+test('Chair Stage Coordinates & Crossfade Transition: detects activeView === chat, uses DOM rect or fallback math, and crossfades via sit_down', async () => {
+  const {
+    calculateChairStageTargetCoordinates,
+    computeCrossfadeTransitionToChair,
+  } = await import('./index');
+
+  // 1. When activeView is 'chat' and DOM stageRect is measured
+  const measuredCoords = calculateChairStageTargetCoordinates({
+    activeView: 'chat',
+    stageRect: { left: 240, top: 44, width: 1200, height: 192 },
+    viewportWidth: 1440,
+    viewportHeight: 900,
+    sidebarCollapsed: false,
+    chatArtifactDrawerOpen: false,
+  });
+  assert.equal(measuredCoords.isSeatedInChat, true);
+  assert.equal(measuredCoords.source, 'dom_stage_rect');
+  assert.equal(measuredCoords.centerX, 840);
+  assert.equal(measuredCoords.chairTopY, 50);
+  assert.equal(measuredCoords.companionTopY, 44);
+
+  // 2. When activeView is 'chat' and Artifact drawer is open (fallback math)
+  const fallbackWithDrawer = calculateChairStageTargetCoordinates({
+    activeView: 'chat',
+    stageRect: null,
+    viewportWidth: 1440,
+    viewportHeight: 900,
+    sidebarCollapsed: false,
+    chatArtifactDrawerOpen: true,
+    artifactDrawerWidthPx: 500,
+  });
+  assert.equal(fallbackWithDrawer.isSeatedInChat, true);
+  assert.equal(fallbackWithDrawer.source, 'layout_fallback');
+  assert.equal(fallbackWithDrawer.centerX, 590);
+
+  // 3. When activeView is 'projects' -> corner perch
+  const cornerCoords = calculateChairStageTargetCoordinates({
+    activeView: 'projects',
+    viewportWidth: 1440,
+    viewportHeight: 900,
+  });
+  assert.equal(cornerCoords.isSeatedInChat, false);
+  assert.equal(cornerCoords.source, 'corner_perch');
+
+  // 4. Crossfade transition phases: walking_to_chat -> sitting_down -> seated_in_chat
+  const walkSnap = computeCrossfadeTransitionToChair({
+    phase: 'walking_to_chat',
+    fromPosition: { x: 1368, y: 724 },
+    targetPosition: { x: 840, y: 76 },
+  });
+  assert.equal(walkSnap.opacity, 0.78);
+  assert.equal(walkSnap.presenceState, 'walk_left');
+  assert.equal(walkSnap.rigAction, 'run');
+  assert.ok(walkSnap.offsetX > 0);
+
+  const sitDownSnap = computeCrossfadeTransitionToChair({
+    phase: 'sitting_down',
+    targetPosition: { x: 840, y: 76 },
+  });
+  assert.equal(sitDownSnap.opacity, 0.94);
+  assert.equal(sitDownSnap.scaleY, 0.93);
+  assert.equal(sitDownSnap.presenceState, 'sit_down');
+  assert.equal(sitDownSnap.rigAction, 'sit');
+
+  const seatedSnap = computeCrossfadeTransitionToChair({
+    phase: 'seated_in_chat',
+    targetPosition: { x: 840, y: 76 },
+  });
+  assert.equal(seatedSnap.opacity, 1);
+  assert.equal(seatedSnap.scaleY, 1);
+  assert.equal(seatedSnap.presenceState, 'sit_idle');
+});
+
+test('Argon Master Prompt: PlatformAdapterContract, FEATURE_WIRING_INVENTORY, and calculateMorrowNookPlacement enforce honest labels and compact Chat Nook dimensions', async () => {
+  const {
+    WEB_PREVIEW_PLATFORM_ADAPTER,
+    ELECTRON_DESKTOP_PLATFORM_ADAPTER,
+    FEATURE_WIRING_INVENTORY,
+    calculateMorrowNookPlacement,
+    getActivePlatformAdapter,
+  } = await import('./index');
+
+  assert.equal(getActivePlatformAdapter(false).adapterId, 'WebPreviewPlatformAdapter');
+  assert.equal(
+    WEB_PREVIEW_PLATFORM_ADAPTER.capabilities.companionOverlay.honestStatusBadge,
+    'Web Preview Overlay (Simulated Always-on-Top)'
+  );
+  assert.equal(getActivePlatformAdapter(true).adapterId, 'ElectronDesktopPlatformAdapter');
+  assert.equal(ELECTRON_DESKTOP_PLATFORM_ADAPTER.isNativeElectronShell, true);
+  assert.ok(FEATURE_WIRING_INVENTORY.length >= 14);
+
+  // Expanded Chat Nook on wide desktop (1440x900) stays compact (132px, <= 160px)
+  const nookWide = calculateMorrowNookPlacement({
+    activeView: 'chat',
+    viewportWidth: 1440,
+    viewportHeight: 900,
+    nookCollapsedPreference: false,
+    chatArtifactDrawerOpen: false,
+  });
+  assert.equal(nookWide.mode, 'chat_nook_expanded');
+  assert.equal(nookWide.autoCollapsedForNarrowViewport, false);
+  assert.equal(nookWide.nookHeightPx, 132);
+
+  // Narrow viewport (< 760px available width) auto-collapses Morrow's Nook to 36px strip
+  const nookNarrow = calculateMorrowNookPlacement({
+    activeView: 'chat',
+    viewportWidth: 720,
+    viewportHeight: 768,
+    nookCollapsedPreference: false,
+    chatArtifactDrawerOpen: false,
+  });
+  assert.equal(nookNarrow.mode, 'chat_nook_collapsed');
+  assert.equal(nookNarrow.autoCollapsedForNarrowViewport, true);
+  assert.equal(nookNarrow.nookHeightPx, 36);
+});
+
+test('PerchTargets registry places Morrow on composer-top in Chat with legs dangling, tracks cursor/thinking gaze, remembers per-page perches, and moves aside for approval sheet', async () => {
+  const { PERCH_TARGETS_REGISTRY, computePerchPlacement } = await import('./index');
+
+  assert.ok(PERCH_TARGETS_REGISTRY['composer-top']);
+  assert.ok(PERCH_TARGETS_REGISTRY['panel-top-right']);
+  assert.ok(PERCH_TARGETS_REGISTRY['sidebar-footer']);
+  assert.ok(PERCH_TARGETS_REGISTRY['screen-floor']);
+
+  // 1. Chat default perch is composer-top with legs dangling and zero extra layout space
+  const chatPerch = computePerchPlacement({
+    pageId: 'chat',
+    viewport: { width: 1440, height: 900 },
+    targetRect: { left: 340, top: 760, width: 760, height: 88 },
+    isTypingInComposer: true,
+  });
+  assert.equal(chatPerch.perchId, 'composer-top');
+  assert.equal(chatPerch.legsDangling, true);
+  assert.equal(chatPerch.gazeDirection, 'cursor');
+  assert.equal(chatPerch.consumesExtraLayoutSpace, false);
+
+  // 2. Looking up while AI is thinking
+  const thinkingPerch = computePerchPlacement({
+    pageId: 'chat',
+    viewport: { width: 1440, height: 900 },
+    targetRect: { left: 340, top: 760, width: 760, height: 88 },
+    isAiThinking: true,
+  });
+  assert.equal(thinkingPerch.gazeDirection, 'up_thinking');
+  assert.equal(thinkingPerch.pose, 'think');
+
+  // 3. Other pages default to panel-top-right and honor per-page remembered perch
+  const codeDefault = computePerchPlacement({
+    pageId: 'vscode_ide',
+    viewport: { width: 1440, height: 900 },
+  });
+  assert.equal(codeDefault.perchId, 'panel-top-right');
+
+  const codeRemembered = computePerchPlacement({
+    pageId: 'vscode_ide',
+    rememberedPerchByPage: { vscode_ide: 'screen-floor' },
+    viewport: { width: 1440, height: 900 },
+  });
+  assert.equal(codeRemembered.perchId, 'screen-floor');
+  assert.equal(codeRemembered.pose, 'stand_idle');
+
+  // 4. Moves aside when approval sheet is active
+  const movedAside = computePerchPlacement({
+    pageId: 'chat',
+    viewport: { width: 1440, height: 900 },
+    targetRect: { left: 340, top: 760, width: 760, height: 88 },
+    hasActiveApprovalSheet: true,
+  });
+  assert.equal(movedAside.movedAsideForObstacle, true);
+  assert.ok(movedAside.x < chatPerch.x);
+});
+
 
 
 

@@ -45,6 +45,7 @@ import {
   analyzeCodeWithESLintAddon,
   formatCodeWithPrettierAddon,
   insertReactSnippetAddon,
+  proposeIdePatchWithDiff,
   searchVSCodeMarketplace,
 } from '../packages/workspace';
 
@@ -85,7 +86,7 @@ export const VSCodeIdeView: React.FC<VSCodeIdeViewProps> = ({
 }) => {
   const [activityTab, setActivityTab] = useState<ActivityTab>('explorer');
   const [sidebarOpen, setSidebarOpen] = useState<boolean>(true);
-  const [bottomPanelOpen, setBottomPanelOpen] = useState<boolean>(true);
+  const [bottomPanelOpen, setBottomPanelOpen] = useState<boolean>(false);
   const [bottomTab, setBottomTab] = useState<BottomPanelTab>('terminal');
   const [livePreviewOpen, setLivePreviewOpen] = useState<boolean>(false);
   const [commandMenuOpen, setCommandMenuOpen] = useState<boolean>(false);
@@ -133,6 +134,12 @@ export const VSCodeIdeView: React.FC<VSCodeIdeViewProps> = ({
     'Type a command or click "Run File" to execute the active module.',
   ]);
   const [terminalCommand, setTerminalCommand] = useState<string>('');
+
+  // AI Patch Diff & Rollback Checkpoint State
+  const [pendingPatchProposal, setPendingPatchProposal] = useState<ReturnType<
+    typeof proposeIdePatchWithDiff
+  > | null>(null);
+  const [fileCheckpoints, setFileCheckpoints] = useState<Record<string, string>>({});
 
   const activeFile = files.find((f) => f.id === activeFileId) || files[0];
 
@@ -347,6 +354,7 @@ export const VSCodeIdeView: React.FC<VSCodeIdeViewProps> = ({
   return (
     <div
       data-testid="vscode-ide-workbench"
+      data-perch-id="panel-top-right"
       className="h-full w-full flex flex-col bg-[#181818] text-[#cccccc] select-none overflow-hidden font-sans"
     >
       {/* COMPACT VS CODE TOP TOOLBAR */}
@@ -371,23 +379,61 @@ export const VSCodeIdeView: React.FC<VSCodeIdeViewProps> = ({
         </div>
 
         {/* Primary Actions + Overflow Command Menu */}
-        <div className="flex items-center gap-1.5 relative">
+        <div className="flex items-center gap-1.5 relative shrink-0">
           {hasPrettier && (
             <button
               type="button"
               onClick={handleFormatDocument}
-              className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-[#2a2d2e] hover:bg-[#37373d] text-[11px] text-amber-300"
+              className="inline-flex items-center gap-1 px-2 py-1 rounded bg-[#2a2d2e] hover:bg-[#37373d] text-[11px] text-amber-300 whitespace-nowrap"
               title="Format Document with Prettier (esbenp.prettier-vscode)"
             >
               <Wand2 className="w-3 h-3" />
-              <span>Format (Prettier)</span>
+              <span>Format</span>
+            </button>
+          )}
+
+          <button
+            type="button"
+            data-testid="ide-propose-patch-btn"
+            onClick={() => {
+              if (!activeFile) return;
+              const proposal = proposeIdePatchWithDiff(
+                activeFile,
+                'Add PolicyGuard integer-cent telemetry verification header'
+              );
+              setPendingPatchProposal(proposal);
+            }}
+            className="inline-flex items-center gap-1 px-2 py-1 rounded bg-sky-500/20 border border-sky-500/40 text-sky-300 hover:bg-sky-500/30 text-[11px] font-medium whitespace-nowrap"
+            title="Preview AI Code Patch Diff before applying"
+          >
+            <Sparkles className="w-3 h-3" />
+            <span>AI Patch Diff</span>
+          </button>
+
+          {activeFile && fileCheckpoints[activeFile.id] && (
+            <button
+              type="button"
+              data-testid="ide-restore-checkpoint-btn"
+              onClick={() => {
+                const prevContent = fileCheckpoints[activeFile.id];
+                if (!prevContent) return;
+                onUpdateFileContent(activeFile.id, prevContent);
+                setTerminalLines((prev) => [
+                  ...prev,
+                  `[Rollback Checkpoint] Restored ${activeFile.path} to pre-patch checkpoint.`,
+                ]);
+              }}
+              className="inline-flex items-center gap-1 px-2 py-1 rounded bg-amber-500/20 border border-amber-500/40 text-amber-300 text-[11px] whitespace-nowrap"
+              title="One-click rollback to pre-patch file checkpoint"
+            >
+              <span>Rollback</span>
             </button>
           )}
 
           <button
             type="button"
             onClick={handleRunActiveFile}
-            className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-[11px]"
+            className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-[11px] whitespace-nowrap"
           >
             <Play className="w-3 h-3" />
             <span>Run File</span>
@@ -413,7 +459,7 @@ export const VSCodeIdeView: React.FC<VSCodeIdeViewProps> = ({
                 `[Artifacts Bridge] Published ${activeFile.path} to Project Artifacts.`,
               ]);
             }}
-            className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-amber-400/20 border border-amber-400/40 text-amber-300 hover:bg-amber-400/30 text-[11px] font-semibold"
+            className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-amber-400/20 border border-amber-400/40 text-amber-300 hover:bg-amber-400/30 text-[11px] font-semibold whitespace-nowrap"
           >
             <Layers className="w-3 h-3" />
             <span>Save as Artifact</span>
@@ -423,7 +469,7 @@ export const VSCodeIdeView: React.FC<VSCodeIdeViewProps> = ({
             <button
               type="button"
               onClick={() => setLivePreviewOpen((v) => !v)}
-              className={`inline-flex items-center gap-1 px-2.5 py-1 rounded text-[11px] font-medium ${
+              className={`inline-flex items-center gap-1 px-2 py-1 rounded text-[11px] font-medium whitespace-nowrap ${
                 livePreviewOpen
                   ? 'bg-sky-500/20 text-sky-300 border border-sky-500/40'
                   : 'bg-[#2a2d2e] text-stone-300 hover:bg-[#37373d]'
@@ -433,6 +479,27 @@ export const VSCodeIdeView: React.FC<VSCodeIdeViewProps> = ({
               <span>Live Server</span>
             </button>
           )}
+
+          <button
+            type="button"
+            data-testid="ide-extensions-button"
+            onClick={() => {
+              if (sidebarOpen && activityTab === 'extensions') {
+                setActivityTab('explorer');
+              } else {
+                setSidebarOpen(true);
+                setActivityTab('extensions');
+              }
+            }}
+            className={`inline-flex items-center gap-1 px-2.5 py-1 rounded text-[11px] font-medium whitespace-nowrap ${
+              sidebarOpen && activityTab === 'extensions'
+                ? 'bg-sky-500/20 text-sky-300 border border-sky-500/40'
+                : 'bg-[#2a2d2e] text-stone-300 hover:bg-[#37373d]'
+            }`}
+          >
+            <Puzzle className="w-3 h-3" />
+            <span>Extensions</span>
+          </button>
 
           {/* Panel Layout Toggles */}
           <button
@@ -524,7 +591,7 @@ export const VSCodeIdeView: React.FC<VSCodeIdeViewProps> = ({
             { id: 'git' as ActivityTab, label: 'Source Control', icon: GitBranch },
             {
               id: 'extensions' as ActivityTab,
-              label: 'VS Code Marketplace Extensions',
+              label: 'Extensions (Open VSX)',
               icon: Puzzle,
               badge: extensions.filter((e) => e.installed).length,
             },
@@ -764,15 +831,15 @@ export const VSCodeIdeView: React.FC<VSCodeIdeViewProps> = ({
                 className="flex-1 flex flex-col overflow-hidden"
               >
                 <div className="p-3 border-b border-[#2b2b2b] space-y-2">
-                  <div className="text-[11px] font-bold uppercase tracking-wider text-amber-400 flex items-center justify-between">
-                    <span>Extensions Marketplace</span>
-                    <span className="text-[10px] font-mono text-emerald-400">OpenVSX + MS</span>
+                  <div className="text-[11px] font-semibold text-stone-200 flex items-center justify-between">
+                    <span>Extensions</span>
+                    <span className="text-[11px] text-sky-400">Open VSX</span>
                   </div>
 
                   <input
                     type="text"
-                    aria-label="Search extensions in Marketplace"
-                    placeholder="Search Marketplace (prettier, dracula, eslint)..."
+                    aria-label="Search Open VSX extensions"
+                    placeholder="Search Open VSX extensions (prettier, dracula, eslint)..."
                     value={extSearchQuery}
                     onChange={(e) => setExtSearchQuery(e.target.value)}
                     className="w-full px-2.5 py-1.5 rounded bg-[#141414] border border-[#3c3c3c] focus:border-sky-500 text-xs text-white outline-none"
@@ -848,10 +915,31 @@ export const VSCodeIdeView: React.FC<VSCodeIdeViewProps> = ({
                         <p className="text-[11px] text-stone-300 line-clamp-2">{ext.description}</p>
 
                         <div className="flex items-center justify-between pt-1">
-                          <span className="inline-flex items-center gap-1 text-[10px] text-amber-300">
-                            <Star className="w-3 h-3 fill-amber-400 text-amber-400" />
-                            <span>{ext.rating}</span>
-                          </span>
+                          <div className="flex items-center gap-1.5">
+                            <span className="inline-flex items-center gap-1 text-[10px] text-amber-300">
+                              <Star className="w-3 h-3 fill-amber-400 text-amber-400" />
+                              <span>{ext.rating}</span>
+                            </span>
+                            <span
+                              className={`px-1.5 py-0.5 rounded font-mono text-[9px] ${
+                                ext.contributes.formatter ||
+                                ext.contributes.linter ||
+                                ext.contributes.editorTheme ||
+                                ext.contributes.livePreview ||
+                                ext.contributes.snippets
+                                  ? 'bg-emerald-500/15 text-emerald-300'
+                                  : 'bg-stone-800 text-stone-400'
+                              }`}
+                            >
+                              {ext.contributes.formatter ||
+                              ext.contributes.linter ||
+                              ext.contributes.editorTheme ||
+                              ext.contributes.livePreview ||
+                              ext.contributes.snippets
+                                ? 'Built-in Adapter'
+                                : 'Catalog Metadata'}
+                            </span>
+                          </div>
 
                           <div className="flex items-center gap-1.5">
                             {ext.installed && (
@@ -937,6 +1025,53 @@ export const VSCodeIdeView: React.FC<VSCodeIdeViewProps> = ({
             <div className="px-4 py-1 bg-[#1b2028] border-b border-[#2b2b2b] flex items-center justify-between text-[11px] font-mono text-stone-400 shrink-0">
               <span>GitLens · Verified by Morrow &amp; PolicyGuard · {activeFile.path}</span>
               <span className="text-emerald-400">sha256:verified · 0 uncommitted policy drifts</span>
+            </div>
+          )}
+
+          {/* AI Patch Diff Preview Banner (Before Mutating File) */}
+          {pendingPatchProposal && activeFile && (
+            <div
+              data-testid="ide-patch-diff-banner"
+              className="p-3 bg-[#161d2a] border-b border-sky-500/40 space-y-2 text-xs shrink-0"
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="font-mono text-[11px] text-sky-300">
+                  Proposed AI Patch for <strong>{activeFile.path}</strong> · +
+                  {pendingPatchProposal.addedLinesCount} lines ·{' '}
+                  {pendingPatchProposal.lintClean ? 'ESLint Clean' : 'Lint Warnings'}
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    data-testid="ide-apply-patch-btn"
+                    onClick={() => {
+                      setFileCheckpoints((prev) => ({
+                        ...prev,
+                        [activeFile.id]: pendingPatchProposal.beforeContent,
+                      }));
+                      onUpdateFileContent(activeFile.id, pendingPatchProposal.proposedContent);
+                      setTerminalLines((prev) => [
+                        ...prev,
+                        `[AI Patch Applied] Updated ${activeFile.path} (${pendingPatchProposal.summary}).`,
+                      ]);
+                      setPendingPatchProposal(null);
+                    }}
+                    className="px-3 py-1 rounded bg-emerald-500 text-slate-950 font-semibold text-[11px]"
+                  >
+                    Apply Patch &amp; Save Checkpoint
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPendingPatchProposal(null)}
+                    className="px-2.5 py-1 rounded border border-stone-600 text-stone-300 text-[11px]"
+                  >
+                    Discard
+                  </button>
+                </div>
+              </div>
+              <pre className="p-2.5 rounded bg-black/50 border border-stone-800 font-mono text-[11px] text-emerald-300 max-h-28 overflow-y-auto whitespace-pre-wrap">
+                {`--- a/${activeFile.path}\n+++ b/${activeFile.path}\n+ /** @verified-patch ${pendingPatchProposal.summary} */`}
+              </pre>
             </div>
           )}
 

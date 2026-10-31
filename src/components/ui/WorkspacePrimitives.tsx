@@ -364,23 +364,23 @@ export const FocusedApprovalSheet: React.FC<FocusedApprovalSheetProps> = ({
     <div
       role="dialog"
       aria-modal="false"
-      aria-label="PolicyGuard Human Approval Required"
+      aria-label="Needs your approval"
       data-testid="policyguard-approval-sheet"
-      className={`rounded-2xl border p-4 space-y-3 shadow-xl ${
+      className={`rounded-2xl border p-4 space-y-3 shadow-xl transition-all duration-150 ${
         isLight
-          ? 'bg-amber-50/90 border-amber-400 text-stone-900'
-          : 'bg-[#191510] border-amber-500/60 text-stone-100'
+          ? 'bg-amber-50 border-amber-300 text-stone-900'
+          : 'bg-stone-900 border-amber-500/50 text-stone-100'
       }`}
     >
       <div className="flex flex-wrap items-start justify-between gap-2">
         <div className="flex items-center gap-2">
           <ShieldAlert className="w-4 h-4 text-amber-400 shrink-0" />
           <div>
-            <div className="text-xs font-bold text-amber-300">
-              Human Approval Required · {approval.title}
+            <div className="text-xs font-semibold text-amber-300">
+              Needs your approval · {approval.title}
             </div>
-            <div className="text-[11px] text-stone-400 font-mono mt-0.5">
-              Target: {approval.target} · Risk: {approval.risk.toUpperCase()}
+            <div className="text-[11px] text-stone-400 mt-0.5">
+              Destination: {approval.target}
             </div>
           </div>
         </div>
@@ -389,9 +389,9 @@ export const FocusedApprovalSheet: React.FC<FocusedApprovalSheetProps> = ({
           type="button"
           onClick={() => setShowEvidence((v) => !v)}
           aria-expanded={showEvidence}
-          className="inline-flex items-center gap-1 text-[11px] font-mono text-amber-300 hover:underline"
+          className="inline-flex items-center gap-1 text-[11px] text-stone-400 hover:text-stone-200 hover:underline"
         >
-          <span>{showEvidence ? 'Hide policy details' : 'Evidence & policy checks'}</span>
+          <span>{showEvidence ? 'Hide details' : 'Show details'}</span>
           {showEvidence ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
         </button>
       </div>
@@ -399,10 +399,10 @@ export const FocusedApprovalSheet: React.FC<FocusedApprovalSheetProps> = ({
       <p className="text-xs leading-relaxed text-stone-300">{approval.reason}</p>
 
       {showEvidence && (
-        <div className="p-3 rounded-xl bg-black/40 border border-stone-800 font-mono text-[11px] text-stone-300 space-y-1">
-          <div>Evidence Hash: {approval.evidenceHash}</div>
-          <div>Standing Rule: All money &amp; external write actions require explicit user confirmation.</div>
-          <div>Financial Mode: Read-Only / Simulation Draft Only (no unattended wire transfers).</div>
+        <div className="p-3 rounded-xl bg-black/30 border border-stone-800 text-[11px] text-stone-300 space-y-1">
+          <div>Rule check: All money and external write actions require your approval.</div>
+          <div>Mode: Simulation draft only (no live bank transfer is executed without confirmation).</div>
+          <div className="font-mono text-[10px] text-stone-400">Receipt ID: {approval.evidenceHash}</div>
         </div>
       )}
 
@@ -411,16 +411,9 @@ export const FocusedApprovalSheet: React.FC<FocusedApprovalSheetProps> = ({
           <button
             type="button"
             onClick={() => onApprove('local_sheet')}
-            className="px-4 py-1.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-semibold text-xs transition-colors"
+            className="px-4 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-medium text-xs transition-colors"
           >
             Approve
-          </button>
-          <button
-            type="button"
-            onClick={() => (onSimulateOnly ? onSimulateOnly() : onApprove('local_sheet'))}
-            className="px-3.5 py-1.5 rounded-xl border border-amber-400/50 bg-amber-400/15 hover:bg-amber-400/25 text-amber-200 font-semibold text-xs transition-colors"
-          >
-            Simulation Only
           </button>
           <button
             type="button"
@@ -429,11 +422,18 @@ export const FocusedApprovalSheet: React.FC<FocusedApprovalSheetProps> = ({
           >
             Reject
           </button>
+          <button
+            type="button"
+            onClick={() => (onSimulateOnly ? onSimulateOnly() : onApprove('local_sheet'))}
+            className="px-3.5 py-1.5 rounded-xl border border-stone-700 hover:bg-stone-800 text-stone-300 font-medium text-xs transition-colors"
+          >
+            Simulation only
+          </button>
         </div>
 
         <span className="text-[11px] text-stone-400 flex items-center gap-1">
           <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
-          <span>Logged to SHA-256 Audit Ledger</span>
+          <span>Recorded in Ledger</span>
         </span>
       </div>
     </div>

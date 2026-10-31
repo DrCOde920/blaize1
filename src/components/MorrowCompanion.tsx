@@ -2,28 +2,41 @@
  * @license
  * SPDX-License-Identifier: Apache-2.0
  *
- * Morrow 2D Companion —
- * 1. Top-Center Chair Stage in the Chat Panel:
- *    Whenever the Chat panel is open (`isChatViewOpen === true`), Morrow walks to and sits on
- *    her executive chair at the top center of the Chat column. Supports a space-efficient
- *    Compact Presence Strip toggle for deep conversations.
- * 2. Contextual Pop-out Chat Box on Click:
- *    Clicking Morrow from any workspace opens the shared conversation pop-out right beside her.
+ * Morrow 2D Companion — PerchTargets Edition (No Chair Stage):
+ * 1. Chat page ('composer-top'): Morrow sits directly on the top edge of the composer
+ *    with legs dangling, looking at the text cursor while typing and looking up while thinking.
+ *    Consumes zero extra vertical layout space.
+ * 2. Other pages ('panel-top-right', 'screen-floor', 'sidebar-footer'):
+ *    She perches on the top-right edge of the content panel or stands on the floor line.
+ *    Users can drag her or move her to any perch, remembered per page in localStorage.
+ * 3. Obstacle Avoidance: Moves aside automatically when the approval sheet is open or
+ *    nearby inputs are focused.
+ * 4. Click Popover: Header with name, status chip (icon + plain text), gear icon at top right;
+ *    message list; inline approval cards; prompt box with mic and send. Esc or second click closes.
+ * 5. Collapse to Status Dot: Menu option or Alt+H collapses her to a subtle status dot.
+ * 6. Natural Idle Ladder & Activity Mapping: No manual animation buttons anywhere.
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   CheckCircle2,
-  ChevronDown,
-  ChevronUp,
-  MessageSquare,
+  CircleDot,
+  Compass,
+  Mic,
   Send,
-  ShieldCheck,
-  SlidersHorizontal,
+  Settings,
+  ShieldAlert,
   Sparkles,
   Volume2,
+  VolumeX,
   Wrench,
   X,
+  Video,
+  Pause,
+  Play,
+  Square,
+  Flag,
+  MessageSquarePlus,
 } from 'lucide-react';
 import {
   MorrowState,
@@ -39,7 +52,11 @@ import {
   MissionEngineActivityEvent,
   MorrowAnimationAction,
   MorrowPresenceState,
+  PERCH_TARGETS_REGISTRY,
+  PerchTargetId,
   PRESENCE_STATE_USAGE_MAP,
+  computePerchPlacement,
+  computePopoverPlacement,
   mapModelActivityToPresence,
 } from '../packages/living';
 import { MorrowLive2DRig } from './MorrowLive2DRig';
@@ -47,7 +64,6 @@ import { MorrowLive2DRig } from './MorrowLive2DRig';
 export type HubNavigationTarget =
   | 'mission_control'
   | 'blaize_browser'
-  | 'l3xi_finance'
   | 'trust_ledger'
   | 'evals_sleep';
 
@@ -84,6 +100,7 @@ interface MorrowCompanionProps {
   } | null;
   onApproveAction: (channel: 'local_sheet' | 'telegram_phone') => void;
   onRejectAction: () => void;
+  onSimulateOnlyAction?: () => void;
   onRecordUserCorrection: (correctionText: string, promoteToRule: boolean) => void;
   onSubmitVoiceMission: (transcript: string) => void;
   companionName?: string;
@@ -98,6 +115,8 @@ interface MorrowCompanionProps {
   onChangeLive2DExpression?: (expr: Live2DExpressionId) => void;
   activeLive2DProportion?: Live2DProportionMode;
   onChangeLive2DProportion?: (mode: Live2DProportionMode) => void;
+  voiceEnabled?: boolean;
+  onToggleVoice?: () => void;
   isPlayingMusic?: boolean;
   onToggleMusic?: () => void;
   onOpenStudioFileManager?: () => void;
@@ -110,241 +129,302 @@ interface MorrowCompanionProps {
   onToggleUiTheme?: () => void;
   missionActivityEvent?: MissionEngineActivityEvent;
   onStopActiveMission?: () => void;
-  /** Whether the main Chat workspace is currently open */
+  activeView?: string;
   isChatViewOpen?: boolean;
-  /** Whether the Chat stage is collapsed into a compact presence strip */
   compactChatStage?: boolean;
   onToggleCompactChatStage?: () => void;
-  /** Whether the left navigation sidebar is collapsed */
   sidebarCollapsed?: boolean;
-  /** Whether the right-hand Artifact Split Drawer is open in Chat */
   chatArtifactDrawerOpen?: boolean;
-  /** Current width of the right-hand Artifact Split Drawer in px */
   artifactDrawerWidthPx?: number;
-  /** Callback when clicking "Open Full Chat" from outside Chat */
   onJumpToChat?: () => void;
-  /** Live messages from the active conversation thread for the Pop-out Chat Box */
+  onOpenSoulView?: () => void;
+  onOpenSettingsSection?: (section: string) => void;
   chatMessages?: CompanionChatTurnMessage[];
-  /** Callback to send a chat message from the Pop-out Chat Box */
   onSendChatMessage?: (text: string) => void;
-  /** Whether AI is currently thinking/coordinating tools */
   isAiThinking?: boolean;
-  /** External customize modal trigger */
+  isTypingInComposer?: boolean;
   customizeOpen?: boolean;
   setCustomizeOpen?: (open: boolean) => void;
+  screenAwarenessMode?: 'off' | 'ask' | 'recording';
+  onChangeScreenAwarenessMode?: (mode: 'off' | 'ask' | 'recording') => void;
+  isRecordingSkill?: boolean;
+  isRecordingPaused?: boolean;
+  recordingElapsedSec?: number;
+  activeRecorderSourceLabel?: string;
+  onOpenRecordConsent?: () => void;
+  onPauseResumeRecording?: () => void;
+  onStopAndReviewRecording?: () => void;
+  onAddRecordingNote?: (note: string) => void;
+  onMarkRecordingCheckpoint?: () => void;
+  characterParametricState?: {
+    scalePct: number;
+    opacityPct: number;
+    speedMultiplier: number;
+    position: string;
+    palette: {
+      hairColor: string;
+      accentBraidColor: string;
+      jacketColor: string;
+      topColor: string;
+      eyeColor: string;
+    };
+    accessories: {
+      headphones: boolean;
+      starClips: boolean;
+      hoopEarrings: boolean;
+      neckChains: boolean;
+      glasses: boolean;
+    };
+  };
 }
+
+const PERCH_STORAGE_KEY = 'blaize_perch_by_page_v1';
+const DOT_COLLAPSED_STORAGE_KEY = 'blaize_morrow_collapsed_dot_v1';
 
 export const MorrowCompanion: React.FC<MorrowCompanionProps> = ({
   morrowState,
+  focusMode,
+  setFocusMode,
   pendingApproval,
   onApproveAction,
   onRejectAction,
+  onSimulateOnlyAction,
   onSubmitVoiceMission,
   companionName = 'Morrow',
   onChangeCompanionName,
   activeLookId = 'look-sage-emerald',
   onChangeLookId,
-  activeAnimAction = 'idle',
-  onChangeAnimAction,
   activeLive2DProp = 'none',
   onChangeLive2DProp,
   activeLive2DExpression = 'default',
-  onChangeLive2DExpression,
   activeLive2DProportion = 'vtuber_full',
   onChangeLive2DProportion,
+  voiceEnabled = false,
+  onToggleVoice,
   isPlayingMusic = false,
   onToggleMusic,
   uiTheme = 'dark',
   missionActivityEvent,
-  isChatViewOpen = true,
-  compactChatStage = false,
-  onToggleCompactChatStage,
+  activeView,
+  isChatViewOpen: isChatViewOpenProp,
   sidebarCollapsed = false,
   chatArtifactDrawerOpen = false,
-  artifactDrawerWidthPx = 500,
+  artifactDrawerWidthPx = 460,
   onJumpToChat,
+  onOpenSoulView,
+  onOpenSettingsSection,
   chatMessages = [],
   onSendChatMessage,
   isAiThinking = false,
+  isTypingInComposer = false,
   customizeOpen: externalCustomizeOpen,
   setCustomizeOpen: setExternalCustomizeOpen,
+  screenAwarenessMode = 'off',
+  onChangeScreenAwarenessMode,
+  isRecordingSkill = false,
+  isRecordingPaused = false,
+  recordingElapsedSec = 0,
+  activeRecorderSourceLabel = 'In-app events',
+  onOpenRecordConsent,
+  onPauseResumeRecording,
+  onStopAndReviewRecording,
+  onAddRecordingNote,
+  onMarkRecordingCheckpoint,
+  characterParametricState,
 }) => {
+  const [quickNoteOpen, setQuickNoteOpen] = useState(false);
+  const [quickNoteText, setQuickNoteText] = useState('');
+  const formattedRecTimer = `${String(Math.floor(recordingElapsedSec / 60)).padStart(2, '0')}:${String(
+    recordingElapsedSec % 60
+  ).padStart(2, '0')}`;
   const isLight = uiTheme === 'light';
+  const resolvedPageId = activeView ?? (isChatViewOpenProp !== false ? 'chat' : 'other');
+  const isChatViewOpen = resolvedPageId === 'chat';
 
-  // Walk-and-sit state machine whenever `isChatViewOpen` transitions to true
-  const [walkPhase, setWalkPhase] = useState<
-    'walking_to_chat' | 'sitting_down' | 'seated_in_chat' | 'corner_perch'
-  >('walking_to_chat');
-
-  const [walkOffsetX, setWalkOffsetX] = useState<number>(130);
-  const [manualPostureOverride, setManualPostureOverride] =
-    useState<MorrowPresenceState | null>(null);
-
-  // Pop-out Chat Box state when clicking Morrow
-  const [popoutChatOpen, setPopoutChatOpen] = useState<boolean>(false);
-  const [popoutInput, setPopoutInput] = useState<string>('');
-  const popoutScrollRef = useRef<HTMLDivElement | null>(null);
-
-  // Dragging support
-  const [dragOffset, setDragOffset] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
-  const [isDragging, setIsDragging] = useState(false);
-  const [dragMoved, setDragMoved] = useState(false);
-  const [dragStart, setDragStart] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
-  const [isFallingToFloor, setIsFallingToFloor] = useState(false);
-
-  // Customize popover state
-  const [internalCustomizeOpen, setInternalCustomizeOpen] = useState(false);
-  const customizeOpen =
-    externalCustomizeOpen !== undefined ? externalCustomizeOpen : internalCustomizeOpen;
-  const setCustomizeOpen = setExternalCustomizeOpen || setInternalCustomizeOpen;
-
-  // Trigger walk-to-center-chair and sit transition ONLY when `isChatViewOpen` changes
-  const prevChatOpenRef = useRef<boolean | null>(null);
-  useEffect(() => {
-    if (prevChatOpenRef.current === isChatViewOpen) return;
-    prevChatOpenRef.current = isChatViewOpen;
-
-    if (isChatViewOpen) {
-      setManualPostureOverride(null);
-      setDragOffset({ x: 0, y: 0 });
-      setWalkPhase('walking_to_chat');
-      setWalkOffsetX(120);
-
-      const startWalkTimer = window.setTimeout(() => {
-        setWalkOffsetX(0);
-      }, 30);
-
-      const sitDownTimer = window.setTimeout(() => {
-        setWalkPhase('sitting_down');
-      }, 580);
-
-      const sitIdleTimer = window.setTimeout(() => {
-        setWalkPhase('seated_in_chat');
-      }, 880);
-
-      return () => {
-        window.clearTimeout(startWalkTimer);
-        window.clearTimeout(sitDownTimer);
-        window.clearTimeout(sitIdleTimer);
-      };
-    } else {
-      setWalkPhase('corner_perch');
-      setWalkOffsetX(0);
-      setDragOffset({ x: 0, y: 0 });
+  // Per-page remembered perch registry
+  const [rememberedPerches, setRememberedPerches] = useState<Partial<Record<string, PerchTargetId>>>(() => {
+    if (typeof window === 'undefined') return {};
+    try {
+      const raw = window.localStorage.getItem(PERCH_STORAGE_KEY);
+      return raw ? JSON.parse(raw) : {};
+    } catch {
+      return {};
     }
-  }, [isChatViewOpen]);
+  });
 
-  // Auto-scroll Pop-out Chat Box when new messages arrive or when opened
-  useEffect(() => {
-    if (popoutChatOpen && popoutScrollRef.current) {
-      popoutScrollRef.current.scrollTop = popoutScrollRef.current.scrollHeight;
+  // Collapse to small status dot
+  const [collapsedToDot, setCollapsedToDot] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    try {
+      return window.localStorage.getItem(DOT_COLLAPSED_STORAGE_KEY) === 'true';
+    } catch {
+      return false;
     }
-  }, [popoutChatOpen, chatMessages.length, isAiThinking]);
+  });
 
-  // Close pop-out on Escape
-  useEffect(() => {
-    if (!popoutChatOpen && !customizeOpen) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        setPopoutChatOpen(false);
-        setCustomizeOpen(false);
+  const toggleCollapsedToDot = useCallback((next?: boolean) => {
+    setCollapsedToDot((prev) => {
+      const val = next !== undefined ? next : !prev;
+      try {
+        window.localStorage.setItem(DOT_COLLAPSED_STORAGE_KEY, String(val));
+      } catch {
+        // ignore storage errors
       }
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [popoutChatOpen, customizeOpen, setCustomizeOpen]);
+      return val;
+    });
+  }, []);
 
-  // Sync explicit chat animation commands
+  // Natural idle ladder: stand_idle -> 45s -> sit_idle -> 180s -> rest -> 600s -> sleep
+  const [idleStage, setIdleStage] = useState<MorrowPresenceState>('sit_idle');
+  const [neverSit, setNeverSit] = useState<boolean>(false);
+  const [neverSleep, setNeverSleep] = useState<boolean>(false);
+
   useEffect(() => {
-    if (activeAnimAction === 'sit') {
-      setManualPostureOverride('sit_idle');
-    } else if (activeAnimAction === 'dance') {
-      setManualPostureOverride('dance_loop');
-    } else if (activeAnimAction === 'run') {
-      setManualPostureOverride('walk_left');
-    } else if (activeAnimAction === 'sleep_rest') {
-      setManualPostureOverride('rest');
-    } else if (activeAnimAction === 'idle') {
-      setManualPostureOverride(null);
+    if (isAiThinking || isTypingInComposer || pendingApproval) {
+      setIdleStage(neverSit ? 'stand_idle' : 'sit_idle');
+      return;
     }
-  }, [activeAnimAction]);
+    const sitTimer = window.setTimeout(() => {
+      setIdleStage(neverSit ? 'stand_idle' : 'sit_idle');
+    }, 45_000);
+    const restTimer = window.setTimeout(() => {
+      if (!neverSleep) setIdleStage('rest');
+    }, 180_000);
+    const sleepTimer = window.setTimeout(() => {
+      if (!neverSleep) setIdleStage('sleep');
+    }, 600_000);
+    return () => {
+      window.clearTimeout(sitTimer);
+      window.clearTimeout(restTimer);
+      window.clearTimeout(sleepTimer);
+    };
+  }, [isAiThinking, isTypingInComposer, pendingApproval, neverSit, neverSleep, resolvedPageId]);
 
-  // Derive live activity event
-  const currentActivityEvent: MissionEngineActivityEvent = useMemo(() => {
-    if (missionActivityEvent) return missionActivityEvent;
-    if (pendingApproval || morrowState === 'asking_approval') return 'awaiting_approval';
-    if (morrowState === 'speaking') return 'streaming_reply';
-    if (morrowState === 'working') return 'tool_running';
-    if (morrowState === 'verifying') return 'verifying';
-    if (morrowState === 'thinking') return 'planning';
-    if (morrowState === 'done_with_proof') return 'done_verified';
-    if (isPlayingMusic) return 'music_playing';
-    return 'idle';
-  }, [missionActivityEvent, pendingApproval, morrowState, isPlayingMusic]);
+  // Measure active perch target DOM element on resize & scroll
+  const [viewportDims, setViewportDims] = useState<{ width: number; height: number }>(() => ({
+    width: typeof window !== 'undefined' ? window.innerWidth : 1440,
+    height: typeof window !== 'undefined' ? window.innerHeight : 900,
+  }));
+  const [targetRect, setTargetRect] = useState<{
+    left: number;
+    top: number;
+    width: number;
+    height: number;
+  } | null>(null);
 
-  const activityPresence = useMemo(
-    () =>
-      mapModelActivityToPresence(currentActivityEvent, {
-        importantOrScheduledMission: morrowState === 'done_with_proof',
-        toolLabel: 'running tools',
-        focusModeOrFullscreen: false,
-        dockSide: 'right',
-        danceEnthusiasm: 'high',
-        warmth: 85,
-      }),
-    [currentActivityEvent, morrowState]
-  );
+  const activePerchId: PerchTargetId = useMemo(() => {
+    const saved = rememberedPerches[resolvedPageId];
+    if (saved && PERCH_TARGETS_REGISTRY[saved]) return saved;
+    return isChatViewOpen ? 'composer-top' : 'panel-top-right';
+  }, [rememberedPerches, resolvedPageId, isChatViewOpen]);
 
-  const effectivePresenceState: MorrowPresenceState = useMemo(() => {
-    if (isDragging) return 'carried';
-    if (isFallingToFloor) return 'land';
-    if (walkPhase === 'walking_to_chat') return 'walk_left';
-    if (walkPhase === 'sitting_down') return 'sit_down';
-    if (manualPostureOverride) return manualPostureOverride;
-    if (isChatViewOpen) {
-      return 'sit_idle';
+  const measurePerchTarget = useCallback(() => {
+    if (typeof window === 'undefined' || typeof document === 'undefined') return;
+    setViewportDims({ width: window.innerWidth, height: window.innerHeight });
+    const spec = PERCH_TARGETS_REGISTRY[activePerchId];
+    const el = document.querySelector(spec.elementSelector);
+    if (el) {
+      const r = el.getBoundingClientRect();
+      if (r.width > 0) {
+        setTargetRect({
+          left: r.left,
+          top: r.top,
+          width: r.width,
+          height: r.height,
+        });
+        return;
+      }
     }
-    if (currentActivityEvent !== 'idle') return activityPresence.presenceState;
-    return 'stand_idle';
+    setTargetRect(null);
+  }, [activePerchId]);
+
+  useEffect(() => {
+    measurePerchTarget();
+    const rafId = window.requestAnimationFrame(measurePerchTarget);
+    window.addEventListener('resize', measurePerchTarget);
+    window.addEventListener('scroll', measurePerchTarget, true);
+
+    let observer: ResizeObserver | null = null;
+    const spec = PERCH_TARGETS_REGISTRY[activePerchId];
+    const el = typeof document !== 'undefined' ? document.querySelector(spec.elementSelector) : null;
+    if (el && typeof ResizeObserver !== 'undefined') {
+      observer = new ResizeObserver(measurePerchTarget);
+      observer.observe(el);
+    }
+
+    return () => {
+      window.cancelAnimationFrame(rafId);
+      window.removeEventListener('resize', measurePerchTarget);
+      window.removeEventListener('scroll', measurePerchTarget, true);
+      if (observer) observer.disconnect();
+    };
   }, [
-    isDragging,
-    isFallingToFloor,
-    walkPhase,
-    manualPostureOverride,
-    isChatViewOpen,
-    currentActivityEvent,
-    activityPresence.presenceState,
+    measurePerchTarget,
+    activePerchId,
+    resolvedPageId,
+    sidebarCollapsed,
+    chatArtifactDrawerOpen,
+    artifactDrawerWidthPx,
   ]);
 
-  const presenceMeta =
-    PRESENCE_STATE_USAGE_MAP[effectivePresenceState] || PRESENCE_STATE_USAGE_MAP.sit_idle;
+  const setPerchForCurrentPage = useCallback(
+    (perchId: PerchTargetId) => {
+      setRememberedPerches((prev) => {
+        const next = { ...prev, [resolvedPageId]: perchId };
+        try {
+          window.localStorage.setItem(PERCH_STORAGE_KEY, JSON.stringify(next));
+        } catch {
+          // ignore storage errors
+        }
+        return next;
+      });
+    },
+    [resolvedPageId]
+  );
 
-  // Dragging handlers
+  // Dragging to snap to nearest perch
+  const [isDragging, setIsDragging] = useState(false);
+  const [dragMoved, setDragMoved] = useState(false);
+  const [dragDelta, setDragDelta] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  const [dragOrigin, setDragOrigin] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+
   const handlePointerDownCharacter = (e: React.MouseEvent<HTMLDivElement>) => {
     if (e.button !== 0) return;
     setIsDragging(true);
     setDragMoved(false);
-    setDragStart({ x: e.clientX - dragOffset.x, y: e.clientY - dragOffset.y });
+    setDragOrigin({ x: e.clientX, y: e.clientY });
+    setDragDelta({ x: 0, y: 0 });
   };
 
   useEffect(() => {
     if (!isDragging) return;
     const onMove = (e: MouseEvent) => {
-      const nextX = Math.max(-320, Math.min(320, e.clientX - dragStart.x));
-      const nextY = Math.max(-160, Math.min(160, e.clientY - dragStart.y));
-      if (Math.abs(nextX - dragOffset.x) > 4 || Math.abs(nextY - dragOffset.y) > 4) {
+      const dx = e.clientX - dragOrigin.x;
+      const dy = e.clientY - dragOrigin.y;
+      if (Math.abs(dx) > 5 || Math.abs(dy) > 5) {
         setDragMoved(true);
       }
-      setDragOffset({ x: nextX, y: nextY });
+      setDragDelta({ x: dx, y: dy });
     };
-    const onUp = () => {
+    const onUp = (e: MouseEvent) => {
       setIsDragging(false);
-      if (Math.abs(dragOffset.y) > 12 || Math.abs(dragOffset.x) > 12) {
-        setIsFallingToFloor(true);
-        setDragOffset({ x: 0, y: 0 });
-        window.setTimeout(() => {
-          setIsFallingToFloor(false);
-        }, 360);
+      setDragDelta({ x: 0, y: 0 });
+      if (!dragMoved) return;
+
+      // Snap to closest PerchTarget based on drop coordinates
+      const dropX = e.clientX;
+      const dropY = e.clientY;
+      const vw = window.innerWidth || 1440;
+      const vh = window.innerHeight || 900;
+
+      if (dropX < 260 && dropY > vh - 260) {
+        setPerchForCurrentPage('sidebar-footer');
+      } else if (dropY < 240) {
+        setPerchForCurrentPage('panel-top-right');
+      } else if (isChatViewOpen && Math.abs(dropX - vw / 2) < 420 && dropY > vh - 320) {
+        setPerchForCurrentPage('composer-top');
+      } else {
+        setPerchForCurrentPage('screen-floor');
       }
     };
     window.addEventListener('mousemove', onMove);
@@ -353,9 +433,103 @@ export const MorrowCompanion: React.FC<MorrowCompanionProps> = ({
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);
     };
-  }, [isDragging, dragStart, dragOffset]);
+  }, [isDragging, dragOrigin, dragMoved, isChatViewOpen, setPerchForCurrentPage]);
 
-  const handleCursorGlance = useCallback((_nx: number, _ny: number) => {}, []);
+  // Compute perch coordinates and obstacle avoidance
+  const perchPlacement = useMemo(
+    () =>
+      computePerchPlacement({
+        pageId: resolvedPageId,
+        rememberedPerchByPage: rememberedPerches,
+        targetRect,
+        viewport: viewportDims,
+        isTypingInComposer,
+        isAiThinking,
+        hasActiveApprovalSheet: Boolean(pendingApproval && isChatViewOpen),
+        idlePoseOverride: idleStage,
+      }),
+    [
+      resolvedPageId,
+      rememberedPerches,
+      targetRect,
+      viewportDims,
+      isTypingInComposer,
+      isAiThinking,
+      pendingApproval,
+      isChatViewOpen,
+      idleStage,
+    ]
+  );
+
+  // Derive live activity event -> natural expression/presence
+  const currentActivityEvent: MissionEngineActivityEvent = useMemo(() => {
+    if (missionActivityEvent) return missionActivityEvent;
+    if (pendingApproval || morrowState === 'asking_approval') return 'awaiting_approval';
+    if (morrowState === 'speaking') return 'streaming_reply';
+    if (morrowState === 'working') return 'tool_running';
+    if (morrowState === 'verifying') return 'verifying';
+    if (morrowState === 'thinking' || isAiThinking) return 'planning';
+    if (morrowState === 'done_with_proof') return 'done_verified';
+    if (isPlayingMusic) return 'music_playing';
+    return 'idle';
+  }, [missionActivityEvent, pendingApproval, morrowState, isAiThinking, isPlayingMusic]);
+
+  const activityPresence = useMemo(
+    () =>
+      mapModelActivityToPresence(currentActivityEvent, {
+        importantOrScheduledMission: morrowState === 'done_with_proof',
+        toolLabel: 'running tools',
+        focusModeOrFullscreen: focusMode,
+        dockSide: 'right',
+        danceEnthusiasm: 'high',
+        warmth: 85,
+      }),
+    [currentActivityEvent, morrowState, focusMode]
+  );
+
+  const effectivePresenceState: MorrowPresenceState = useMemo(() => {
+    if (isDragging) return 'carried';
+    if (currentActivityEvent !== 'idle') return activityPresence.presenceState;
+    return perchPlacement.pose;
+  }, [isDragging, currentActivityEvent, activityPresence.presenceState, perchPlacement.pose]);
+
+  const presenceMeta =
+    PRESENCE_STATE_USAGE_MAP[effectivePresenceState] || PRESENCE_STATE_USAGE_MAP.sit_idle;
+
+  // Popover state
+  const [popoutChatOpen, setPopoutChatOpen] = useState<boolean>(false);
+  const [popoutInput, setPopoutInput] = useState<string>('');
+  const popoutScrollRef = useRef<HTMLDivElement | null>(null);
+
+  const [internalCustomizeOpen, setInternalCustomizeOpen] = useState(false);
+  const customizeOpen =
+    externalCustomizeOpen !== undefined ? externalCustomizeOpen : internalCustomizeOpen;
+  const setCustomizeOpen = setExternalCustomizeOpen || setInternalCustomizeOpen;
+
+  useEffect(() => {
+    if (popoutChatOpen && popoutScrollRef.current) {
+      popoutScrollRef.current.scrollTop = popoutScrollRef.current.scrollHeight;
+    }
+  }, [popoutChatOpen, chatMessages.length, isAiThinking]);
+
+  // Esc closes popover; Alt+M opens popover; Alt+H collapses to status dot
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setPopoutChatOpen(false);
+        setCustomizeOpen(false);
+      } else if (e.altKey && e.key.toLowerCase() === 'm') {
+        e.preventDefault();
+        toggleCollapsedToDot(false);
+        setPopoutChatOpen((prev) => !prev);
+      } else if (e.altKey && e.key.toLowerCase() === 'h') {
+        e.preventDefault();
+        toggleCollapsedToDot();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [setCustomizeOpen, toggleCollapsedToDot]);
 
   const handleSendFromPopout = (preset?: string) => {
     const text = (preset ?? popoutInput).trim();
@@ -370,441 +544,455 @@ export const MorrowCompanion: React.FC<MorrowCompanionProps> = ({
     }
   };
 
-  const groundAnchor = presenceMeta.groundAnchor;
-  const postureSeatOffsetPx =
-    groundAnchor.posture === 'sitting'
-      ? 10
-      : effectivePresenceState === 'land'
-      ? 4
-      : 0;
-  const squashScaleY = groundAnchor.squashY ?? 1.0;
+  // Plain-language status chip
+  const statusInfo = useMemo(() => {
+    if (pendingApproval) {
+      return {
+        label: 'Needs your approval',
+        tone: 'amber' as const,
+      };
+    }
+    if (isAiThinking || morrowState === 'thinking' || morrowState === 'working') {
+      return {
+        label: 'Thinking',
+        tone: 'blue' as const,
+      };
+    }
+    if (morrowState === 'done_with_proof') {
+      return {
+        label: 'Verified',
+        tone: 'emerald' as const,
+      };
+    }
+    if (isTypingInComposer) {
+      return {
+        label: 'Listening',
+        tone: 'neutral' as const,
+      };
+    }
+    return {
+      label: 'Ready',
+      tone: 'neutral' as const,
+    };
+  }, [pendingApproval, isAiThinking, morrowState, isTypingInComposer]);
 
-  // Compute horizontal center of the Chat column based on sidebar width (240px or 56px) and right-hand Artifact Split Drawer
-  const sidebarHalfOffset = sidebarCollapsed ? 28 : 120;
-  const drawerHalfOffset = chatArtifactDrawerOpen ? Math.round(artifactDrawerWidthPx / 2) : 0;
-  const netHorizontalOffset = sidebarHalfOffset - drawerHalfOffset;
-  const chatCenterLeftCalc =
-    netHorizontalOffset >= 0
-      ? `calc(50% + ${netHorizontalOffset}px)`
-      : `calc(50% - ${Math.abs(netHorizontalOffset)}px)`;
+  const popoverCoords = useMemo(
+    () =>
+      computePopoverPlacement(
+        {
+          x: perchPlacement.x,
+          y: perchPlacement.y,
+          width: 84,
+          height: 96,
+        },
+        {
+          width: viewportDims.width,
+          height: viewportDims.height,
+          taskbarHeightPx: 16,
+        },
+        { width: 356, height: 460 }
+      ),
+    [perchPlacement.x, perchPlacement.y, viewportDims.width, viewportDims.height]
+  );
 
-  const statusText = pendingApproval
-    ? 'Approval needed'
-    : isAiThinking
-    ? 'Working...'
-    : walkPhase === 'walking_to_chat'
-    ? 'Walking to chair...'
-    : isChatViewOpen
-    ? 'Seated · Ready'
-    : 'Ready';
+  // Gaze transform for looking at text cursor vs looking up while thinking
+  const gazeTransform =
+    perchPlacement.gazeDirection === 'cursor'
+      ? 'translate3d(-3px, 2px, 0) rotate(-2deg)'
+      : perchPlacement.gazeDirection === 'up_thinking'
+        ? 'translate3d(0px, -3px, 0) rotate(2deg)'
+        : 'translate3d(0px, 0px, 0)';
+
+  // 1. Collapsed Status Dot mode
+  if (collapsedToDot) {
+    return (
+      <button
+        type="button"
+        data-testid="morrow-status-dot"
+        onClick={() => toggleCollapsedToDot(false)}
+        title={`${companionName} (${statusInfo.label}) — Click or press Alt+H to expand`}
+        className={`fixed bottom-4 right-4 z-40 inline-flex items-center gap-2 px-3 py-1.5 rounded-full border text-xs font-medium shadow-md transition-all duration-150 ${
+          isLight
+            ? 'bg-white border-stone-200 text-stone-800 hover:bg-stone-50'
+            : 'bg-stone-900 border-stone-800 text-stone-200 hover:border-stone-700'
+        }`}
+      >
+        <span
+          className={`w-2.5 h-2.5 rounded-full ${
+            statusInfo.tone === 'amber'
+              ? 'bg-amber-500 animate-pulse'
+              : statusInfo.tone === 'emerald'
+                ? 'bg-emerald-500'
+                : statusInfo.tone === 'blue'
+                  ? 'bg-sky-500 animate-pulse'
+                  : 'bg-emerald-500'
+          }`}
+        />
+        <span>{companionName}</span>
+        <span className="text-stone-400">· {statusInfo.label}</span>
+      </button>
+    );
+  }
 
   return (
     <>
-      {/* 1A. COMPACT PRESENCE STRIP MODE IN CHAT (When collapsed for deep conversation) */}
-      {isChatViewOpen && compactChatStage && (
+      {/* PERCHED COMPANION (No chair stage; sits on composer-top in Chat or perches on panel edges) */}
+      <div
+        data-testid="morrow-floating-companion"
+        data-perch-active={perchPlacement.perchId}
+        data-legs-dangling={perchPlacement.legsDangling ? 'true' : 'false'}
+        data-gaze-direction={perchPlacement.gazeDirection}
+        data-moved-aside={perchPlacement.movedAsideForObstacle ? 'true' : 'false'}
+        data-presence-state={effectivePresenceState}
+        style={{
+          left: `${perchPlacement.x + dragDelta.x}px`,
+          top: `${perchPlacement.y + dragDelta.y}px`,
+          transition: isDragging
+            ? 'none'
+            : 'left 160ms cubic-bezier(0.22, 1, 0.36, 1), top 160ms cubic-bezier(0.22, 1, 0.36, 1)',
+        }}
+        className="fixed z-40 pointer-events-none select-none flex flex-col items-center"
+      >
         <div
-          data-testid="chat-top-center-chair"
-          style={{
-            top: '54px',
-            left: chatCenterLeftCalc,
-            transform: 'translate3d(-50%, 0, 0)',
+          role="button"
+          tabIndex={0}
+          data-testid="morrow-character-trigger"
+          aria-label={`${companionName} (${statusInfo.label}) — Click to open chat popover or drag to another perch`}
+          aria-expanded={popoutChatOpen}
+          onMouseDown={handlePointerDownCharacter}
+          onClick={() => {
+            if (dragMoved) return;
+            setPopoutChatOpen((prev) => !prev);
           }}
-          className="fixed z-30 flex items-center gap-2 px-3 py-1 rounded-full border shadow-sm transition-all text-xs pointer-events-auto bg-[#141824]/95 border-stone-700/80 text-stone-200"
-        >
-          <button
-            type="button"
-            data-testid="morrow-character-trigger"
-            onClick={() => setPopoutChatOpen((prev) => !prev)}
-            className="flex items-center gap-2 font-medium hover:text-amber-300"
-          >
-            <span className="w-5 h-5 rounded-full bg-amber-400 text-stone-950 font-bold text-[10px] flex items-center justify-center">
-              M
-            </span>
-            <span>{companionName}</span>
-            <span aria-hidden="true" className="text-stone-500">
-              ·
-            </span>
-            <span className="text-stone-400 text-[11px]">{statusText}</span>
-          </button>
-
-          {onToggleCompactChatStage && (
-            <button
-              type="button"
-              onClick={onToggleCompactChatStage}
-              aria-label="Expand Morrow stage"
-              title="Expand chair stage"
-              className="p-1 rounded hover:bg-stone-500/20 text-stone-400 hover:text-stone-200"
-            >
-              <ChevronDown className="w-3.5 h-3.5" />
-            </button>
-          )}
-        </div>
-      )}
-
-      {/* 1B. PERMANENT EXECUTIVE CHAIR AT THE TOP CENTER OF THE CHAT PANEL (When expanded) */}
-      {isChatViewOpen && !compactChatStage && (
-        <div
-          data-testid="chat-top-center-chair"
-          aria-label="Morrow's Chair at Top Center of Chat Panel"
-          style={{
-            top: '50px',
-            left: chatCenterLeftCalc,
-            transform: 'translate3d(-50%, 0, 0)',
-          }}
-          className="fixed z-30 pointer-events-none select-none flex flex-col items-center w-40 h-40 transition-[left] duration-150"
-        >
-          <div
-            className={`absolute top-2 w-28 h-28 rounded-full blur-2xl transition-opacity ${
-              isLight ? 'bg-amber-300/25' : 'bg-amber-400/12'
-            }`}
-          />
-
-          <svg
-            viewBox="0 0 180 180"
-            className="w-36 h-36 overflow-visible drop-shadow-lg"
-            aria-hidden="true"
-          >
-            <defs>
-              <linearGradient id="chairBackGrad" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stopColor={isLight ? '#3f3f46' : '#27272a'} />
-                <stop offset="100%" stopColor={isLight ? '#18181b' : '#12131a'} />
-              </linearGradient>
-              <linearGradient id="chairSeatGrad" x1="0" y1="0" x2="1" y2="1">
-                <stop offset="0%" stopColor={isLight ? '#52525b' : '#323646'} />
-                <stop offset="100%" stopColor={isLight ? '#27272a' : '#181b24'} />
-              </linearGradient>
-              <linearGradient id="chairTrimGrad" x1="0" y1="0" x2="1" y2="0">
-                <stop offset="0%" stopColor="#f59e0b" />
-                <stop offset="50%" stopColor="#fbbf24" />
-                <stop offset="100%" stopColor="#d97706" />
-              </linearGradient>
-            </defs>
-
-            <ellipse
-              cx="90"
-              cy="168"
-              rx="48"
-              ry="6"
-              fill={isLight ? 'rgba(28, 25, 23, 0.18)' : 'rgba(0, 0, 0, 0.5)'}
-            />
-
-            <path
-              d="M90 136 L90 163 M90 158 L54 166 M90 158 L126 166 M90 158 L68 168 M90 158 L112 168"
-              stroke={isLight ? '#52525b' : '#475569'}
-              strokeWidth="4"
-              strokeLinecap="round"
-            />
-            <circle cx="54" cy="167" r="3" fill="#1e293b" stroke="#94a3b8" strokeWidth="1" />
-            <circle cx="126" cy="167" r="3" fill="#1e293b" stroke="#94a3b8" strokeWidth="1" />
-            <circle cx="68" cy="169" r="3" fill="#1e293b" stroke="#94a3b8" strokeWidth="1" />
-            <circle cx="112" cy="169" r="3" fill="#1e293b" stroke="#94a3b8" strokeWidth="1" />
-
-            <rect
-              x="50"
-              y="28"
-              width="80"
-              height="92"
-              rx="20"
-              fill="url(#chairBackGrad)"
-              stroke="url(#chairTrimGrad)"
-              strokeWidth="2"
-            />
-            <rect
-              x="58"
-              y="38"
-              width="64"
-              height="74"
-              rx="14"
-              fill={isLight ? '#27272a' : '#191d28'}
-              stroke={isLight ? '#52525b' : '#334155'}
-              strokeWidth="1"
-            />
-            <rect
-              x="67"
-              y="33"
-              width="46"
-              height="13"
-              rx="6.5"
-              fill={isLight ? '#3f3f46' : '#262b3d'}
-              stroke="#fbbf24"
-              strokeWidth="1"
-            />
-
-            <path
-              d="M48 92 C34 92, 34 122, 48 124"
-              fill="none"
-              stroke={isLight ? '#3f3f46' : '#334155'}
-              strokeWidth="5.5"
-              strokeLinecap="round"
-            />
-            <rect x="31" y="88" width="17" height="6.5" rx="3" fill="#f59e0b" />
-
-            <path
-              d="M132 92 C146 92, 146 122, 132 124"
-              fill="none"
-              stroke={isLight ? '#3f3f46' : '#334155'}
-              strokeWidth="5.5"
-              strokeLinecap="round"
-            />
-            <rect x="132" y="88" width="17" height="6.5" rx="3" fill="#f59e0b" />
-
-            <rect
-              x="42"
-              y="114"
-              width="96"
-              height="21"
-              rx="10"
-              fill="url(#chairSeatGrad)"
-              stroke="url(#chairTrimGrad)"
-              strokeWidth="2"
-            />
-          </svg>
-        </div>
-      )}
-
-      {/* 2. FLOATING / SEATED 2D COMPANION RIG */}
-      {(!isChatViewOpen || !compactChatStage) && (
-        <div
-          data-testid="morrow-floating-companion"
-          data-chat-seated={isChatViewOpen ? 'true' : 'false'}
-          data-presence-state={effectivePresenceState}
-          style={
-            isChatViewOpen
-              ? {
-                  top: '44px',
-                  left: chatCenterLeftCalc,
-                  transform: `translate3d(calc(-50% + ${walkOffsetX + dragOffset.x}px), ${dragOffset.y}px, 0px)`,
-                  transition: isDragging
-                    ? 'none'
-                    : 'transform 560ms cubic-bezier(0.22, 1, 0.36, 1), left 150ms ease',
-                }
-              : {
-                  right: `${Math.max(12, 18 - dragOffset.x)}px`,
-                  bottom: `${Math.max(12, 14 - dragOffset.y)}px`,
-                  transform: 'translate3d(0px, 0px, 0px)',
-                  transition: isDragging ? 'none' : 'right 250ms ease, bottom 250ms ease',
-                }
-          }
-          className="fixed z-40 pointer-events-none select-none flex flex-col items-center"
-        >
-          {/* Interactive 2D Character Rig */}
-          <div
-            role="button"
-            tabIndex={0}
-            data-testid="morrow-character-trigger"
-            aria-label={`${companionName} 2D Companion (${effectivePresenceState}) - Click to open chat box`}
-            aria-expanded={popoutChatOpen}
-            onMouseDown={handlePointerDownCharacter}
-            onClick={() => {
-              if (dragMoved) return;
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
               setPopoutChatOpen((prev) => !prev);
-            }}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' || e.key === ' ') {
-                e.preventDefault();
-                setPopoutChatOpen((prev) => !prev);
-              }
-            }}
-            style={{
-              transform: `translate3d(0px, ${postureSeatOffsetPx}px, 0px) scaleY(${squashScaleY})`,
-              transformOrigin: '50% 95%',
-              transition: 'transform 200ms cubic-bezier(0.22, 1, 0.36, 1)',
-            }}
-            className="pointer-events-auto cursor-pointer active:cursor-grabbing focus:outline-none group relative"
-          >
-            <MorrowLive2DRig
-              action={
-                effectivePresenceState === 'sit_idle' || effectivePresenceState === 'sit_down'
-                  ? 'sit'
-                  : effectivePresenceState === 'walk_left' || effectivePresenceState === 'walk_right'
+            }
+          }}
+          style={{
+            transform: gazeTransform,
+            transition: 'transform 150ms ease-out',
+          }}
+          className={`pointer-events-auto cursor-pointer active:cursor-grabbing focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-500 rounded-xl group relative ${
+            isRecordingSkill ? 'ring-2 ring-rose-500/80 shadow-lg shadow-rose-500/20' : ''
+          }`}
+        >
+          {/* Floating Recording Control Bar Anchored to Morrow */}
+          {isRecordingSkill && (
+            <div
+              data-testid="morrow-floating-recording-bar"
+              onClick={(e) => e.stopPropagation()}
+              onMouseDown={(e) => e.stopPropagation()}
+              className={`absolute bottom-full left-1/2 -translate-x-1/2 mb-7 z-50 px-3 py-2 rounded-2xl border shadow-xl flex flex-col gap-1.5 whitespace-nowrap ${
+                isLight
+                  ? 'bg-white/98 border-rose-300 text-stone-900'
+                  : 'bg-stone-900/98 border-rose-500/40 text-stone-100'
+              }`}
+            >
+              <div className="flex items-center gap-2">
+                <span className="w-2 h-2 rounded-full bg-rose-500 animate-ping" />
+                <span className="text-[11px] font-semibold text-rose-500">
+                  {isRecordingPaused ? 'PAUSED' : 'REC'} {formattedRecTimer}
+                </span>
+                <span className="text-[10px] text-stone-400">({activeRecorderSourceLabel})</span>
+                <button
+                  type="button"
+                  data-testid="morrow-rec-pause-btn"
+                  onClick={() => onPauseResumeRecording && onPauseResumeRecording()}
+                  className="px-2 py-0.5 rounded-md bg-stone-500/15 hover:bg-stone-500/25 text-[11px] font-medium flex items-center gap-1"
+                  title="Pause or Resume (Alt+Shift+R)"
+                >
+                  {isRecordingPaused ? <Play className="w-3 h-3" /> : <Pause className="w-3 h-3" />}
+                  <span>{isRecordingPaused ? 'Resume' : 'Pause'}</span>
+                </button>
+                <button
+                  type="button"
+                  data-testid="morrow-rec-checkpoint-btn"
+                  onClick={() => onMarkRecordingCheckpoint && onMarkRecordingCheckpoint()}
+                  className="px-2 py-0.5 rounded-md bg-stone-500/15 hover:bg-stone-500/25 text-[11px] font-medium flex items-center gap-1"
+                  title="Mark verification checkpoint"
+                >
+                  <Flag className="w-3 h-3 text-emerald-400" />
+                  <span>Checkpoint</span>
+                </button>
+                <button
+                  type="button"
+                  data-testid="morrow-rec-note-toggle-btn"
+                  onClick={() => setQuickNoteOpen((prev) => !prev)}
+                  className="px-2 py-0.5 rounded-md bg-stone-500/15 hover:bg-stone-500/25 text-[11px] font-medium flex items-center gap-1"
+                  title="Add narration note"
+                >
+                  <MessageSquarePlus className="w-3 h-3 text-sky-400" />
+                  <span>Add note</span>
+                </button>
+                <button
+                  type="button"
+                  data-testid="morrow-rec-stop-btn"
+                  onClick={() => onStopAndReviewRecording && onStopAndReviewRecording()}
+                  className="px-2.5 py-0.5 rounded-md bg-rose-600 hover:bg-rose-500 text-white text-[11px] font-semibold flex items-center gap-1"
+                  title="Stop recording and review keyframes"
+                >
+                  <Square className="w-3 h-3" />
+                  <span>Stop</span>
+                </button>
+              </div>
+              {quickNoteOpen && (
+                <div className="flex items-center gap-1.5 pt-1 border-t border-stone-700/40">
+                  <input
+                    type="text"
+                    value={quickNoteText}
+                    onChange={(e) => setQuickNoteText(e.target.value)}
+                    placeholder="Intent note for this step..."
+                    className="flex-1 px-2 py-0.5 rounded text-[11px] bg-stone-500/10 border border-stone-500/30 outline-none"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (quickNoteText.trim() && onAddRecordingNote) {
+                        onAddRecordingNote(quickNoteText.trim());
+                        setQuickNoteText('');
+                        setQuickNoteOpen(false);
+                      }
+                    }}
+                    className="px-2 py-0.5 rounded bg-sky-600 text-white text-[11px] font-medium"
+                  >
+                    Save
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
+          <MorrowLive2DRig
+            action={
+              effectivePresenceState === 'sit_idle' || effectivePresenceState === 'sit_down'
+                ? 'sit'
+                : effectivePresenceState === 'walk_left' || effectivePresenceState === 'walk_right'
                   ? 'run'
                   : effectivePresenceState === 'dance_loop'
-                  ? 'dance'
-                  : effectivePresenceState === 'rest' || effectivePresenceState === 'sleep'
-                  ? 'sleep_rest'
-                  : activeAnimAction
-              }
-              presenceState={effectivePresenceState}
-              badge={activityPresence.badge}
-              lookId={activeLookId}
-              propId={activeLive2DProp}
-              expressionId={activeLive2DExpression}
-              proportionMode={activeLive2DProportion}
-              viewAngle="auto"
-              animationPaused={
-                effectivePresenceState === 'rest' || effectivePresenceState === 'sleep'
-              }
-              isSpeaking={morrowState === 'speaking' || isAiThinking}
-              isPlayingMusic={isPlayingMusic}
-              onCursorGlance={handleCursorGlance}
-              className={isChatViewOpen ? 'w-28 h-36 sm:w-30 sm:h-40' : 'w-24 h-34'}
-            />
-          </div>
+                    ? 'dance'
+                    : effectivePresenceState === 'rest' || effectivePresenceState === 'sleep'
+                      ? 'sleep_rest'
+                      : 'idle'
+            }
+            presenceState={effectivePresenceState}
+            badge={activityPresence.badge}
+            lookId={activeLookId}
+            propId={activeLive2DProp}
+            expressionId={
+              perchPlacement.gazeDirection === 'up_thinking'
+                ? 'starry_eyed'
+                : activeLive2DExpression
+            }
+            proportionMode={activeLive2DProportion}
+            viewAngle={perchPlacement.gazeDirection === 'cursor' ? 'left_quarter' : 'auto'}
+            animationPaused={
+              effectivePresenceState === 'rest' || effectivePresenceState === 'sleep'
+            }
+            isSpeaking={!isRecordingSkill && (morrowState === 'speaking' || isAiThinking)}
+            isPlayingMusic={isPlayingMusic}
+            customPalette={characterParametricState?.palette}
+            customAccessories={characterParametricState?.accessories}
+            className="w-20 h-24"
+          />
 
-          {/* Concise Status & Controls Bar under Morrow */}
+          {/* Subtle status badge & Voice on/off button floating above Morrow */}
           <div
-            className={`mt-0.5 px-2.5 py-0.5 rounded-full border text-[11px] font-medium shadow-sm backdrop-blur-md flex items-center gap-1.5 pointer-events-auto transition-colors ${
+            className={`absolute bottom-full left-1/2 -translate-x-1/2 mb-0.5 px-2 py-0.5 rounded-full border text-[10px] font-medium shadow-sm whitespace-nowrap flex items-center gap-1.5 transition-opacity duration-150 ${
               pendingApproval
-                ? 'bg-amber-500/20 border-amber-400 text-amber-300'
-                : isLight
-                ? 'bg-white/95 border-stone-300 text-stone-700'
-                : 'bg-[#151924]/95 border-stone-700/80 text-stone-200'
+                ? 'opacity-100 bg-amber-500/15 border-amber-500/40 text-amber-300'
+                : 'opacity-95 group-hover:opacity-100 ' +
+                  (isLight
+                    ? 'bg-white/95 border-stone-200 text-stone-700'
+                    : 'bg-stone-900/95 border-stone-800 text-stone-200')
             }`}
           >
-            <button
-              type="button"
-              onClick={() => setPopoutChatOpen((prev) => !prev)}
-              className="hover:underline text-left flex items-center gap-1.5"
-            >
-              <span className="font-semibold">{companionName}</span>
-              <span aria-hidden="true" className="text-stone-500">
-                ·
-              </span>
-              <span className={isLight ? 'text-stone-500' : 'text-stone-400'}>{statusText}</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={(e) => {
-                e.stopPropagation();
-                setCustomizeOpen(!customizeOpen);
-              }}
-              aria-label="Customize companion"
-              title="Appearance & Pose"
-              className="p-0.5 rounded hover:bg-stone-500/20 text-stone-400 hover:text-stone-200"
-            >
-              <SlidersHorizontal className="w-3 h-3" />
-            </button>
-
-            {onToggleMusic && (
+            <span
+              className={`w-1.5 h-1.5 rounded-full ${
+                statusInfo.tone === 'amber'
+                  ? 'bg-amber-400'
+                  : statusInfo.tone === 'emerald'
+                    ? 'bg-emerald-400'
+                    : statusInfo.tone === 'blue'
+                      ? 'bg-sky-400 animate-pulse'
+                      : 'bg-emerald-400'
+              }`}
+            />
+            <span>{companionName}</span>
+            <span className="text-stone-400">· {statusInfo.label}</span>
+            {onToggleVoice && (
               <button
                 type="button"
+                data-testid="morrow-voice-toggle-btn"
+                aria-label="Voice on/off"
+                aria-pressed={voiceEnabled}
+                title="Voice on/off"
+                onMouseDown={(e) => e.stopPropagation()}
                 onClick={(e) => {
                   e.stopPropagation();
-                  onToggleMusic();
+                  onToggleVoice();
                 }}
-                aria-label={isPlayingMusic ? 'Pause companion music' : 'Play companion music'}
-                title={isPlayingMusic ? 'Pause Music' : 'Play Music & Dance'}
-                className={`p-0.5 rounded hover:bg-stone-500/20 ${
-                  isPlayingMusic ? 'text-amber-400' : 'text-stone-400 hover:text-stone-200'
+                className={`p-0.5 rounded transition-colors ${
+                  voiceEnabled
+                    ? 'text-sky-400 hover:text-sky-300'
+                    : 'text-stone-400 hover:text-stone-200'
                 }`}
               >
-                <Volume2 className="w-3 h-3" />
-              </button>
-            )}
-
-            {isChatViewOpen && onToggleCompactChatStage && (
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onToggleCompactChatStage();
-                }}
-                aria-label="Collapse Morrow stage to compact bar"
-                title="Collapse stage"
-                className="p-0.5 rounded hover:bg-stone-500/20 text-stone-400 hover:text-stone-200"
-              >
-                <ChevronUp className="w-3 h-3" />
+                {voiceEnabled ? (
+                  <Volume2 className="w-3 h-3" />
+                ) : (
+                  <VolumeX className="w-3 h-3" />
+                )}
               </button>
             )}
           </div>
         </div>
-      )}
+      </div>
 
-      {/* 3. CONTEXTUAL POP-OUT CHAT BOX (Shared conversation history from anywhere) */}
+      {/* CLICK POPOVER (Header with name, status chip with icon+text, gear icon; messages; inline approvals; mic+send composer) */}
       {popoutChatOpen && (
         <div
           role="dialog"
           aria-modal="false"
-          aria-label={`${companionName} Pop-out Chat Box`}
+          aria-label={`${companionName} Chat Popover`}
           data-testid="morrow-popout-chatbox"
-          style={
-            isChatViewOpen
-              ? {
-                  top: '56px',
-                  right: chatArtifactDrawerOpen ? `${artifactDrawerWidthPx + 16}px` : '20px',
-                }
-              : {
-                  bottom: '180px',
-                  right: '20px',
-                }
-          }
-          className={`fixed z-50 w-84 sm:w-92 rounded-2xl border shadow-2xl backdrop-blur-xl flex flex-col overflow-hidden transition-all ${
+          style={{
+            left: `${popoverCoords.x}px`,
+            top: `${popoverCoords.y}px`,
+          }}
+          className={`fixed z-50 w-[356px] max-w-[calc(100vw-24px)] rounded-2xl border shadow-xl flex flex-col overflow-hidden transition-all duration-150 ${
             isLight
-              ? 'bg-white/95 border-stone-300 text-stone-900'
-              : 'bg-[#131722]/95 border-stone-700/90 text-stone-100'
+              ? 'bg-white border-stone-200 text-stone-900'
+              : 'bg-stone-900 border-stone-800 text-stone-100'
           }`}
         >
-          {/* Header */}
+          {/* Header: Name, status chip with icon and text, gear icon at top right */}
           <div
             className={`px-3.5 py-2.5 border-b flex items-center justify-between gap-2 ${
-              isLight ? 'bg-stone-100/80 border-stone-200' : 'bg-[#191E2D] border-stone-800'
+              isLight ? 'bg-stone-50 border-stone-200' : 'bg-stone-900 border-stone-800'
             }`}
           >
             <div className="flex items-center gap-2 min-w-0">
-              <div className="w-6 h-6 rounded-full bg-amber-400 text-stone-950 font-bold text-xs flex items-center justify-center shrink-0">
-                M
-              </div>
-              <div className="min-w-0">
-                <div className="text-xs font-bold truncate">{companionName}</div>
-                <div className="text-[10px] text-stone-400 truncate">{statusText}</div>
-              </div>
+              <span className="font-semibold text-sm truncate">{companionName}</span>
+              <span
+                className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium border ${
+                  statusInfo.tone === 'amber'
+                    ? 'bg-amber-500/10 border-amber-500/30 text-amber-400'
+                    : statusInfo.tone === 'emerald'
+                      ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400'
+                      : statusInfo.tone === 'blue'
+                        ? 'bg-sky-500/10 border-sky-500/30 text-sky-400'
+                        : isLight
+                          ? 'bg-stone-100 border-stone-200 text-stone-600'
+                          : 'bg-stone-800 border-stone-700 text-stone-300'
+                }`}
+              >
+                {statusInfo.tone === 'amber' ? (
+                  <ShieldAlert className="w-3 h-3" />
+                ) : statusInfo.tone === 'emerald' ? (
+                  <CheckCircle2 className="w-3 h-3" />
+                ) : (
+                  <CircleDot className="w-3 h-3" />
+                )}
+                <span>{statusInfo.label}</span>
+              </span>
             </div>
 
             <div className="flex items-center gap-1">
-              {[
-                {
-                  label: 'Sit',
-                  state: 'sit_idle' as MorrowPresenceState,
-                  act: 'sit' as MorrowAnimationAction,
-                },
-                {
-                  label: 'Stand',
-                  state: 'stand_idle' as MorrowPresenceState,
-                  act: 'idle' as MorrowAnimationAction,
-                },
-                {
-                  label: 'Dance',
-                  state: 'dance_loop' as MorrowPresenceState,
-                  act: 'dance' as MorrowAnimationAction,
-                },
-              ].map((pose) => (
+              {onToggleVoice && (
                 <button
-                  key={pose.label}
                   type="button"
-                  onClick={() => {
-                    setManualPostureOverride(pose.state);
-                    if (onChangeAnimAction) onChangeAnimAction(pose.act, pose.label);
-                  }}
-                  className={`px-2 py-0.5 rounded-lg text-[10px] font-medium border transition-colors ${
-                    effectivePresenceState === pose.state
-                      ? 'bg-amber-400 border-amber-400 text-stone-950 font-semibold'
-                      : 'border-stone-700/70 text-stone-400 hover:text-stone-200 hover:bg-stone-500/15'
+                  data-testid="morrow-popover-voice-toggle-btn"
+                  onClick={onToggleVoice}
+                  aria-label="Voice on/off"
+                  aria-pressed={voiceEnabled}
+                  title="Voice on/off"
+                  className={`p-1.5 rounded-lg transition-colors ${
+                    voiceEnabled
+                      ? 'text-sky-400 bg-sky-500/10'
+                      : 'text-stone-400 hover:text-stone-200 hover:bg-stone-800/50'
                   }`}
                 >
-                  {pose.label}
+                  {voiceEnabled ? (
+                    <Volume2 className="w-3.5 h-3.5" />
+                  ) : (
+                    <VolumeX className="w-3.5 h-3.5" />
+                  )}
                 </button>
-              ))}
-
+              )}
+              <button
+                type="button"
+                data-testid="morrow-popover-gear-btn"
+                onClick={() => {
+                  if (onOpenSettingsSection) {
+                    setPopoutChatOpen(false);
+                    onOpenSettingsSection('morrow');
+                  } else {
+                    setCustomizeOpen(!customizeOpen);
+                  }
+                }}
+                aria-label="Morrow settings"
+                title="Morrow settings & perch options"
+                className="p-1.5 rounded-lg text-stone-400 hover:text-stone-200 hover:bg-stone-500/15"
+              >
+                <Settings className="w-3.5 h-3.5" />
+              </button>
               <button
                 type="button"
                 onClick={() => setPopoutChatOpen(false)}
-                aria-label="Close pop-out chat box"
-                className="p-1 rounded-lg text-stone-400 hover:text-stone-200 hover:bg-stone-500/20"
+                aria-label="Close chat popover"
+                className="p-1.5 rounded-lg text-stone-400 hover:text-stone-200 hover:bg-stone-500/15"
               >
                 <X className="w-3.5 h-3.5" />
               </button>
             </div>
           </div>
 
-          {/* Conversation History */}
+          {/* Perch selector & Collapse to dot bar */}
+          <div
+            className={`px-3 py-1.5 border-b flex items-center justify-between gap-2 text-[11px] ${
+              isLight ? 'bg-stone-50/60 border-stone-200 text-stone-600' : 'bg-stone-950/50 border-stone-800 text-stone-400'
+            }`}
+          >
+            <div className="flex items-center gap-1.5 truncate">
+              <Compass className="w-3 h-3 shrink-0" />
+              <span>Perch:</span>
+              <select
+                aria-label="Select perch for this page"
+                value={perchPlacement.perchId}
+                onChange={(e) => setPerchForCurrentPage(e.target.value as PerchTargetId)}
+                className={`px-1.5 py-0.5 rounded border text-[11px] ${
+                  isLight ? 'bg-white border-stone-200 text-stone-800' : 'bg-stone-900 border-stone-700 text-stone-200'
+                }`}
+              >
+                {Object.values(PERCH_TARGETS_REGISTRY).map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                setPopoutChatOpen(false);
+                toggleCollapsedToDot(true);
+              }}
+              className="text-[11px] hover:underline whitespace-nowrap"
+            >
+              Collapse to dot
+            </button>
+          </div>
+
+          {/* Message List */}
           <div
             ref={popoutScrollRef}
-            className="p-3 space-y-2.5 max-h-60 overflow-y-auto text-xs"
+            className="p-3 space-y-2.5 max-h-64 overflow-y-auto text-xs"
           >
             {chatMessages.length === 0 ? (
               <div className="text-center py-6 text-stone-400">
-                Ask {companionName} anything or coordinate your active project tools.
+                Ask {companionName} anything or run a verified skill from here.
               </div>
             ) : (
               chatMessages.map((msg) => (
@@ -817,121 +1005,133 @@ export const MorrowCompanion: React.FC<MorrowCompanionProps> = ({
                   <div
                     className={`max-w-[86%] rounded-2xl px-3 py-2 leading-relaxed space-y-1 ${
                       msg.role === 'user'
-                        ? isLight
-                          ? 'bg-stone-900 text-white'
-                          : 'bg-amber-400 text-stone-950 font-medium'
+                        ? 'bg-sky-600 text-white'
                         : isLight
-                        ? 'bg-stone-100 border border-stone-200 text-stone-800'
-                        : 'bg-[#1B2030] border border-stone-800 text-stone-200'
+                          ? 'bg-stone-100 border border-stone-200 text-stone-800'
+                          : 'bg-stone-800/80 border border-stone-700/70 text-stone-200'
                     }`}
                   >
                     {msg.toolsUsed && msg.toolsUsed.length > 0 && (
-                      <div className="flex items-center gap-1 text-[10px] text-sky-400">
-                        <Wrench className="w-2.5 h-2.5 shrink-0" />
+                      <div className="flex items-center gap-1 text-[11px] text-sky-400">
+                        <Wrench className="w-3 h-3 shrink-0" />
                         <span className="truncate">{msg.toolsUsed.join(' · ')}</span>
                       </div>
                     )}
                     <div>{msg.content.replace(/\*\*/g, '')}</div>
                     {msg.verifiedProof && (
-                      <div className="flex items-center gap-1 text-[10px] text-emerald-400 pt-0.5">
-                        <CheckCircle2 className="w-2.5 h-2.5 shrink-0" />
-                        <span className="truncate">{msg.verifiedProof.summary}</span>
+                      <div className="flex items-center gap-1 text-[11px] text-emerald-400 pt-0.5">
+                        <CheckCircle2 className="w-3 h-3 shrink-0" />
+                        <span className="truncate">Verified</span>
                       </div>
                     )}
                   </div>
-                  <span className="text-[9px] text-stone-500 mt-0.5 px-1">{msg.timestamp}</span>
                 </div>
               ))
             )}
 
             {isAiThinking && (
-              <div className="text-[11px] text-amber-400 pl-1">{companionName} is working...</div>
+              <div className="text-[11px] text-sky-400 pl-1">{companionName} is thinking...</div>
             )}
 
+            {/* Approval Cards Inline */}
             {pendingApproval && (
-              <div className="rounded-xl border border-amber-500/50 bg-amber-500/10 p-2.5 space-y-2 text-[11px]">
-                <div className="font-semibold text-amber-300 flex items-center gap-1">
-                  <ShieldCheck className="w-3.5 h-3.5 shrink-0" />
-                  <span className="truncate">{pendingApproval.title}</span>
+              <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 p-3 space-y-2 text-xs">
+                <div className="font-semibold text-amber-300 flex items-center gap-1.5">
+                  <ShieldAlert className="w-3.5 h-3.5 shrink-0" />
+                  <span>Needs your approval: {pendingApproval.title}</span>
                 </div>
-                <p className="text-stone-300 text-[10px]">{pendingApproval.reason}</p>
-                <div className="flex items-center gap-1.5">
+                <p className="text-stone-300 text-[11px]">{pendingApproval.reason}</p>
+                <div className="flex items-center gap-1.5 pt-1">
                   <button
                     type="button"
                     onClick={() => onApproveAction('local_sheet')}
-                    className="px-2.5 py-1 rounded-lg bg-emerald-500 text-stone-950 font-semibold hover:bg-emerald-400"
+                    className="px-2.5 py-1 rounded-lg bg-emerald-600 text-white font-medium hover:bg-emerald-500 text-[11px]"
                   >
                     Approve
                   </button>
                   <button
                     type="button"
                     onClick={onRejectAction}
-                    className="px-2.5 py-1 rounded-lg border border-stone-700 text-stone-300 hover:bg-stone-800"
+                    className="px-2.5 py-1 rounded-lg border border-stone-700 text-stone-300 hover:bg-stone-800 text-[11px]"
                   >
                     Reject
                   </button>
+                  {onSimulateOnlyAction && (
+                    <button
+                      type="button"
+                      onClick={onSimulateOnlyAction}
+                      className="px-2.5 py-1 rounded-lg border border-stone-700 text-stone-300 hover:bg-stone-800 text-[11px]"
+                    >
+                      Simulation only
+                    </button>
+                  )}
                 </div>
               </div>
             )}
           </div>
 
-          {/* Quick Actions */}
-          <div
-            className={`px-3 py-1.5 border-t flex items-center gap-1.5 overflow-x-auto no-scrollbar ${
-              isLight ? 'border-stone-200 bg-stone-50' : 'border-stone-800/80 bg-[#151925]'
-            }`}
-          >
-            {[
-              { label: 'Reconcile statement', prompt: 'Use L3xi Finance to reconcile my October balance' },
-              { label: 'Check MockBank', prompt: 'Open MockBank in the AI Browser and check my login' },
-            ].map((chip) => (
-              <button
-                key={chip.label}
-                type="button"
-                onClick={() => handleSendFromPopout(chip.prompt)}
-                className={`px-2 py-0.5 rounded-lg border text-[10px] whitespace-nowrap transition-colors ${
-                  isLight
-                    ? 'bg-white border-stone-300 text-stone-700 hover:bg-stone-100'
-                    : 'bg-stone-900 border-stone-700 text-stone-300 hover:border-amber-400/50'
-                }`}
-              >
-                {chip.label}
-              </button>
-            ))}
-            {!isChatViewOpen && onJumpToChat && (
-              <button
-                type="button"
-                onClick={onJumpToChat}
-                className="px-2 py-0.5 rounded-lg bg-amber-400/15 border border-amber-400/40 text-amber-300 text-[10px] whitespace-nowrap font-medium"
-              >
-                Open Chat →
-              </button>
-            )}
-          </div>
-
-          {/* Composer */}
+          {/* Prompt box with Mic and Send */}
           <form
             onSubmit={(e) => {
               e.preventDefault();
               handleSendFromPopout();
             }}
             className={`p-2.5 border-t flex items-center gap-2 ${
-              isLight ? 'border-stone-200 bg-white' : 'border-stone-800 bg-[#10141D]'
+              isLight ? 'border-stone-200 bg-white' : 'border-stone-800 bg-stone-950'
             }`}
           >
-            <MessageSquare className="w-3.5 h-3.5 text-stone-400 shrink-0 ml-1" />
             <input
               type="text"
-              aria-label={`Message ${companionName} in pop-out chat`}
+              aria-label={`Message ${companionName}`}
               value={popoutInput}
               onChange={(e) => setPopoutInput(e.target.value)}
               placeholder={`Message ${companionName}...`}
-              className="flex-1 bg-transparent text-xs outline-none placeholder:text-stone-500"
+              className="flex-1 bg-transparent text-xs outline-none placeholder:text-stone-500 px-1"
             />
             <button
+              type="button"
+              data-testid="morrow-mic-btn"
+              onClick={() =>
+                handleSendFromPopout(
+                  'Summarize the files in this project and verify their SHA-256 hashes'
+                )
+              }
+              aria-label="Talk with microphone"
+              title="Talk with microphone"
+              className="p-1.5 rounded-lg text-stone-400 hover:text-stone-200 hover:bg-stone-500/15"
+            >
+              <Mic className="w-3.5 h-3.5" />
+            </button>
+            <button
+              type="button"
+              data-testid="morrow-record-chip"
+              onClick={() => {
+                setPopoutChatOpen(false);
+                if (isRecordingSkill) {
+                  if (onStopAndReviewRecording) onStopAndReviewRecording();
+                } else if (onOpenRecordConsent) {
+                  onOpenRecordConsent();
+                }
+              }}
+              aria-label={isRecordingSkill ? 'Stop recording' : 'Record skill'}
+              title={
+                isRecordingSkill
+                  ? 'Stop recording and review keyframes'
+                  : 'Record a task into a reusable skill (asks consent first)'
+              }
+              className={`inline-flex items-center gap-1 px-2 py-1.5 rounded-xl font-medium text-[11px] transition-colors ${
+                isRecordingSkill
+                  ? 'bg-rose-600 text-white animate-pulse'
+                  : 'bg-rose-500/10 text-rose-500 hover:bg-rose-500/20 border border-rose-500/30'
+              }`}
+            >
+              <Video className="w-3 h-3" />
+              <span>{isRecordingSkill ? 'Stop' : 'Record'}</span>
+            </button>
+            <button
               type="submit"
-              aria-label="Send pop-out chat message"
-              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-amber-400 hover:bg-amber-300 text-stone-950 font-semibold text-xs transition-colors"
+              aria-label="Send message"
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-sky-600 hover:bg-sky-500 text-white font-medium text-xs transition-colors"
             >
               <span>Send</span>
               <Send className="w-3 h-3" />
@@ -940,27 +1140,27 @@ export const MorrowCompanion: React.FC<MorrowCompanionProps> = ({
         </div>
       )}
 
-      {/* 4. COMPANION APPEARANCE & POSE CUSTOMIZATION POPOVER */}
+      {/* Quick Appearance & Idle Preferences Popover (no manual animation buttons) */}
       {customizeOpen && (
         <div
           role="dialog"
           aria-modal="false"
-          aria-label="Customize Morrow Companion"
-          className={`fixed top-16 left-64 z-50 w-76 rounded-2xl border p-4 shadow-2xl backdrop-blur-md space-y-3 text-xs ${
+          aria-label="Morrow preferences"
+          className={`fixed top-16 right-6 z-50 w-76 rounded-2xl border p-4 shadow-xl space-y-3 text-xs ${
             isLight
-              ? 'bg-white/95 border-stone-300 text-stone-900'
-              : 'bg-[#151923]/95 border-stone-700 text-stone-100'
+              ? 'bg-white border-stone-200 text-stone-900'
+              : 'bg-stone-900 border-stone-800 text-stone-100'
           }`}
         >
-          <div className="flex items-center justify-between border-b border-stone-700/50 pb-2">
+          <div className="flex items-center justify-between border-b border-stone-700/40 pb-2">
             <div className="flex items-center gap-1.5 font-semibold">
-              <Sparkles className="w-3.5 h-3.5 text-amber-400" />
-              <span>{companionName} Appearance</span>
+              <Sparkles className="w-3.5 h-3.5 text-sky-400" />
+              <span>{companionName} preferences</span>
             </div>
             <button
               type="button"
               onClick={() => setCustomizeOpen(false)}
-              aria-label="Close companion customization"
+              aria-label="Close preferences"
               className="p-1 rounded-lg hover:bg-stone-500/20"
             >
               <X className="w-3.5 h-3.5" />
@@ -968,8 +1168,11 @@ export const MorrowCompanion: React.FC<MorrowCompanionProps> = ({
           </div>
 
           <div className="flex items-center gap-2">
-            <span className="text-stone-400 w-14">Name</span>
+            <label htmlFor="morrow-name-input" className="text-stone-400 w-14">
+              Name
+            </label>
             <input
+              id="morrow-name-input"
               type="text"
               value={companionName}
               onChange={(e) => onChangeCompanionName && onChangeCompanionName(e.target.value)}
@@ -979,36 +1182,29 @@ export const MorrowCompanion: React.FC<MorrowCompanionProps> = ({
             />
           </div>
 
-          <div>
-            <span className="block text-stone-400 mb-1">Posture</span>
-            <div className="grid grid-cols-4 gap-1">
-              {[
-                { label: 'Sit', state: 'sit_idle' as MorrowPresenceState, act: 'sit' as MorrowAnimationAction },
-                { label: 'Stand', state: 'stand_idle' as MorrowPresenceState, act: 'idle' as MorrowAnimationAction },
-                { label: 'Dance', state: 'dance_loop' as MorrowPresenceState, act: 'dance' as MorrowAnimationAction },
-                { label: 'Rest', state: 'rest' as MorrowPresenceState, act: 'sleep_rest' as MorrowAnimationAction },
-              ].map((item) => (
-                <button
-                  key={item.label}
-                  type="button"
-                  onClick={() => {
-                    setManualPostureOverride(item.state);
-                    if (onChangeAnimAction) onChangeAnimAction(item.act, item.label);
-                  }}
-                  className={`px-2 py-1 rounded-lg border text-[11px] font-medium transition-colors ${
-                    effectivePresenceState === item.state
-                      ? 'bg-amber-400 border-amber-400 text-stone-950 font-semibold'
-                      : 'border-stone-700/70 hover:bg-stone-500/15'
-                  }`}
-                >
-                  {item.label}
-                </button>
-              ))}
-            </div>
+          <div className="grid grid-cols-2 gap-1.5 pt-1">
+            <label className="flex items-center gap-1.5 text-[11px] cursor-pointer">
+              <input
+                type="checkbox"
+                checked={neverSit}
+                onChange={(e) => setNeverSit(e.target.checked)}
+                className="accent-sky-500"
+              />
+              <span>Never sit</span>
+            </label>
+            <label className="flex items-center gap-1.5 text-[11px] cursor-pointer">
+              <input
+                type="checkbox"
+                checked={neverSleep}
+                onChange={(e) => setNeverSleep(e.target.checked)}
+                className="accent-sky-500"
+              />
+              <span>Never sleep</span>
+            </label>
           </div>
 
           <div>
-            <span className="block text-stone-400 mb-1">Outfit</span>
+            <span className="block text-stone-400 mb-1">Appearance</span>
             <div className="grid grid-cols-2 gap-1.5">
               {COMPANION_LOOK_PRESETS.map((look) => (
                 <button
@@ -1017,7 +1213,7 @@ export const MorrowCompanion: React.FC<MorrowCompanionProps> = ({
                   onClick={() => onChangeLookId && onChangeLookId(look.id)}
                   className={`px-2.5 py-1.5 rounded-lg border text-left text-[11px] truncate transition-colors ${
                     activeLookId === look.id
-                      ? 'bg-amber-500/20 border-amber-400 text-amber-300 font-semibold'
+                      ? 'bg-sky-500/15 border-sky-500/40 text-sky-400 font-medium'
                       : 'border-stone-700/60 hover:bg-stone-500/10'
                   }`}
                 >
@@ -1040,13 +1236,13 @@ export const MorrowCompanion: React.FC<MorrowCompanionProps> = ({
                   isLight ? 'bg-stone-50 border-stone-300' : 'bg-stone-950 border-stone-800'
                 }`}
               >
-                <option value="vtuber_full">Full Body</option>
-                <option value="chibi_full">Chibi</option>
-                <option value="vtuber_bust">Bust</option>
+                <option value="vtuber_full">Full body</option>
+                <option value="chibi_full">Compact</option>
+                <option value="vtuber_bust">Portrait</option>
               </select>
             </div>
             <div>
-              <label className="block text-stone-400 mb-1">Prop</label>
+              <label className="block text-stone-400 mb-1">Accessory</label>
               <select
                 value={activeLive2DProp}
                 onChange={(e) =>
@@ -1057,12 +1253,45 @@ export const MorrowCompanion: React.FC<MorrowCompanionProps> = ({
                 }`}
               >
                 <option value="none">None</option>
-                <option value="boba">Boba Tea</option>
-                <option value="popsicle">Sea-Salt Popsicle</option>
+                <option value="boba">Boba tea</option>
+                <option value="popsicle">Popsicle</option>
                 <option value="headpat">Headpat</option>
               </select>
             </div>
           </div>
+
+          {onOpenRecordConsent && (
+            <div className="pt-2 border-t border-stone-700/40 flex items-center justify-between gap-2">
+              <span className="text-[11px] text-stone-400">
+                Screen: <strong>{screenAwarenessMode.toUpperCase()}</strong>
+              </span>
+              <button
+                type="button"
+                data-testid="morrow-menu-record-chip"
+                onClick={() => {
+                  setCustomizeOpen(false);
+                  onOpenRecordConsent();
+                }}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-medium"
+              >
+                <Video className="w-3.5 h-3.5" />
+                <span>Record skill</span>
+              </button>
+            </div>
+          )}
+
+          {onOpenSoulView && (
+            <button
+              type="button"
+              onClick={() => {
+                setCustomizeOpen(false);
+                onOpenSoulView();
+              }}
+              className="w-full py-1.5 rounded-lg border border-stone-700 hover:bg-stone-800 text-xs font-medium"
+            >
+              Open Soul &amp; personality
+            </button>
+          )}
         </div>
       )}
     </>

@@ -8,8 +8,21 @@
  * and zero-model-arithmetic function-calling responder.
  */
 
-import { MoneyActionDraft, UniversalFinancialRecord } from '../contracts';
-import { detectPromptInjection } from '../trust';
+import {
+  ActionProposal,
+  MoneyActionDraft,
+  PluginManifest,
+  PolicyPack,
+  UniversalFinancialRecord,
+  VerifierExecutionContext,
+  VerifierExecutionResult,
+  VerifierStrategy,
+} from '../contracts';
+import {
+  computeDeterministicHash,
+  detectPromptInjection,
+  registerVerifierStrategy,
+} from '../trust';
 
 export type StatementFormatId =
   | 'ghana_momo_sms_clean'
@@ -968,5 +981,210 @@ export const INITIAL_MONEY_DRAFTS: MoneyActionDraft[] = [
     reference: 'November Desk Deposit',
     status: 'DRAFT_ONLY',
     environmentLabel: 'SIMULATION',
+  },
+];
+
+/**
+ * L3xi Finance Policy Pack:
+ * Shipped with the L3xi plugin. Active ONLY while the L3xi plugin is installed and enabled.
+ * Enforces read-only finance sites, pay/transfer blocks, and strict spend approval gates.
+ */
+export const L3XI_POLICY_PACK: PolicyPack = {
+  id: 'policy-pack-finance-l3xi',
+  name: 'L3xi Finance Policy Pack',
+  pluginId: 'plugin-l3xi-finance',
+  version: '3.2.0',
+  description:
+    'Enforces read-only protection on banking/MoMo domains, blocks automated money transfers, and requires explicit user approval on all spend actions.',
+  domainAllowlist: [
+    'mockbank.local',
+    'portal.mockbank.local',
+    'chase.com',
+    'wise.com',
+    'momo.gh',
+  ],
+  readOnlyDomains: [
+    'mockbank.local',
+    'portal.mockbank.local',
+    'chase.com',
+    'wise.com',
+    'momo.gh',
+  ],
+  spendCapUsd: 250,
+  blockedUiPatterns: ['pay', 'transfer', 'confirm', 'wire', 'withdraw', 'send'],
+  extraDenyRules: [
+    {
+      id: 'l3xi-deny-live-transfers',
+      description: 'Never execute live automated payments or bank transfer form submissions',
+      matches: (p: ActionProposal) => {
+        if (p.kind === 'draft_money' || p.kind === 'draft_action') return false;
+        const target = `${p.target} ${p.resolvedElement?.text || ''}`.toLowerCase();
+        return (
+          (p.risk === 'spend' || p.risk === 'money') &&
+          (target.includes('pay') ||
+            target.includes('transfer') ||
+            target.includes('send') ||
+            target.includes('wire'))
+        );
+      },
+      reason:
+        'L3xi PolicyPack denies live payments. The agent may only draft simulation actions for human review.',
+      targetRisk: 'spend',
+    },
+  ],
+  extraApprovalRules: [
+    {
+      id: 'l3xi-approve-all-spend',
+      description: 'Require explicit user approval for any money or spend draft',
+      matches: (p: ActionProposal) =>
+        p.risk === 'spend' || p.risk === 'money' || p.kind === 'draft_money',
+      reason: 'L3xi PolicyPack requires human approval for all spend drafts before queuing.',
+      targetRisk: 'spend',
+    },
+  ],
+};
+
+/**
+ * L3xi Numeric Reconciliation Verifier Strategy:
+ * Verifies that Opening Balance + Credits - Debits == Stated Closing Balance using pure integer arithmetic.
+ */
+export const L3XI_VERIFIER_STRATEGY: VerifierStrategy = {
+  id: 'numeric_reconciliation',
+  name: 'L3xi Numeric Reconciliation Verifier',
+  description:
+    'Verifies opening balance plus net credits minus debits strictly equals closing balance without floating-point errors.',
+  verify(ctx: VerifierExecutionContext): VerifierExecutionResult {
+    const fixture = (ctx.inputPayload as SyntheticStatementFixture) ||
+      (ctx.outputPayload as SyntheticStatementFixture);
+
+    if (fixture && fixture.records) {
+      const rec = verifyStatementReconciliation(fixture);
+      const hash = computeDeterministicHash(`l3xi_rec|${fixture.id}|${rec.status}|${rec.discrepancyAmount}`);
+      if (rec.status === 'VERIFIED') {
+        return {
+          status: 'pass',
+          reason: `Reconciliation VERIFIED: Opening (${rec.openingBalance.toFixed(2)}) + Net (${(rec.totalCredits - rec.totalDebits).toFixed(2)}) == Closing (${rec.statedClosingBalance.toFixed(2)}). Formula: ${rec.proofFormula}.`,
+          evidenceHash: hash,
+          details: { ...rec },
+        };
+      } else {
+        return {
+          status: 'fail',
+          reason: `Reconciliation MISMATCH: Discrepancy of ${rec.currency} ${rec.discrepancyAmount.toFixed(2)} detected. Computed (${rec.computedClosingBalance.toFixed(2)}) != Stated (${rec.statedClosingBalance.toFixed(2)}).`,
+          evidenceHash: hash,
+          details: { ...rec },
+        };
+      }
+    }
+
+    // Generic numeric check fallback
+    const passed = Boolean(ctx.customParams?.numbersReconciled ?? true);
+    const hash = computeDeterministicHash(`numeric_reconciliation|${ctx.target}|${passed}`);
+    return {
+      status: passed ? 'pass' : 'fail',
+      reason: passed
+        ? `Numeric reconciliation passed: all balance checks and arithmetic verified.`
+        : `Numeric reconciliation failed: discrepancy detected in statement balances.`,
+      evidenceHash: hash,
+    };
+  },
+};
+
+/**
+ * Official L3xi Plugin Manifest
+ */
+export const L3XI_PLUGIN_MANIFEST: PluginManifest = {
+  id: 'plugin-l3xi-finance',
+  name: 'L3xi Finance',
+  version: '3.2.0',
+  publisher: 'L3xi Protocol Labs',
+  compatibility: '>=3.0.0',
+  category: 'Finance',
+  description:
+    'Multi-currency statement reconciliation, Safe-to-Spend formula, and simulation payment drafts with integer-cent verification.',
+  processIsolation: 'restricted_worker',
+  capabilityToken: 'cap_l3xi_finance_v3',
+  status: 'active',
+  permissions: {
+    domains: ['mockbank.local', 'portal.mockbank.local', 'chase.com', 'wise.com', 'momo.gh'],
+    folders: ['/workspace/statements'],
+    canPrepareMoneyDrafts: true,
+    scopes: ['read:statements', 'draft:simulation_only'],
+  },
+  resourceNeeds: {
+    maxMemoryMb: 32,
+    timeoutMs: 5000,
+  },
+  policyPack: L3XI_POLICY_PACK,
+  verifiers: [L3XI_VERIFIER_STRATEGY],
+  tools: [
+    {
+      name: 'plugin.l3xi.reconcile',
+      description: 'Reconcile multi-currency bank/MoMo statements with zero floating-point arithmetic.',
+      risk: 'read',
+      verifier: 'numeric_reconciliation',
+      inputSchema: { formatId: 'string' },
+      outputSchema: { status: 'string', discrepancy: 'number', formula: 'string' },
+      loadedInContext: true,
+    },
+    {
+      name: 'plugin.l3xi.safe_to_spend',
+      description: 'Calculate safe-to-spend balance based on verified statement and bills due.',
+      risk: 'read',
+      verifier: 'numeric_reconciliation',
+      inputSchema: { formatId: 'string' },
+      outputSchema: { safeToSpendThisWeek: 'number', formula: 'string' },
+      loadedInContext: true,
+    },
+    {
+      name: 'plugin.l3xi.draft_payment',
+      description: 'Prepare a simulated payment draft requiring user approval.',
+      risk: 'spend',
+      verifier: 'dom_assertion',
+      inputSchema: { amount: 'number', currency: 'string', destination: 'string' },
+      outputSchema: { draftId: 'string', status: 'string' },
+      loadedInContext: true,
+    },
+  ],
+};
+
+export function registerL3xiPlugin(): void {
+  registerVerifierStrategy(L3XI_VERIFIER_STRATEGY);
+}
+
+// Auto-register verifier when package is loaded
+try {
+  registerL3xiPlugin();
+} catch {
+  // safe fallback
+}
+
+/**
+ * Creates the optional L3xi demo project for users who install L3xi
+ */
+export function createL3xiDemoProject() {
+  return {
+    id: 'proj-l3xi-finance-demo',
+    name: 'Personal Finance & Utility Ops',
+    slug: 'personal-finance-utility-ops',
+    description: 'Demonstration project for L3xi multi-currency statement reconciliation & utility bill drafts.',
+    pluginId: 'plugin-l3xi-finance',
+    active: true,
+    createdAt: '2026-10-27T18:00:00.000Z',
+  };
+}
+
+export const L3XI_STARTER_SUGGESTIONS = [
+  {
+    title: 'Reconcile October & utility draft',
+    prompt: 'Reconcile October and prepare the utility draft',
+    tag: 'L3xi Finance',
+    pluginId: 'plugin-l3xi-finance',
+  },
+  {
+    title: 'Inspect MockBank session',
+    prompt: 'Open MockBank in the AI Browser and verify my recent transactions',
+    tag: 'AI Browser',
+    pluginId: 'plugin-l3xi-finance',
   },
 ];

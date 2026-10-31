@@ -116,6 +116,9 @@ export const LivingDesktopStudioPanel: React.FC<LivingDesktopStudioPanelProps> =
   setDanceSyncEnabled,
   onLogScheduleRunToLedger,
 }) => {
+  // Studio navigation tabs: 'rig' | 'persona' | 'audio' | 'benchmarks'
+  const [studioTab, setStudioTab] = useState<'rig' | 'persona' | 'audio' | 'benchmarks'>('rig');
+
   // 1. File Manager & ActionRegistry State
   const [fileAssets, setFileAssets] = useState<WorkspaceFileAsset[]>(
     WORKSPACE_FILE_MANAGER_ASSETS
@@ -502,19 +505,76 @@ export const LivingDesktopStudioPanel: React.FC<LivingDesktopStudioPanelProps> =
   };
 
   return (
-    <div className="space-y-8">
-      {/* SECTION B: Companion Character, 14-Action ActionRegistry & File Manager */}
+    <div className="space-y-6">
+      {/* Studio Category Navigation Tabs */}
+      <div
+        role="tablist"
+        aria-label="Studio Category Tabs"
+        className="flex flex-wrap items-center gap-1.5 p-1 rounded-xl bg-slate-900 border border-slate-800 text-xs"
+      >
+        <button
+          type="button"
+          role="tab"
+          aria-selected={studioTab === 'rig'}
+          onClick={() => setStudioTab('rig')}
+          className={`px-3 py-1.5 rounded-lg font-medium transition-colors ${
+            studioTab === 'rig'
+              ? 'bg-sky-400 text-slate-950 font-semibold'
+              : 'text-slate-400 hover:text-slate-200'
+          }`}
+        >
+          Companion Rig &amp; Assets
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={studioTab === 'persona'}
+          onClick={() => setStudioTab('persona')}
+          className={`px-3 py-1.5 rounded-lg font-medium transition-colors ${
+            studioTab === 'persona'
+              ? 'bg-sky-400 text-slate-950 font-semibold'
+              : 'text-slate-400 hover:text-slate-200'
+          }`}
+        >
+          Persona &amp; Safety
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={studioTab === 'audio'}
+          onClick={() => setStudioTab('audio')}
+          className={`px-3 py-1.5 rounded-lg font-medium transition-colors ${
+            studioTab === 'audio'
+              ? 'bg-sky-400 text-slate-950 font-semibold'
+              : 'text-slate-400 hover:text-slate-200'
+          }`}
+        >
+          Audio &amp; Tasks
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={studioTab === 'benchmarks'}
+          onClick={() => setStudioTab('benchmarks')}
+          className={`px-3 py-1.5 rounded-lg font-medium transition-colors ${
+            studioTab === 'benchmarks'
+              ? 'bg-sky-400 text-slate-950 font-semibold'
+              : 'text-slate-400 hover:text-slate-200'
+          }`}
+        >
+          Benchmarks &amp; Apps
+        </button>
+      </div>
+
+      {studioTab === 'rig' && (
       <section className="bg-[#0F1623] border border-slate-800 rounded-xl p-6 space-y-5">
         <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 pb-4 border-b border-slate-800">
           <div>
-            <p className="text-xs font-mono text-sky-400">
-              ADDENDUM B · ORIGINAL SFW 2D SPRITE PACK, 14-CLIP ACTIONREGISTRY &amp; FILE MANAGER
-            </p>
             <h2 className="text-xl font-bold text-slate-100 mt-1">
-              2D Anime Companion Asset File Manager &amp; Validated ActionRegistry
+              2D Companion Rig &amp; Action Registry
             </h2>
             <p className="text-xs text-slate-400 mt-0.5">
-              Original adult-presenting SFW design (<code className="text-slate-200">CC0-1.0</code> license verified, no 3D/WebGL, <code className="text-slate-200">4 FPS</code> idle float, <code className="text-slate-200">0 FPS</code> sleep). <code className="text-slate-200">celebrate</code> is strictly gated on <code className="text-emerald-400">done_with_proof</code>.
+              Original adult-presenting 2D rig (<code className="text-slate-200">CC0-1.0</code> verified). Actions are validated and policy-gated.
             </p>
           </div>
 
@@ -943,19 +1003,18 @@ export const LivingDesktopStudioPanel: React.FC<LivingDesktopStudioPanelProps> =
           </div>
         </div>
       </section>
+      )}
 
       {/* SECTION A: Persona Engine, Fact-Preservation Verifier & 30-Adversarial Suite */}
+      {studioTab === 'persona' && (
       <section className="bg-[#0F1623] border border-slate-800 rounded-xl p-6 space-y-5">
         <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 pb-4 border-b border-slate-800">
           <div>
-            <p className="text-xs font-mono text-sky-400">
-              ADDENDUM A · PERSONA ENGINE · ZOD PERSONACARD (&lt;= 300 TOKENS) &amp; FACT-PRESERVATION VERIFIER
-            </p>
             <h2 className="text-xl font-bold text-slate-100 mt-1">
-              Untrusted Persona Sanitizer, Fact-Preservation Check &amp; 30-Adversarial Benchmark
+              Persona Engine &amp; Fact-Preservation Verifier
             </h2>
             <p className="text-xs text-slate-400 mt-0.5">
-              Persona applies <strong>only to user-facing text</strong>, never to tool loops, the verifier, or PolicyGuard. Every number and status value is verified unchanged after persona rewrite; if any fact drifts, it falls back to the plain deterministic template.
+              Persona applies <strong>only to user-facing text</strong>, never to tool loops, the verifier, or PolicyGuard. Every number and status is verified unchanged.
             </p>
           </div>
 
@@ -1141,19 +1200,21 @@ export const LivingDesktopStudioPanel: React.FC<LivingDesktopStudioPanelProps> =
           </div>
         </div>
       </section>
+      )}
 
       {/* SECTION C & D: Player Plugin (cap_player_readonly_audio) & ScheduleSpec Compiler */}
+      {studioTab === 'audio' && (
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* C. Player Plugin (SQLite Index, NL Search, Tempo Worker, Ducking & M3U8 Guard) */}
         <section className="bg-[#0F1623] border border-slate-800 rounded-xl p-6 space-y-4 text-xs">
           <div className="flex items-center justify-between border-b border-slate-800 pb-3">
             <div>
-              <p className="font-mono text-sky-400">
-                ADDENDUM C · PLAYER PLUGIN (READ-ONLY FOLDERS · NO NETWORK · CC0 AUDIO)
-              </p>
               <h3 className="text-base font-bold text-slate-100 mt-0.5">
-                SQLite Metadata Index, NL Search, Worker Tempo Sync &amp; Ducking
+                Music Player &amp; Audio Ducking
               </h3>
+              <p className="text-xs text-slate-400 mt-0.5">
+                CC0 local tracks with Tempo Sync and real-time audio ducking during speech.
+              </p>
             </div>
             <button
               type="button"
@@ -1504,18 +1565,21 @@ export const LivingDesktopStudioPanel: React.FC<LivingDesktopStudioPanelProps> =
           </div>
         </section>
       </div>
+      )}
 
       {/* ARGON SECTION 3 & 11: First-Run 7-Step Onboarding & Naming Wizard + LOCAL_DEMO_SIMULATED Provider Banner */}
-      <section className="bg-[#0F1623] border border-slate-800 rounded-xl p-6 space-y-4 text-xs">
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 pb-3">
-          <div>
-            <p className="font-mono text-sky-400">
-              ARGON SECTIONS 3 &amp; 11 · FIRST-RUN 7-STEP ONBOARDING WIZARD &amp; MODELPROVIDER STATUS
-            </p>
-            <h3 className="text-base font-bold text-slate-100 mt-0.5">
-              First-Run Naming, Scale, Voice &amp; Biometric Setup ({LOCAL_DEMO_MODEL_PROVIDER_STATUS.activeMode})
-            </h3>
-          </div>
+      {studioTab === 'benchmarks' && (
+      <div className="space-y-6">
+        <section className="bg-[#0F1623] border border-slate-800 rounded-xl p-6 space-y-4 text-xs">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 pb-3">
+            <div>
+              <h3 className="text-base font-bold text-slate-100 mt-0.5">
+                First-Run Setup &amp; Model Provider
+              </h3>
+              <p className="text-xs text-slate-400 mt-0.5">
+                Companion identity, scale calibration, and offline deterministic model provider.
+              </p>
+            </div>
           <div className="flex items-center gap-2">
             <span className="px-2.5 py-1 rounded bg-emerald-500/15 border border-emerald-500/40 font-mono text-[11px] text-emerald-300">
               Mode: {LOCAL_DEMO_MODEL_PROVIDER_STATUS.activeMode} (0 API Keys Required)
@@ -2138,6 +2202,8 @@ export const LivingDesktopStudioPanel: React.FC<LivingDesktopStudioPanelProps> =
           </div>
         </section>
       </div>
+      </div>
+      )}
     </div>
   );
 };

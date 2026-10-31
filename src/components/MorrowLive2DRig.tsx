@@ -59,6 +59,20 @@ export interface MorrowLive2DRigProps {
   isPlayingMusic?: boolean;
   onAutoHeadpat?: () => void;
   onCursorGlance?: (nx: number, ny: number) => void;
+  customPalette?: {
+    hairColor?: string;
+    accentBraidColor?: string;
+    jacketColor?: string;
+    topColor?: string;
+    eyeColor?: string;
+  };
+  customAccessories?: {
+    headphones?: boolean;
+    starClips?: boolean;
+    hoopEarrings?: boolean;
+    neckChains?: boolean;
+    glasses?: boolean;
+  };
   className?: string;
 }
 
@@ -76,14 +90,25 @@ export const MorrowLive2DRig: React.FC<MorrowLive2DRigProps> = ({
   isPlayingMusic = false,
   onAutoHeadpat,
   onCursorGlance,
+  customPalette,
+  customAccessories,
   className = 'w-44 h-60',
 }) => {
   const rawId = useId();
   const uid = rawId.replace(/[^a-zA-Z0-9]/g, '');
   const svgRef = useRef<SVGSVGElement | null>(null);
 
-  const look: CompanionLookPreset =
+  const baseLook: CompanionLookPreset =
     COMPANION_LOOK_PRESETS.find((l) => l.id === lookId) || COMPANION_LOOK_PRESETS[0];
+
+  const look: CompanionLookPreset = {
+    ...baseLook,
+    hairColor: customPalette?.hairColor || baseLook.hairColor,
+    hairHighlight: customPalette?.accentBraidColor || baseLook.hairHighlight,
+    outfitPrimary: customPalette?.jacketColor || baseLook.outfitPrimary,
+    outfitAccent: customPalette?.topColor || baseLook.outfitAccent,
+    eyeColor: customPalette?.eyeColor || baseLook.eyeColor,
+  };
 
   // Cursor-tracked normalized gaze (-1..1) for eye irises, head tilt, and spring-braid sway
   const [gaze, setGaze] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
@@ -1848,6 +1873,36 @@ export const MorrowLive2DRig: React.FC<MorrowLive2DRigProps> = ({
             points="186,44 189,52 197,55 189,58 186,66 183,58 175,55 183,52"
             fill={look.hairHighlight}
           />
+        </g>
+      )}
+
+      {customAccessories?.glasses && effectiveAngle !== 'back' && (
+        <g
+          transform={headScaleTransform}
+          data-accessory="studio-glasses"
+          pointerEvents="none"
+        >
+          <rect
+            x="95"
+            y="72"
+            width="20"
+            height="13"
+            rx="4"
+            fill="rgba(56, 189, 248, 0.12)"
+            stroke="#E2E8F0"
+            strokeWidth="1.8"
+          />
+          <rect
+            x="125"
+            y="72"
+            width="20"
+            height="13"
+            rx="4"
+            fill="rgba(56, 189, 248, 0.12)"
+            stroke="#E2E8F0"
+            strokeWidth="1.8"
+          />
+          <line x1="115" y1="78" x2="125" y2="78" stroke="#E2E8F0" strokeWidth="1.8" />
         </g>
       )}
 

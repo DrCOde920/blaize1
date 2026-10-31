@@ -16,6 +16,7 @@ import {
   DollarSign,
   Globe,
   Info,
+  Lock,
   Music,
   Plus,
   Puzzle,
@@ -47,35 +48,62 @@ export interface ModularPluginItem {
   tagline: string;
   category: 'Finance' | 'Web & Automation' | 'Media' | 'Productivity' | 'Security' | 'Custom';
   version: string;
+  publisher?: string;
   enabledInChat: boolean;
   installed?: boolean;
   needsAttention?: boolean;
   permissions: string[];
+  riskClasses?: string[];
+  policyPackSummary?: string;
+  verifierSummary?: string;
   builtInWorkspace?: 'l3xi' | 'browser' | 'music' | 'scheduler' | 'trust' | 'custom';
 }
 
 export const INITIAL_MODULAR_PLUGINS: ModularPluginItem[] = [
   {
-    id: 'plugin-l3xi-finance',
-    name: 'L3xi Finance',
-    tagline: 'Multi-currency statement reconciliation, Safe-to-Spend & simulation drafts.',
-    category: 'Finance',
-    version: '3.2.0',
+    id: 'plugin-files',
+    name: 'Files & Folders',
+    tagline: 'Sandboxed local workspace folder access with SHA-256 hash validation.',
+    category: 'Productivity',
+    version: '2.1.0',
+    publisher: 'Blaize Core',
     enabledInChat: true,
     installed: true,
-    permissions: ['read:statements', 'draft:simulation_only'],
-    builtInWorkspace: 'l3xi',
+    permissions: ['fs:sandboxed_read', 'fs:sandboxed_write'],
+    riskClasses: ['read', 'write', 'destructive'],
+    policyPackSummary: 'Confined to workspace root; delete actions require operator approval.',
+    verifierSummary: 'file_exists_hash: cryptographic SHA-256 hash matches expected output.',
+    builtInWorkspace: 'custom',
   },
   {
     id: 'plugin-ai-browser',
-    name: 'AI Browser Navigator',
-    tagline: 'Sandboxed web automation with user login takeover and Teach & Replay.',
+    name: 'Research & AI Browser',
+    tagline: 'Sandboxed web navigation with citation verification and structured extraction.',
     category: 'Web & Automation',
     version: '3.0.4',
+    publisher: 'Blaize Web',
     enabledInChat: true,
     installed: true,
-    permissions: ['browser:active_tab', 'guard:coordinate_verify'],
+    permissions: ['browser:active_tab', 'verifier:citation_check'],
+    riskClasses: ['read'],
+    policyPackSummary: 'Restricts browsing to public research and documentation sources.',
+    verifierSummary: 'dom_assertion & citation_check: verifies primary source claims.',
     builtInWorkspace: 'browser',
+  },
+  {
+    id: 'plugin-code-helper',
+    name: 'Code Helper & IDE',
+    tagline: 'Workspace test execution, code analysis, and deterministic diff review.',
+    category: 'Productivity',
+    version: '2.4.0',
+    publisher: 'Blaize Engineering',
+    enabledInChat: true,
+    installed: true,
+    permissions: ['workspace:read', 'tests:run'],
+    riskClasses: ['read', 'write'],
+    policyPackSummary: 'Patches require test suite verification before checkpoint commit.',
+    verifierSummary: 'test_suite_pass: exitCode 0 and zero failed tests required.',
+    builtInWorkspace: 'custom',
   },
   {
     id: 'plugin-pulse-music',
@@ -83,9 +111,13 @@ export const INITIAL_MODULAR_PLUGINS: ModularPluginItem[] = [
     tagline: 'Local audio player that syncs companion dance animations to track BPM.',
     category: 'Media',
     version: '1.4.0',
+    publisher: 'Blaize Creative',
     enabledInChat: false,
     installed: true,
     permissions: ['audio:local_playback'],
+    riskClasses: ['read'],
+    policyPackSummary: 'Read-only local audio; zero network access or egress.',
+    verifierSummary: 'Local BPM analysis with offline cache.',
     builtInWorkspace: 'music',
   },
   {
@@ -94,9 +126,13 @@ export const INITIAL_MODULAR_PLUGINS: ModularPluginItem[] = [
     tagline: 'Recurring autonomous tasks with idempotency keys and PolicyGuard checks.',
     category: 'Productivity',
     version: '2.1.0',
+    publisher: 'Blaize Systems',
     enabledInChat: false,
     installed: true,
     permissions: ['schedule:cron_missions'],
+    riskClasses: ['read', 'system'],
+    policyPackSummary: 'Auto-approvals and money actions strictly blocked in recurring jobs.',
+    verifierSummary: 'schedule_preview: verifies next 5 execution slots.',
     builtInWorkspace: 'scheduler',
   },
   {
@@ -105,10 +141,59 @@ export const INITIAL_MODULAR_PLUGINS: ModularPluginItem[] = [
     tagline: 'SHA-256 hash-chained event log, standing rules, and tamper verification.',
     category: 'Security',
     version: '3.1.0',
+    publisher: 'Blaize Security',
     enabledInChat: true,
     installed: true,
     permissions: ['ledger:verify_chain', 'rules:compile'],
+    riskClasses: ['read', 'write', 'system'],
+    policyPackSummary: 'Immutable audit trail; redacting content preserves hash continuity.',
+    verifierSummary: 'SHA-256 cryptographic chain continuity verifier.',
     builtInWorkspace: 'trust',
+  },
+  {
+    id: 'plugin-l3xi-finance',
+    name: 'L3xi Finance',
+    tagline: 'Multi-currency statement reconciliation, Safe-to-Spend & simulation drafts.',
+    category: 'Finance',
+    version: '3.2.0',
+    publisher: 'L3xi Labs',
+    enabledInChat: false,
+    installed: false, // Optional Finance plugin installed from Marketplace
+    permissions: ['read:statements', 'draft:simulation_only', 'risk:spend'],
+    riskClasses: ['read', 'spend'],
+    policyPackSummary: 'Read-only finance sites (MockBank, Momo), payments blocked, spend capped at 500 GHS.',
+    verifierSummary: 'numeric_reconciliation: Opening + Credits - Debits == Closing in integer cents.',
+    builtInWorkspace: 'l3xi',
+  },
+  {
+    id: 'plugin-sqlite-explorer',
+    name: 'SQLite Data Explorer',
+    tagline: 'Embedded database introspection, schema analysis, and parameterized queries.',
+    category: 'Custom',
+    version: '1.2.0',
+    publisher: 'Blaize Community',
+    enabledInChat: false,
+    installed: false,
+    permissions: ['sqlite:read', 'sqlite:write_guarded'],
+    riskClasses: ['read', 'write'],
+    policyPackSummary: 'DDL destructive commands blocked; parameterized query enforcement.',
+    verifierSummary: 'file_exists_hash: validates database header and WAL integrity.',
+    builtInWorkspace: 'custom',
+  },
+  {
+    id: 'plugin-git-companion',
+    name: 'Git Companion & PR Reviewer',
+    tagline: 'Inspect repository commits, analyze diffs, and verify test suite status before merge.',
+    category: 'Productivity',
+    version: '1.5.0',
+    publisher: 'Blaize Community',
+    enabledInChat: false,
+    installed: false,
+    permissions: ['git:read', 'git:diff_verify'],
+    riskClasses: ['read'],
+    policyPackSummary: 'Read-only git introspection; remote force-pushes prohibited.',
+    verifierSummary: 'test_suite_pass: ensures clean test run before proposing commits.',
+    builtInWorkspace: 'custom',
   },
 ];
 
@@ -118,6 +203,7 @@ interface PluginsHubViewProps {
   plugins: ModularPluginItem[];
   onTogglePluginInChat: (pluginId: string) => void;
   onAddPlugin: (plugin: ModularPluginItem) => void;
+  onInstallPlugin?: (pluginId: string) => void;
   activeStandalonePluginId: string | null;
   onSelectStandalonePlugin: (pluginId: string | null) => void;
   onOpenBrowserView: () => void;
@@ -151,6 +237,7 @@ export const PluginsHubView: React.FC<PluginsHubViewProps> = ({
   plugins,
   onTogglePluginInChat,
   onAddPlugin,
+  onInstallPlugin,
   activeStandalonePluginId,
   onSelectStandalonePlugin,
   onOpenBrowserView,
@@ -182,6 +269,11 @@ export const PluginsHubView: React.FC<PluginsHubViewProps> = ({
   const [filterTab, setFilterTab] = useState<CatalogueFilter>('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [inspectPlugin, setInspectPlugin] = useState<ModularPluginItem | null>(null);
+
+  // Permission Review & Install Modal State
+  const [permissionReviewPlugin, setPermissionReviewPlugin] = useState<ModularPluginItem | null>(null);
+  const [installingPluginId, setInstallingPluginId] = useState<string | null>(null);
+  const [installNotice, setInstallNotice] = useState<string | null>(null);
 
   // Add Plugin Modal State
   const [addModalOpen, setAddModalOpen] = useState(false);
@@ -528,6 +620,10 @@ export const PluginsHubView: React.FC<PluginsHubViewProps> = ({
                 label: `Installed (${plugins.filter((p) => p.installed !== false).length})`,
               },
               {
+                id: 'available',
+                label: `Marketplace (${plugins.filter((p) => p.installed === false).length})`,
+              },
+              {
                 id: 'disabled',
                 label: `Disabled in Chat (${plugins.filter((p) => !p.enabledInChat).length})`,
               },
@@ -573,11 +669,32 @@ export const PluginsHubView: React.FC<PluginsHubViewProps> = ({
         </div>
       </div>
 
+      {/* Success Notification Banner */}
+      {installNotice && (
+        <div
+          data-testid="plugin-install-success-banner"
+          className="p-3.5 rounded-xl border border-emerald-500/30 bg-emerald-500/10 text-emerald-400 text-xs flex items-center justify-between"
+        >
+          <div className="flex items-center gap-2 font-medium">
+            <Check className="w-4 h-4 shrink-0" />
+            <span>{installNotice}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setInstallNotice(null)}
+            className="text-stone-400 hover:text-stone-200 p-0.5"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
+
       {/* Plugins Grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
         {filteredPlugins.map((plugin) => (
           <div
             key={plugin.id}
+            data-testid={`plugin-card-${plugin.id}`}
             className={`rounded-2xl border p-5 flex flex-col justify-between gap-4 transition-all ${
               isLight
                 ? 'bg-white border-stone-200/90 shadow-xs hover:border-stone-300'
@@ -602,22 +719,28 @@ export const PluginsHubView: React.FC<PluginsHubViewProps> = ({
                   </div>
                 </div>
 
-                {/* Toggle for Chat Collaboration */}
-                <button
-                  type="button"
-                  role="switch"
-                  aria-checked={plugin.enabledInChat}
-                  aria-label={`Use ${plugin.name} in Chat`}
-                  onClick={() => onTogglePluginInChat(plugin.id)}
-                  title="Allow Chat AI to use this plugin alongside other active tools"
-                  className={`px-2.5 py-1 rounded-lg text-[10px] font-semibold border transition-colors ${
-                    plugin.enabledInChat
-                      ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-400'
-                      : 'bg-stone-800/40 border-stone-700 text-stone-400'
-                  }`}
-                >
-                  {plugin.enabledInChat ? 'In Chat: ON' : 'In Chat: OFF'}
-                </button>
+                {/* Toggle for Chat Collaboration (only if installed) */}
+                {plugin.installed !== false ? (
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={plugin.enabledInChat}
+                    aria-label={`Use ${plugin.name} in Chat`}
+                    onClick={() => onTogglePluginInChat(plugin.id)}
+                    title="Allow Chat AI to use this plugin alongside other active tools"
+                    className={`px-2.5 py-1 rounded-lg text-[10px] font-semibold border transition-colors ${
+                      plugin.enabledInChat
+                        ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-400'
+                        : 'bg-stone-800/40 border-stone-700 text-stone-400'
+                    }`}
+                  >
+                    {plugin.enabledInChat ? 'In Chat: ON' : 'In Chat: OFF'}
+                  </button>
+                ) : (
+                  <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-amber-500/15 text-amber-400 border border-amber-500/30">
+                    Marketplace
+                  </span>
+                )}
               </div>
 
               <p className="text-xs text-stone-400 leading-relaxed">{plugin.tagline}</p>
@@ -633,23 +756,35 @@ export const PluginsHubView: React.FC<PluginsHubViewProps> = ({
                 <span>Permissions ({plugin.permissions.length})</span>
               </button>
 
-              <button
-                type="button"
-                onClick={() => {
-                  if (plugin.builtInWorkspace === 'browser') {
-                    onOpenBrowserView();
-                  } else {
-                    onSelectStandalonePlugin(plugin.id);
-                  }
-                }}
-                className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition-colors ${
-                  isLight
-                    ? 'bg-stone-900 text-white hover:bg-stone-800'
-                    : 'bg-stone-800 hover:bg-stone-700 text-stone-100'
-                }`}
-              >
-                Open Tool →
-              </button>
+              {plugin.installed === false ? (
+                <button
+                  type="button"
+                  data-testid={`install-plugin-${plugin.id}`}
+                  onClick={() => setPermissionReviewPlugin(plugin)}
+                  className="px-3 py-1.5 rounded-xl text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 text-white transition-colors flex items-center gap-1.5"
+                >
+                  <ShieldCheck className="w-3.5 h-3.5" />
+                  <span>Review &amp; Install</span>
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (plugin.builtInWorkspace === 'browser') {
+                      onOpenBrowserView();
+                    } else {
+                      onSelectStandalonePlugin(plugin.id);
+                    }
+                  }}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition-colors ${
+                    isLight
+                      ? 'bg-stone-900 text-white hover:bg-stone-800'
+                      : 'bg-stone-800 hover:bg-stone-700 text-stone-100'
+                  }`}
+                >
+                  Open Tool →
+                </button>
+              )}
             </div>
           </div>
         ))}
@@ -690,6 +825,24 @@ export const PluginsHubView: React.FC<PluginsHubViewProps> = ({
                 PolicyGuard approval gates.
               </p>
             </div>
+
+            {inspectPlugin.installed === false && (
+              <div className="pt-2">
+                <button
+                  type="button"
+                  data-testid={`drawer-install-plugin-${inspectPlugin.id}`}
+                  onClick={() => {
+                    const target = inspectPlugin;
+                    setInspectPlugin(null);
+                    setPermissionReviewPlugin(target);
+                  }}
+                  className="w-full py-2.5 rounded-xl text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 text-white flex items-center justify-center gap-2 transition-colors shadow-xs"
+                >
+                  <ShieldCheck className="w-4 h-4" />
+                  <span>Review Permissions &amp; Install</span>
+                </button>
+              </div>
+            )}
           </div>
         )}
       </SlideOverDrawer>
@@ -833,6 +986,175 @@ export const PluginsHubView: React.FC<PluginsHubViewProps> = ({
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* PERMISSION REVIEW MODAL BEFORE INSTALLATION */}
+      {permissionReviewPlugin && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="permission-review-title"
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs"
+        >
+          <div
+            className={`w-full max-w-lg rounded-2xl border p-6 space-y-5 shadow-2xl ${
+              isLight ? 'bg-white border-stone-300 text-stone-900' : 'bg-[#121620] border-stone-800 text-stone-100'
+            }`}
+          >
+            {/* Modal Header */}
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex items-center gap-3">
+                <div className="p-2.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-400">
+                  <ShieldCheck className="w-6 h-6" />
+                </div>
+                <div>
+                  <h3 id="permission-review-title" className="text-base font-bold leading-tight">
+                    Review Permissions &amp; Install
+                  </h3>
+                  <div className="flex items-center gap-2 mt-0.5 text-xs text-stone-400">
+                    <span>{permissionReviewPlugin.name}</span>
+                    <span>·</span>
+                    <span>v{permissionReviewPlugin.version}</span>
+                    <span>·</span>
+                    <span>{permissionReviewPlugin.publisher || 'Blaize Community'}</span>
+                  </div>
+                </div>
+              </div>
+              <button
+                type="button"
+                aria-label="Close permission review"
+                onClick={() => setPermissionReviewPlugin(null)}
+                className="p-1 rounded-lg text-stone-400 hover:text-stone-200 hover:bg-stone-500/10"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <p className="text-xs text-stone-400 leading-relaxed">
+              {permissionReviewPlugin.tagline}
+            </p>
+
+            {/* Security Architecture Principle */}
+            <div className="p-3 rounded-xl border border-sky-500/20 bg-sky-500/10 text-xs text-sky-300 space-y-1">
+              <div className="font-semibold flex items-center gap-1.5">
+                <Lock className="w-3.5 h-3.5" />
+                <span>Default-Deny PolicyGuard Protection</span>
+              </div>
+              <p className="text-[11px] text-stone-300">
+                Plugins run inside an isolated sandbox. PolicyPacks can only tighten core rules, never relax them. Unattended money actions remain strictly blocked.
+              </p>
+            </div>
+
+            {/* Requested Risk Classes */}
+            <div className="space-y-2 text-xs">
+              <div className="font-semibold text-stone-300">Requested Risk Classes</div>
+              <div className="grid grid-cols-2 gap-2">
+                {(permissionReviewPlugin.riskClasses || ['read']).map((rc) => (
+                  <div
+                    key={rc}
+                    className={`p-2.5 rounded-xl border text-xs flex items-center gap-2 ${
+                      rc === 'spend'
+                        ? 'border-violet-500/40 bg-violet-500/10 text-violet-300'
+                        : rc === 'destructive'
+                          ? 'border-rose-500/40 bg-rose-500/10 text-rose-300'
+                          : rc === 'write'
+                            ? 'border-amber-500/40 bg-amber-500/10 text-amber-300'
+                            : 'border-sky-500/40 bg-sky-500/10 text-sky-300'
+                    }`}
+                  >
+                    <span className="font-mono font-bold uppercase text-[10px] px-1.5 py-0.5 rounded bg-black/40">
+                      {rc}
+                    </span>
+                    <span className="text-[11px]">
+                      {rc === 'spend'
+                        ? 'Draft financial operations'
+                        : rc === 'destructive'
+                          ? 'File deletion (requires approval)'
+                          : rc === 'write'
+                            ? 'Workspace file modification'
+                            : 'Read-only access'}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* PolicyPack Guard Rules */}
+            {permissionReviewPlugin.policyPackSummary && (
+              <div className="p-3 rounded-xl border border-stone-800 bg-stone-900/60 text-xs space-y-1">
+                <div className="font-semibold text-stone-200">Tightening PolicyPack</div>
+                <p className="text-[11px] text-stone-400">
+                  {permissionReviewPlugin.policyPackSummary}
+                </p>
+              </div>
+            )}
+
+            {/* Verification Strategy */}
+            {permissionReviewPlugin.verifierSummary && (
+              <div className="p-3 rounded-xl border border-stone-800 bg-stone-900/60 text-xs space-y-1">
+                <div className="font-semibold text-stone-200">Registered Verifier Strategy</div>
+                <p className="text-[11px] text-stone-400">
+                  {permissionReviewPlugin.verifierSummary}
+                </p>
+              </div>
+            )}
+
+            {/* Actions */}
+            <div className="flex items-center justify-end gap-3 pt-3 border-t border-stone-800">
+              <button
+                type="button"
+                onClick={() => setPermissionReviewPlugin(null)}
+                className="px-4 py-2 rounded-xl text-xs font-medium border border-stone-700 hover:bg-stone-800 text-stone-300"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                data-testid="confirm-install-plugin-btn"
+                disabled={Boolean(installingPluginId)}
+                onClick={async () => {
+                  const targetPlugin = permissionReviewPlugin;
+                  setInstallingPluginId(targetPlugin.id);
+                  try {
+                    await fetch('/api/plugins/install', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({
+                        pluginId: targetPlugin.id,
+                        confirmedByOperator: true,
+                        grantedRiskClasses: targetPlugin.riskClasses || ['read'],
+                      }),
+                    }).catch(() => null);
+
+                    onAddPlugin({
+                      ...targetPlugin,
+                      installed: true,
+                      enabledInChat: true,
+                    });
+                    if (onInstallPlugin) {
+                      onInstallPlugin(targetPlugin.id);
+                    }
+                    setInstallNotice(`Installed ${targetPlugin.name} successfully. PolicyPack is now active.`);
+                    setTimeout(() => setInstallNotice(null), 4000);
+                  } finally {
+                    setInstallingPluginId(null);
+                    setPermissionReviewPlugin(null);
+                  }
+                }}
+                className="px-4 py-2 rounded-xl text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 text-white flex items-center gap-1.5 shadow-xs"
+              >
+                {installingPluginId ? (
+                  <span>Installing...</span>
+                ) : (
+                  <>
+                    <Check className="w-3.5 h-3.5" />
+                    <span>Approve &amp; Install Plugin</span>
+                  </>
+                )}
+              </button>
+            </div>
           </div>
         </div>
       )}
