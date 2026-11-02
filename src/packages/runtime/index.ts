@@ -234,14 +234,15 @@ export function assembleTokenLeanPrompt(params: {
     .split(/\W+/)
     .filter((w) => w.length > 2);
   const scoredMemories = params.memories.map((m) => {
-    const lower = `${m.fact} ${m.category}`.toLowerCase();
+    const factText = m.fact || m.content || '';
+    const lower = `${factText} ${m.category}`.toLowerCase();
     const hits = qWords.filter((w) => lower.includes(w)).length;
     return { m, score: hits + (m.category === 'financial_guardrail' ? 2 : 0) };
   });
   scoredMemories.sort((a, b) => b.score - a.score);
   const selectedMemories = scoredMemories.slice(0, 5).map(({ m }) => ({
     id: m.id,
-    fact: m.fact,
+    fact: m.fact || m.content || '',
     provenance: `${m.source} (${m.updatedAt})`,
   }));
   const slot2Text =
@@ -696,7 +697,9 @@ export function compileTeachDemonstrationToSkill(params: {
     version: 1,
     description: `Compiled from Teach & Replay demonstration (${safeSteps.length} intent steps).`,
     triggers: [slug, 'replay', 'statement', 'october'],
+    parameters: [],
     parameterNames: ['target_month'],
+    requiredConnectors: [],
     skillMarkdown,
     usageCount: 0,
     guardVerified: true,
@@ -1302,7 +1305,7 @@ export class AgentRuntime {
       case 'memory.read': {
         return {
           snippets: ctx.memories.map((m) => ({
-            fact: m.fact,
+            fact: m.fact || m.content || '',
             provenance: m.source,
           })),
         };
@@ -1411,7 +1414,7 @@ export class AgentRuntime {
       case 'schedule.create': {
         const compiled = compileNaturalLanguageToScheduleSpec({
           prompt: String(toolCall.args.prompt || 'Every Monday at 09:00 check statement'),
-          timezone: String(toolCall.args.timezone || 'Africa/Accra'),
+          timezone: (toolCall.args.timezone as any) || 'Africa/Accra',
         });
         const schedItem = {
           title: 'Weekly October Statement & Reserve Watch',
@@ -1672,7 +1675,7 @@ export function buildDefaultPersistedSnapshot(): PersistedWorkspaceSnapshotV2 {
     rules: INITIAL_RULE_BOOK,
     virtualFiles: {
       '~/.blaize/SOUL.md': DEFAULT_SOUL_DOCUMENT.rawMarkdown,
-      '~/.blaize/memories/MEMORY.md': INITIAL_MEMORY_ENTRIES.map((m) => `- ${m.fact}`).join('\n'),
+      '~/.blaize/memories/MEMORY.md': INITIAL_MEMORY_ENTRIES.map((m) => `- ${m.fact || m.content || ''}`).join('\n'),
       '~/.blaize/rules/RULES.json': JSON.stringify(INITIAL_RULE_BOOK, null, 2),
     },
   };

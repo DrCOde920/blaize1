@@ -1,6 +1,56 @@
 # Blaize Desktop Workspace — Build & Verification Log
 
-## Latest Iteration (Prompt 4/4): A General AI Browser that Works & A Small VS Code
+## Latest Iteration: ASSISTANT-FIRST AUTONOMY, FILE MAP ('My Places', `Library > Places`) & PC OPERATOR
+
+### 0. Assistant-First Autonomy (`src/packages/pc_operator/index.ts` & `src/components/AssistantChoreBar.tsx`)
+- **Full Strength on Delegated Chores [REAL]**:
+  - Once handed over in chat, on a schedule, through a skill, or with `'Do this for me'` (`runDelegatedChoreEndToEnd`), Blaize owns the chore end-to-end inside its granted scope with **0 human prompts** (`completedWithoutPrompts: true`, `promptsIssuedCount: 0`).
+  - Self-recovers automatically without bothering the user (`retry` -> `switch_method` across `T1_DIRECT_TOOLS` / `T2_ACCESSIBILITY` -> `replan` -> deterministic SHA-256 `verify`).
+  - Tracks and reports KPIs: `successRatePct` (`100%`), `stepsCount`, `humanInterventionsPer100Tasks` (`0` in scope), and `falseSuccessCount` (`0`).
+- **Beside the User, Never Over Them & Trust Builders [REAL]**:
+  - Works in the background whenever possible (`0px` cursor movement, focus untouched). Waits for idle if `T4_PIXEL_INPUT` is required, and yields immediately when the user touches the mouse or keyboard (`pauseChoreOnUserInput`).
+  - Sensitive categories (`people`, `money`, `identity`, `sending_messages`, `deleting`, `ambiguity`) always prepare options and ask the human.
+  - Respects `Places` never-go zones, the `Rule Book`, and `Do Not Disturb` / `Focus` mode.
+  - Friendly helper tone (`"I'll handle it"`, `"Done, here's what I did"`, `"Want me to..."`) with `'How much should I ask?'` (`Ask me a lot`, `Ask for important things` (default), `Only ask for risky things`) and 1-click `Undo`.
+
+### 1. File Map ('My Places') — `Library > Places` (`src/packages/places/index.ts` & `src/components/PlacesMapView.tsx`)
+- **Local Folder Map & Plain-Language Meaning [REAL]**:
+  - Each place is validated via `PlaceRuleSchema` (Zod) with `path`, friendly `label`, `purpose` (`'where invoices go'`), `belongsHere` (`fileTypes`, `namePatterns`, `keywords`), `allowedActions` (`read`, `add`, `move`, `rename`, `delete`), and `status`: `Allowed` (`allowed`), `Ask first` (`ask_first`), or `Never` (`never`).
+  - Visual UI under `Library > Places` with Cards and Tree views, colored status badges (`Allowed`, `Ask first`, `Never`), search, and technical paths tucked under `Details`.
+- **Build the Map (Read-Only, With Permission) [REAL + HONEST BROWSER DISCLOSURE]**:
+  - Uses the browser File System Access API (`window.showDirectoryPicker`, Chromium only) behind the `FileSystemBridge` interface (`BROWSER_FILE_SYSTEM_BRIDGE`) and states honestly that browsers limit which system folders can be opened, while the desktop shell adds full native access behind the same `FileSystemBridge` interface.
+  - Indexes metadata only (`name`, `extension`, `sizeBytes`, `lastModifiedIso`). Never reads file contents unless `allowContentIndexing: true` on an `Allowed` place.
+  - Encrypted-at-rest local storage envelope (`exportEncryptedMapArchive`), JSON export, 1-click delete/reset, and `buildSafeModelPlacesSnippet()` which strips all `Never` zones before sending small snippets to the model.
+  - **Map Health Card**: Detects missing folders and stale rules, offers 1-click `Rescan`, and automatically heals moved or renamed folders by matching `folderFileId` (`evaluateMapHealthAndHealRenames`).
+- **Teach It Three Ways (All Produce Proposals the User Confirms) [REAL]**:
+  - **Describe**: Natural language compiler (`compileDescribeToPlaceProposals`) parses statements like *"My tax papers live in Documents/Taxes. Never touch Family Photos."* into Zod-validated `PlaceProposal` cards with visual confirmation.
+  - **Record**: Narration + File Explorer keyframe review (`compileRecordedExplorerSessionToProposals`) with per-keyframe privacy blur toggles and selection checkboxes so only selected, non-Never keyframes are compiled.
+  - **Snap**: Screenshot / hand-drawn folder sketch extractor (`compileSnapSketchToPlaceProposals`) turning visual labels into proposed places.
+  - **Corrections are Teaching**: Natural-language corrections (`applyUserPlaceCorrection`, e.g. *"No, receipts go in Finance/2026"*) generate proposals when modifying an existing rule, and repeated corrections (`>= 2`) automatically promote a proposed rule to `Proof > Review`.
+- **Never-Go Zones (`PlacesGuard` Enforced in Code, Not Prompts) [REAL]**:
+  - Single `evaluatePlacesGuard()` entry point enforcing rules across `'files_plugin' | 'workspace_tool' | 'skill' | 'scheduled_chore' | 'shell_command' | 'subagent' | 'connector'`.
+  - Path canonicalization (`canonicalizePlacePath`) resolves `..` traversal, symlinks/junctions, case differences, Windows UNC paths (`\\?\UNC\...`), Windows 8.3 short names (`PROGRA~1` -> `program files`), and drive roots.
+  - **Deny Beats Allow**: Any overlapping `Never` rule overrides `Allowed` rules. Unknown folders inside chosen roots default to `Ask first`; anything outside chosen roots defaults to `Never`.
+  - Editable Default `Never` list (`~/.ssh`, `/etc`, `C:\Windows\System32`, `C:\Program Files`, browser profiles, `~/1Password`, `Family Photos`) with explicit warning and re-authentication modal (`changePlaceStatusWithReauth`) required to change `Never` to `Allowed`.
+  - Blocked attempts return `"That folder is off limits"` and offer `"Change this rule"`.
+- **GET and PUT (`places.find` & `places.suggest_destination`) + Undo Journal [REAL]**:
+  - `placesFind(intent)` ranks candidates by purpose, filename, keywords, and allowed content snippet with confidence and explanation.
+  - `placesSuggestDestination(file)` proposes where a file belongs from extension, name patterns, keywords, and past user corrections.
+  - `PlacesUndoJournal` logs every move (`move_never_delete`) with 1-click `Undo` (`undoMove`).
+  - Integrated with Morrow Chat (`"where is X?"` and `"where should this go?"` render a compact Places card with an `Open` button), the Scheduler (`"Every Friday tidy Downloads using my Places"`), and the Scoped Rule Book (`Scope: Place`).
+
+### 2. Assistant, Not Takeover & PC Operator (`src/packages/pc_operator/index.ts`, `src/components/AssistantChoreBar.tsx`, `src/components/PCOperatorView.tsx`)
+- **Offer Before Acting & Stay Out of the Way [REAL]**:
+  - `AssistantChoreBar` offers chores (`"Want me to tidy your Downloads?"`) and waits for user handover.
+  - Prefers background tiers (`T1_DIRECT`, `T2_A11Y`) that never move the user's cursor or steal focus; auto-pauses immediately on mouse/keyboard touch and hands control back with a 1-line summary.
+  - Post-chore change summary with 1-click `Undo` (`undoChoreRun`), sensitive category handback (`people`, `money`, `identity`, `sending_messages`, `deleting`, `ambiguity`), and `"How much should I ask?"` setting mapped to autonomy levels.
+- **DesktopDriver & Blaize Remote Node [REAL + DOCUMENTED STUBS]**:
+  - `DesktopDriver` interface with simulated preview drivers (`WindowsDesktopDriver`, `MacOSDesktopDriver`, `LinuxDesktopDriver`) and a 64-task deterministic PC benchmark suite (`runBenchmarkSuite`, Ladder-On vs Vision-Only).
+  - `BlaizeNodePairingStub` is honestly labeled as a `[STUB]` for remote PC pairing (one-time code, E2EE, outbound-only).
+
+---
+
+## Previous Iteration (Prompt 4/4): A General AI Browser that Works & A Small VS Code
 
 ### 1. General AI Browser (`Workbench > AI Browser` — `src/packages/browser_ide/index.ts` & `src/components/GeneralBrowserView.tsx`)
 - **Domain-Neutral Start Page [REAL]**:

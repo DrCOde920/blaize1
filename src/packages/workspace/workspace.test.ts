@@ -58,13 +58,12 @@ test('createOrUpdateArtifact creates v1 and increments version history on update
 test('compileAndExecuteReusableSkill interpolates parameters and blocks policy bypass skills', () => {
   const skill = INITIAL_REUSABLE_SKILLS[0];
   const res = compileAndExecuteReusableSkill(skill, {
-    portal_domain: 'portal.mockbank.local',
-    statement_month: 'November 2026',
-    reserve_floor_ghs: '950',
+    topic: 'Distributed Systems Consensus',
+    min_citations: '3',
   });
   assert.equal(res.ok, true);
-  assert.ok(res.generatedArtifactContent.includes('November 2026'));
-  assert.ok(res.generatedArtifactContent.includes('950'));
+  assert.ok(res.generatedArtifactContent.includes('Distributed Systems Consensus'));
+  assert.ok(res.generatedArtifactContent.includes('3'));
 
   assert.throws(() =>
     createCustomReusableSkill({
@@ -195,20 +194,20 @@ test('Hermes 4-Slot System Prompt Assembler injects SOUL.md in Slot #1 and progr
   assert.ok(slot2Idx < slot3Idx);
   assert.ok(slot3Idx < slot4Idx);
 
-  // Tier 1: Prompt matches statement reconciliation trigger -> full SKILL.md loaded on demand
+  // Tier 1: Prompt matches research citation trigger -> full SKILL.md loaded on demand
   const matchedPrompt = assembleHermesSystemPrompt({
     soul: DEFAULT_SOUL_DOCUMENT,
     memoryEntries: INITIAL_MEMORY_ENTRIES,
     project: INITIAL_WORKSPACE_PROJECTS[0],
     skills: INITIAL_REUSABLE_SKILLS,
-    activePrompt: 'Please reconcile my October bank statement balance',
+    activePrompt: 'Please verify research citations and references in this paper',
   });
 
   assert.equal(matchedPrompt.activeSkillBodies.length, 1);
-  assert.equal(matchedPrompt.activeSkillBodies[0].slug, 'monthly-statement-reconciler');
+  assert.equal(matchedPrompt.activeSkillBodies[0].slug, 'citation-verifier');
   assert.ok(
     matchedPrompt.fullSystemPrompt.includes(
-      'TIER 1 ON-DEMAND SKILL_VIEW LOADED (monthly-statement-reconciler)'
+      'TIER 1 ON-DEMAND SKILL_VIEW LOADED (citation-verifier)'
     )
   );
 });
@@ -343,7 +342,7 @@ test('Argon Master Prompt: proposeSoulChangeFromNaturalLanguage, Soul template i
   // 4. Connector Read Sandbox
   const connRes = testConnectorReadSandbox(
     INITIAL_WORKSPACE_CONNECTORS[0],
-    'proj-fintech-audit'
+    'proj-work'
   );
   assert.equal(connRes.allowed, true);
   assert.equal(connRes.displayMode, 'Simulated Sandbox');

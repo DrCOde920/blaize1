@@ -10,7 +10,8 @@
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
-    "test": "tsx --test src/packages/trust/trust.test.ts src/packages/l3xi/l3xi.test.ts src/packages/living/living.test.ts src/packages/workspace/workspace.test.ts src/packages/runtime/runtime.test.ts src/packages/recorder/recorder.test.ts src/packages/character/studio_vault_hermes.test.ts",
+    "test": "tsx --test src/packages/trust/trust.test.ts src/packages/l3xi/l3xi.test.ts src/packages/living/living.test.ts src/packages/workspace/workspace.test.ts src/packages/runtime/runtime.test.ts src/packages/recorder/recorder.test.ts src/packages/character/studio_vault_hermes.test.ts src/packages/hub/index.test.ts src/packages/projects_evals/index.test.ts src/packages/connectors_scheduler/index.test.ts src/packages/browser_ide/index.test.ts src/packages/pc_operator/index.test.ts src/packages/places/index.test.ts",
+    "verify": "tsx scripts/verify.ts",
     "eval": "tsx scripts/run-eval.ts"
   },
   "dependencies": {

@@ -49,7 +49,8 @@ export type MorrowAnimationAction =
   | 'wave_greet'
   | 'uncertain_concerned'
   | 'waiting_approval'
-  | 'sleep_rest';
+  | 'sleep_rest'
+  | 'idle_breathe';
 
 export interface ActionRegistryEntry {
   name: ActionRegistryName;
@@ -1665,6 +1666,7 @@ export interface MusicTrackItem {
   artist: string;
   album: string;
   durationSec: number;
+  durationLabel?: string;
   bpm: number;
   filePath: string;
   source: 'local_library' | 'm3u8_imported';
@@ -1900,6 +1902,8 @@ export interface ScheduledMissionRecord {
   quietHours: string;
   missedRunPolicy: MissedRunPolicy;
   status: 'ENABLED' | 'PAUSED' | 'PENDING_CONFIRMATION';
+  lastRunStatus?: string;
+  cronExpression?: string;
   lastOutcome: string;
   dynamicStepCountEstimate: number;
 }
@@ -2427,7 +2431,7 @@ export interface ScheduleSpec {
     kind: 'one_time' | 'recurring' | 'watch_condition';
     cronOrIso: string;
     watchCondition?: {
-      metric: 'account_balance_ghs' | 'safe_to_spend_ghs' | 'invoice_count';
+      metric: 'account_balance_ghs' | 'safe_to_spend_ghs' | 'invoice_count' | 'disk_or_budget_threshold';
       operator: 'lt' | 'gt';
       threshold: number;
     };
@@ -3334,7 +3338,15 @@ export type MorrowPresenceState =
   | 'carried'
   | 'land'
   | 'peek_left'
-  | 'peek_right';
+  | 'peek_right'
+  | 'walk_left'
+  | 'walk_right'
+  | 'listen_mic'
+  | 'celebrate_verified'
+  | 'concerned_error'
+  | 'work_coding'
+  | 'rest_idle'
+  | 'dance_groove';
 
 export type MissionEngineActivityEvent =
   | 'idle'
@@ -3388,7 +3400,7 @@ export interface PresenceStateMetadata {
   groundAnchor: ClipGroundAnchor;
 }
 
-export const PRESENCE_STATE_USAGE_MAP: Record<MorrowPresenceState, PresenceStateMetadata> = {
+export const PRESENCE_STATE_USAGE_MAP: Record<string, PresenceStateMetadata> = {
   stand_idle: {
     state: 'stand_idle',
     label: 'Standing Idle (Floor Grounded)',
@@ -4355,6 +4367,13 @@ export interface PersonalityBehavioralEffectResult {
   danceDurationSec: number;
 }
 
+export interface StructuredMissionFacts {
+  taskStatus: string;
+  numbers: string[];
+  errors: string[];
+  approvalRequest: unknown;
+}
+
 /**
  * UI/UX PROMPT B — Section 3:
  * Evaluates all 5 personality attributes into concrete, testable runtime behaviors.
@@ -4436,7 +4455,7 @@ export function evaluatePersonalityAttributeBehaviors(params: {
 
   return {
     replyText: candidateText,
-    factsPreserved: facts.numbers.every((n) => candidateText.includes(n)) &&
+    factsPreserved: facts.numbers.every((n: string) => candidateText.includes(n)) &&
       candidateText.includes(facts.taskStatus),
     shouldWaveOnReturn: params.warmth >= 55,
     smileFrequencyPct: Math.max(10, Math.min(100, Math.round(params.warmth))),

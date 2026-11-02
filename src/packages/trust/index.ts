@@ -316,8 +316,8 @@ export function evaluatePolicyGuard(
     );
     if (isPackReadOnlyDomain && proposal.kind !== 'draft_action' && proposal.kind !== 'draft_money') {
       const matchesBlockedPattern = (pack.blockedUiPatterns || []).some((pattern) => {
-        if (pattern instanceof RegExp) return pattern.test(resolvedSignature);
-        return resolvedSignature.toLowerCase().includes(pattern.toLowerCase());
+        if ((pattern as unknown) instanceof RegExp) return (pattern as unknown as RegExp).test(resolvedSignature);
+        return resolvedSignature.toLowerCase().includes(String(pattern).toLowerCase());
       });
       if (
         matchesBlockedPattern ||
@@ -1361,6 +1361,10 @@ export class VerifierRegistry {
 
   public list(): VerifierStrategy[] {
     return Array.from(this.strategies.values());
+  }
+
+  public listIds(): string[] {
+    return Array.from(this.strategies.keys());
   }
 
   public verify(strategyId: string, context: VerifierExecutionContext): VerifierExecutionResult {

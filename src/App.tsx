@@ -62,6 +62,7 @@ import {
   Stethoscope,
   KeyRound,
   UserCheck,
+  Pencil,
 } from 'lucide-react';
 import { MorrowCompanion } from './components/MorrowCompanion';
 import { SkillRecorderStudio } from './components/SkillRecorderStudio';
@@ -81,8 +82,25 @@ import {
   UnifiedSoulPageView,
 } from './components/HubPopoverAndViews';
 import { FirstRunBriefingModal } from './components/FirstRunBriefingModal';
-import { ProjectsAndArtifactsView } from './components/ProjectsAndArtifactsView';
+import { ProjectsAndArtifactsView, ProjectChatSummary } from './components/ProjectsAndArtifactsView';
 import { GeneralEvaluationsView } from './components/GeneralEvaluationsView';
+import { PCOperatorView, PCOperatorTabId } from './components/PCOperatorView';
+import { PlacesMapView } from './components/PlacesMapView';
+import {
+  INITIAL_USER_PLACES,
+  INITIAL_INDEXED_FILES,
+  placesFind,
+  placesSuggestDestination,
+  evaluatePlacesGuard,
+  type PlaceRule,
+  type IndexedFileMetadata,
+} from './packages/places';
+import {
+  DEFAULT_HOW_MUCH_SHOULD_I_ASK,
+  HOW_MUCH_SHOULD_I_ASK_OPTIONS,
+  sanitizeAssistantToneCopy,
+  type HowMuchShouldIAskPreference,
+} from './packages/pc_operator';
 import {
   GeneralEvaluationRunRecord,
   GeneralEvaluationRunner,
@@ -236,6 +254,7 @@ import {
 import {
   DEFAULT_SOUL_PROFILE_CONFIG,
   HubPageId,
+  TopLevelSidebarGroupId,
   INITIAL_INSTALLED_PLUGINS,
   INITIAL_REVIEW_PROPOSALS,
   INITIAL_SCOPED_RULES,
@@ -279,10 +298,12 @@ const EvalsAndSleepView = lazy(() =>
 
 type MainWorkspaceView =
   | HubPageId
+  | 'places'
   | 'ledger'
   | 'apps_devices'
   | 'memory_privacy'
-  | 'doctor';
+  | 'doctor'
+  | 'pc_operator';
 
 type SettingsSectionId =
   | 'general'
@@ -314,6 +335,15 @@ interface ChatTurnMessage {
     plan: SkillPlan;
     result: SkillPlanExecutionReport;
   };
+  placesCard?: {
+    kind: 'where_is' | 'where_should_go' | 'off_limits';
+    title: string;
+    placeLabel: string;
+    placePath: string;
+    status: 'allowed' | 'ask_first' | 'never';
+    reason: string;
+    confidencePct?: number;
+  };
 }
 
 interface ConversationThread {
@@ -336,13 +366,8 @@ const INITIAL_THREADS: ConversationThread[] = [
         id: 'm-1',
         role: 'assistant',
         content:
-          "Welcome back. I'm perched right here on your prompt box so we have a clean, calm workspace. Ask me to summarize a folder, research a topic with verified sources, fix a test in Code, or plan your week.",
+          "Welcome back! I'm perched right here on your prompt box so we have a clean, calm workspace. We can chat about anything, or if you want me to tidy your Downloads, summarize a folder, research a topic, or check a test in Code, just ask.",
         timestamp: 'Just now',
-        toolsUsed: ['Research & Fact Verification', 'Files & Folders'],
-        verifiedProof: {
-          hash: 'sha256:9f84c2a10e4b',
-          summary: 'Verified · Session isolated and safety rules active',
-        },
       },
     ],
   },
@@ -372,6 +397,142 @@ const INITIAL_THREADS: ConversationThread[] = [
       },
     ],
   },
+  {
+    id: 'proj-thread-kyoto-1',
+    projectId: 'proj-kyoto-trip',
+    title: '7-Day Arashiyama & Higashiyama Walking Plan',
+    updatedAt: 'Today',
+    pinned: false,
+    messages: [
+      {
+        id: 'pt-k1',
+        role: 'user',
+        content: 'Group our Kyoto stops by neighborhood so we avoid crowded buses.',
+        timestamp: '09:15 AM',
+      },
+      {
+        id: 'pt-k2',
+        role: 'assistant',
+        content:
+          'Using your **Autumn Trip to Kyoto** project instructions and knowledge files, I grouped your Kyoto stops into **Higashiyama (Days 1–2)** and **Arashiyama (Day 3)**, with early-morning walking routes before 8:30 AM and JR pass times.',
+        timestamp: '09:16 AM',
+      },
+    ],
+  },
+  {
+    id: 'proj-thread-kyoto-2',
+    projectId: 'proj-kyoto-trip',
+    title: 'Ryokan & vegetarian dining reservations',
+    updatedAt: 'Yesterday',
+    pinned: false,
+    messages: [
+      {
+        id: 'pt-k3',
+        role: 'user',
+        content: 'Find shojin-ryori vegetarian lunch spots near Nanzen-ji.',
+        timestamp: 'Yesterday',
+      },
+      {
+        id: 'pt-k4',
+        role: 'assistant',
+        content:
+          'Saved 4 shojin-ryori temple dining options near Nanzen-ji with reservation windows and Yen estimates inside your **Autumn Trip to Kyoto** project.',
+        timestamp: 'Yesterday',
+      },
+    ],
+  },
+  {
+    id: 'proj-thread-bakery-1',
+    projectId: 'proj-bakery-launch',
+    title: 'Opening menu & sourdough hydration schedule',
+    updatedAt: '2 days ago',
+    pinned: false,
+    messages: [
+      {
+        id: 'pt-b1',
+        role: 'user',
+        content: 'Draft our opening weekend bake schedule for 80 country loaves.',
+        timestamp: '2 days ago',
+      },
+      {
+        id: 'pt-b2',
+        role: 'assistant',
+        content:
+          'Prepared the bulk fermentation and cold-proof schedule for 80 country loaves using your **Neighborhood Bakery Launch** recipe knowledge files.',
+        timestamp: '2 days ago',
+      },
+    ],
+  },
+];
+
+const INITIAL_PROJECT_THREADS: ProjectChatSummary[] = [
+  {
+    id: 'proj-thread-kyoto-1',
+    projectId: 'proj-kyoto-trip',
+    title: '7-Day Arashiyama & Higashiyama Walking Plan',
+    updatedAt: 'Today',
+    lastMessagePreview:
+      'Grouped temples by walking distance and added quiet morning slots before 8:30 AM.',
+    messages: [
+      {
+        id: 'pt-k1',
+        role: 'user',
+        content: 'Group our Kyoto stops by neighborhood so we avoid crowded buses.',
+        timestamp: '09:15 AM',
+      },
+      {
+        id: 'pt-k2',
+        role: 'assistant',
+        content:
+          'I grouped your Kyoto stops into Higashiyama (Days 1–2) and Arashiyama (Day 3), with early-morning walking routes and JR pass times saved to this project.',
+        timestamp: '09:16 AM',
+      },
+    ],
+  },
+  {
+    id: 'proj-thread-kyoto-2',
+    projectId: 'proj-kyoto-trip',
+    title: 'Ryokan & vegetarian dining reservations',
+    updatedAt: 'Yesterday',
+    lastMessagePreview: 'Saved 4 shojin-ryori temple dining options near Nanzen-ji.',
+    messages: [
+      {
+        id: 'pt-k3',
+        role: 'user',
+        content: 'Find shojin-ryori vegetarian lunch spots near Nanzen-ji.',
+        timestamp: 'Yesterday',
+      },
+      {
+        id: 'pt-k4',
+        role: 'assistant',
+        content:
+          'Saved 4 shojin-ryori temple dining options near Nanzen-ji with reservation windows and Yen estimates inside your Kyoto project.',
+        timestamp: 'Yesterday',
+      },
+    ],
+  },
+  {
+    id: 'proj-thread-bakery-1',
+    projectId: 'proj-bakery-launch',
+    title: 'Opening menu & sourdough hydration schedule',
+    updatedAt: '2 days ago',
+    lastMessagePreview: 'Calculated flour batch weights and morning bake timeline.',
+    messages: [
+      {
+        id: 'pt-b1',
+        role: 'user',
+        content: 'Draft our opening weekend bake schedule for 80 country loaves.',
+        timestamp: '2 days ago',
+      },
+      {
+        id: 'pt-b2',
+        role: 'assistant',
+        content:
+          'Prepared the bulk fermentation and cold-proof schedule for 80 country loaves and linked it to your Bakery project artifacts.',
+        timestamp: '2 days ago',
+      },
+    ],
+  },
 ];
 
 function readStoredPref<T>(key: string, fallback: T): T {
@@ -381,6 +542,14 @@ function readStoredPref<T>(key: string, fallback: T): T {
     return JSON.parse(raw) as T;
   } catch {
     return fallback;
+  }
+}
+
+function writeStoredPref<T>(key: string, value: T): void {
+  try {
+    window.localStorage.setItem(`blaize_pref_${key}`, JSON.stringify(value));
+  } catch {
+    // ignore storage errors
   }
 }
 
@@ -596,6 +765,12 @@ export default function App() {
   );
   const [activeSettingsSection, setActiveSettingsSection] =
     useState<SettingsSectionId>('general');
+  const [howMuchShouldIAsk, setHowMuchShouldIAsk] = useState<HowMuchShouldIAskPreference>(() =>
+    readStoredPref<HowMuchShouldIAskPreference>(
+      'howMuchShouldIAsk',
+      DEFAULT_HOW_MUCH_SHOULD_I_ASK
+    )
+  );
 
   // Command Palette (Ctrl/Cmd+K) & Keyboard Shortcuts Sheet (?)
   const [commandPaletteOpen, setCommandPaletteOpen] = useState<boolean>(false);
@@ -621,10 +796,21 @@ export default function App() {
         JSON.stringify(artifactDrawerWidthPx)
       );
       window.localStorage.setItem('blaize_pref_activeProjectId', JSON.stringify(activeProjectId));
+      window.localStorage.setItem(
+        'blaize_pref_howMuchShouldIAsk',
+        JSON.stringify(howMuchShouldIAsk)
+      );
     } catch {
       // Ignore storage errors in sandboxed iframes
     }
-  }, [activeView, sidebarCollapsed, uiTheme, artifactDrawerWidthPx, activeProjectId]);
+  }, [
+    activeView,
+    sidebarCollapsed,
+    uiTheme,
+    artifactDrawerWidthPx,
+    activeProjectId,
+    howMuchShouldIAsk,
+  ]);
 
   const [artifacts, setArtifacts] = useState<WorkspaceArtifact[]>(INITIAL_WORKSPACE_ARTIFACTS);
   const [activeArtifactId, setActiveArtifactId] = useState<string | null>(
@@ -656,9 +842,11 @@ export default function App() {
     INITIAL_VSCODE_MARKETPLACE_EXTENSIONS
   );
 
-  // Conversation Threads & Sidebar Collapsible Groups
+  // Conversation Threads (Normal Chats only — completely separate from Projects)
   const [threads, setThreads] = useState<ConversationThread[]>(INITIAL_THREADS);
   const [activeThreadId, setActiveThreadId] = useState<string>('thread-1');
+  const [projectThreads, setProjectThreads] =
+    useState<ProjectChatSummary[]>(INITIAL_PROJECT_THREADS);
   const [recentChatsOpen, setRecentChatsOpen] = useState<boolean>(true);
   const [chatSearchQuery, setChatSearchQuery] = useState<string>('');
 
@@ -704,7 +892,13 @@ export default function App() {
   const [personalityId, setPersonalityId] = useState<PersonalityId>('morrow');
 
   // Companion & Media State
-  const [companionName, setCompanionName] = useState<string>('Morrow');
+  const [companionName, setCompanionName] = useState<string>(() =>
+    readStoredPref('companion_name', 'Morrow')
+  );
+  const [isRenamingCompanion, setIsRenamingCompanion] = useState<boolean>(false);
+  const [renameCompanionDraft, setRenameCompanionDraft] = useState<string>(() =>
+    readStoredPref('companion_name', 'Morrow')
+  );
   const [activeLookId, setActiveLookId] = useState<string>('look-sage-emerald');
   const [activeAnimAction, setActiveAnimAction] = useState<MorrowAnimationAction>('idle');
   const [activeLive2DProp, setActiveLive2DProp] = useState<Live2DPropId>('none');
@@ -714,7 +908,7 @@ export default function App() {
     useState<Live2DProportionMode>('vtuber_full');
   const [compiledPersonality, setCompiledPersonality] = useState<CompiledPersonalityProfile>(() =>
     compileNaturalLanguagePersonality({
-      name: 'Morrow',
+      name: readStoredPref('companion_name', 'Morrow'),
       rawDescription:
         'Make her cheerful and teasing but respectful, talk like a clever anime sidekick, be quiet during work, celebrate verified accomplishments, and ask before starting a new task.',
       lookId: 'look-sage-emerald',
@@ -840,9 +1034,13 @@ export default function App() {
   );
   const [pauseMemorySaving, setPauseMemorySaving] = useState<boolean>(false);
 
-  const [soulProfile, setSoulProfile] = useState<SoulProfileConfig>(
-    DEFAULT_SOUL_PROFILE_CONFIG
-  );
+  const [soulProfile, setSoulProfile] = useState<SoulProfileConfig>(() => ({
+    ...DEFAULT_SOUL_PROFILE_CONFIG,
+    identity: {
+      ...DEFAULT_SOUL_PROFILE_CONFIG.identity,
+      name: readStoredPref('companion_name', DEFAULT_SOUL_PROFILE_CONFIG.identity.name),
+    },
+  }));
   const [unifiedSkills, setUnifiedSkills] = useState<UnifiedSkillItem[]>(
     INITIAL_UNIFIED_SKILLS
   );
@@ -850,6 +1048,9 @@ export default function App() {
     INITIAL_INSTALLED_PLUGINS
   );
   const [scopedRules, setScopedRules] = useState<ScopedRuleItem[]>(INITIAL_SCOPED_RULES);
+  const [userPlaces, setUserPlaces] = useState<PlaceRule[]>(INITIAL_USER_PLACES);
+  const [indexedPlaceFiles, setIndexedPlaceFiles] =
+    useState<IndexedFileMetadata[]>(INITIAL_INDEXED_FILES);
 
   // Prompt 2/4: General Projects (for any user), Universal Artifacts (IndexedDB + type previews), & General Evaluations
   const [generalProjects, setGeneralProjects] = useState<GeneralProject[]>(
@@ -966,7 +1167,7 @@ export default function App() {
   const [standingRoleSummaryCard, setStandingRoleSummaryCard] = useState<string>(
     () =>
       generateBriefingArtifacts({
-        companionName: 'Morrow',
+        companionName: readStoredPref('companion_name', 'Morrow'),
         selectedTemplates: ['work', 'home'],
         jobDescription:
           'Summarize repositories, verify citations, organize local files, and prepare weekly reports on this PC.',
@@ -978,7 +1179,7 @@ export default function App() {
   const [userMarkdown, setUserMarkdown] = useState<string>(
     () =>
       generateBriefingArtifacts({
-        companionName: 'Morrow',
+        companionName: readStoredPref('companion_name', 'Morrow'),
         selectedTemplates: ['work', 'home'],
         jobDescription:
           'Summarize repositories, verify citations, organize local files, and prepare weekly reports on this PC.',
@@ -990,6 +1191,39 @@ export default function App() {
   const [activeProfileId, setActiveProfileId] = useState<WorkspaceProfileId>('personal');
   const [hermesInitialTab, setHermesInitialTab] = useState<UniversalHermesSubTab>('apps');
   const [showSoulRawMarkdown, setShowSoulRawMarkdown] = useState<boolean>(false);
+
+  // Unified companion rename handler that propagates the assistant's name everywhere in the app
+  const handleRenameCompanion = (rawName: string) => {
+    const trimmed = rawName.trim();
+    const nextName = trimmed.length > 0 ? trimmed : 'Morrow';
+    const prevName = companionName || 'Morrow';
+    setCompanionName(nextName);
+    setRenameCompanionDraft(nextName);
+    writeStoredPref('companion_name', nextName);
+    setSoulProfile((prev) => ({
+      ...prev,
+      identity: {
+        ...prev.identity,
+        name: nextName,
+      },
+    }));
+    setCompiledPersonality((prev) => ({
+      ...prev,
+      name: nextName,
+    }));
+    setStandingRoleSummaryCard((prev) =>
+      prev.replace(new RegExp(`\\b${prevName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'g'), nextName)
+    );
+    setUserMarkdown((prev) =>
+      prev.replace(new RegExp(`\\b${prevName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'g'), nextName)
+    );
+    setSoulDocument((prev) => {
+      const updatedRaw = prev.rawMarkdown
+        .replace(new RegExp(`\\b${prevName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'g'), nextName)
+        .replace(/\bMorrow\b/g, nextName);
+      return parseAndValidateSoulDocument(updatedRaw, prev.voiceCadence, prev.version + 1);
+    });
+  };
 
   // Screen-Aware Record Button, Skill Recorder & Multi-Skill Planner State
   const [screenAwarenessMode, setScreenAwarenessMode] = useState<ScreenAwarenessMode>('off');
@@ -1213,6 +1447,43 @@ export default function App() {
   }, []);
 
   const activeThread = threads.find((t) => t.id === activeThreadId) || threads[0];
+  const activeChatProject = useMemo(
+    () =>
+      activeThread.projectId
+        ? generalProjects.find((p) => p.id === activeThread.projectId) || null
+        : null,
+    [activeThread.projectId, generalProjects]
+  );
+  const activeChatProjectArtifacts = useMemo(
+    () =>
+      activeChatProject
+        ? universalArtifacts.filter((a) => a.projectId === activeChatProject.id)
+        : [],
+    [activeChatProject, universalArtifacts]
+  );
+  const syncedProjectChatSummaries: ProjectChatSummary[] = useMemo(() => {
+    const fromThreads: ProjectChatSummary[] = threads
+      .filter((t) => Boolean(t.projectId))
+      .map((t) => ({
+        id: t.id,
+        projectId: t.projectId!,
+        title: t.title,
+        updatedAt: t.updatedAt,
+        lastMessagePreview:
+          t.messages[t.messages.length - 1]?.content ||
+          'Chat scoped to this project’s instructions and knowledge.',
+        messages: t.messages.map((m) => ({
+          id: m.id,
+          role: m.role,
+          content: m.content,
+          timestamp: m.timestamp,
+        })),
+      }));
+    const threadIds = new Set(fromThreads.map((item) => item.id));
+    const extras = projectThreads.filter((pt) => !threadIds.has(pt.id));
+    return [...fromThreads, ...extras];
+  }, [threads, projectThreads]);
+
   const enabledChatPlugins = plugins.filter((p) => p.enabledInChat);
 
   const filteredThreads = useMemo(() => {
@@ -1336,6 +1607,14 @@ export default function App() {
         targetView: 'memory',
       },
       {
+        id: 'nav-places',
+        title: 'Library > Places',
+        subtitle: 'Library · File Map, folder meanings & Never-Go zones',
+        category: 'setting',
+        keywords: ['places', 'folders', 'file map', 'never go', 'library'],
+        targetView: 'places',
+      },
+      {
         id: 'nav-browser',
         title: 'Workbench > AI Browser',
         subtitle: 'Workbench · Isolated web sessions',
@@ -1398,9 +1677,9 @@ export default function App() {
     const skillItems: CommandPaletteItem[] = unifiedSkills.map((s) => ({
       id: `skill-${s.id}`,
       title: s.name,
-      subtitle: `Library > Skills · ${s.versionBadge}`,
+      subtitle: `Library > Skills · v${s.version}`,
       category: 'skill',
-      keywords: [s.summary, s.origin],
+      keywords: [s.oneLineDescription, s.origin],
       targetView: 'skills',
     }));
 
@@ -1435,10 +1714,10 @@ export default function App() {
       },
       {
         id: 'setting-morrow',
-        title: 'Morrow companion settings',
-        subtitle: 'Settings · Name, outfit, perches, idle preferences',
+        title: `${companionName} companion settings`,
+        subtitle: 'Settings · Name, size, outfit, perches, idle preferences',
         category: 'setting',
-        keywords: ['companion', 'perch', 'sit', 'sleep'],
+        keywords: ['companion', 'perch', 'sit', 'sleep', 'size', companionName.toLowerCase()],
         targetView: 'settings',
         targetSection: 'morrow',
       },
@@ -1629,13 +1908,16 @@ export default function App() {
     bumpLedger();
   };
 
-  // Start a new empty chat thread (shows starter suggestions & welcome card)
-  const handleNewChat = () => {
+  // Start a new chat thread (standalone by default, or scoped to a project like Claude)
+  const handleNewChat = (scopedProjectId?: string) => {
     const newId = `thread-${Date.now()}`;
+    const targetProj = scopedProjectId
+      ? generalProjects.find((p) => p.id === scopedProjectId)
+      : undefined;
     const created: ConversationThread = {
       id: newId,
-      projectId: activeProject.id,
-      title: 'New conversation',
+      projectId: targetProj ? targetProj.id : undefined,
+      title: targetProj ? `New chat in ${targetProj.name}` : 'New conversation',
       updatedAt: 'Just now',
       messages: [],
     };
@@ -1643,11 +1925,26 @@ export default function App() {
     setActiveThreadId(newId);
     setActiveView('chat');
     setMobileSidebarOpen(false);
+    return newId;
   };
 
-  const handleSendMessage = (presetPrompt?: string) => {
+  const handleSendMessage = (
+    presetPrompt?: string,
+    overrideThreadId?: string,
+    overrideProjectId?: string
+  ) => {
     const text = (presetPrompt ?? chatInput).trim();
     if (!text) return;
+
+    const targetThreadId = overrideThreadId || activeThread.id;
+    const currentThreadObj = threads.find((t) => t.id === targetThreadId) || activeThread;
+    const effectiveProjectId = overrideProjectId ?? currentThreadObj?.projectId;
+    const threadProject = effectiveProjectId
+      ? generalProjects.find((p) => p.id === effectiveProjectId) || null
+      : null;
+    const threadProjectArtifacts = threadProject
+      ? universalArtifacts.filter((a) => a.projectId === threadProject.id)
+      : [];
 
     const userMsg: ChatTurnMessage = {
       id: `u-${Date.now()}`,
@@ -1658,12 +1955,16 @@ export default function App() {
 
     setThreads((prev) =>
       prev.map((th) =>
-        th.id === activeThread.id
+        th.id === targetThreadId
           ? {
               ...th,
+              projectId: effectiveProjectId ?? th.projectId,
+              updatedAt: 'Just now',
               title:
-                th.title === 'New conversation' || th.title === 'New Conversation'
-                  ? text.slice(0, 36)
+                th.title === 'New conversation' ||
+                th.title === 'New Conversation' ||
+                th.title.startsWith('New chat in ')
+                  ? text.slice(0, 42)
                   : th.title,
               messages: [...th.messages, userMsg],
             }
@@ -1753,11 +2054,13 @@ export default function App() {
               title: sched.title,
               cronExpression: sched.cronExpression,
               naturalSchedule: 'Every Monday at 09:00',
-              promptPayload: text,
+              timezone: 'UTC',
+              actionPrompt: text,
               enabled: true,
+              nextFiveRuns: sched.nextFiveRunTimesIso || ['Monday 09:00 UTC'],
               lastRunAt: 'Scheduled via AgentRuntime',
               lastRunStatus: 'verified_ok',
-              nextRunAt: sched.nextFiveRunTimesIso[0] || 'Monday 09:00',
+              guardNote: 'Verified by PolicyGuard',
             },
             ...prev,
           ]);
@@ -1810,6 +2113,93 @@ export default function App() {
       }
 
       setIsAiThinking(false);
+
+      const isWhereIsQuery =
+        lower.includes('where is') ||
+        lower.includes('find my') ||
+        lower.includes('locate my');
+      const isWhereShouldGoQuery =
+        lower.includes('where should') ||
+        lower.includes('where does') ||
+        lower.includes('put this');
+      const isBrowserOrDocsTask =
+        lower.includes('browser') ||
+        lower.includes('docs.workspace') ||
+        lower.includes('check docs') ||
+        lower.includes('citation');
+      const isArtifactOrSummaryTask =
+        lower.includes('artifact') ||
+        lower.includes('report') ||
+        lower.includes('summary') ||
+        lower.includes('summarize') ||
+        lower.includes('sha-256') ||
+        lower.includes('checksum');
+      const isTestOrCodeTask =
+        lower.includes('run test') ||
+        lower.includes('test suite') ||
+        lower.includes('execute workspace test');
+      const isSkillOrScheduledTask =
+        lower.startsWith('run skill') ||
+        lower.startsWith('scheduled run:') ||
+        lower.includes('tidy');
+
+      const isExplicitTaskJob =
+        isWhereIsQuery ||
+        isWhereShouldGoQuery ||
+        isBrowserOrDocsTask ||
+        isArtifactOrSummaryTask ||
+        isTestOrCodeTask ||
+        isSkillOrScheduledTask;
+
+      // Normal conversational messages: respond naturally without turning the prompt into a job or attaching 'What I did' receipts
+      if (!isExplicitTaskJob) {
+        setMorrowState('attentive');
+        setActiveAnimAction('sit');
+
+        let conversationalReply = '';
+        if (threadProject) {
+          const topFiles = threadProjectArtifacts
+            .slice(0, 2)
+            .map((a) => `**${a.title}**`)
+            .join(' and ');
+          conversationalReply = `Using your **${threadProject.name}** project context${
+            topFiles ? ` (including ${topFiles})` : ''
+          } and project instructions: here's my response for "${text}". Want me to draft a new project artifact from this or refine it further?`;
+        } else if (
+          /^(hi|hello|hey|good morning|good afternoon|good evening|yo|sup)\b/i.test(text.trim())
+        ) {
+          conversationalReply = `Hey there! I'm ${companionName}. How's your day going? We can chat about anything on your mind, work inside one of your Projects, or whenever you want me to help with a task on your computer, just let me know.`;
+        } else if (lower.includes('who are you') || lower.includes('your name')) {
+          conversationalReply = `I'm ${companionName}, your desktop companion and assistant. You can customize my name, size, and appearance anytime in Settings!`;
+        } else if (lower.includes('how are you')) {
+          conversationalReply = `I'm doing great, perched right here and ready whenever you need me! What are we thinking about today?`;
+        } else if (lower.includes('what can you do') || lower.includes('help')) {
+          conversationalReply = `We can have a normal conversation, work inside a Project with custom instructions and project knowledge files, or—only when you ask me to—I can summarize files, organize folders using your Places map, or check pages in the AI Browser.`;
+        } else {
+          conversationalReply = `Here's my take on "${text}": I'm happy to talk this through with you or explore different angles. Would you like to dive deeper into any specific part, or keep brainstorming together?`;
+        }
+
+        const voicedChat = sanitizeAssistantToneCopy(conversationalReply);
+        voiceControllerRef.current?.speakReply(voicedChat);
+
+        const conversationalMsg: ChatTurnMessage = {
+          id: `a-${Date.now()}`,
+          role: 'assistant',
+          content: voicedChat,
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        };
+
+        setThreads((prev) =>
+          prev.map((th) =>
+            th.id === targetThreadId
+              ? { ...th, messages: [...th.messages, conversationalMsg] }
+              : th
+          )
+        );
+        return;
+      }
+
+      // Explicit task / tool job: execute tool action and provide 'What I did' verification receipt
       setMorrowState('done_with_proof');
       setActiveAnimAction('sit');
 
@@ -1822,22 +2212,92 @@ export default function App() {
         enabledPluginNames.length > 0
           ? enabledPluginNames.join(' and ')
           : 'your workspace tools'
-      }.`;
+      }. Want me to save this as an artifact or turn it into a reusable skill?`;
       let proofSummary = 'Verified · Deterministic post-condition check passed';
 
       let linkedArtifactId: string | undefined;
+      let placesCard: ChatTurnMessage['placesCard'] | undefined;
 
-      if (lower.includes('browser') || lower.includes('docs') || lower.includes('citation')) {
+      if (isWhereIsQuery || isWhereShouldGoQuery) {
+        if (lower.includes('.ssh') || lower.includes('family photos') || lower.includes('1password')) {
+          const targetBlockedPath = lower.includes('.ssh')
+            ? '/Users/alex/.ssh/id_ed25519'
+            : '/Users/alex/Pictures/Family Photos';
+          const guardDecision = evaluatePlacesGuard({
+            targetPath: targetBlockedPath,
+            operation: 'read',
+            caller: 'files_plugin',
+            places: userPlaces,
+          });
+          replyContent = `${guardDecision.blockedMessage || 'That folder is off limits'}. I never read, list, or index Never-Go places. Want to open **Library > Places** to inspect or change this rule?`;
+          proofSummary = 'Blocked by PlacesGuard · Never-Go zone protected';
+          placesCard = {
+            kind: 'off_limits',
+            title: guardDecision.blockedMessage || 'That folder is off limits',
+            placeLabel: guardDecision.matchedPlace?.label || 'Off-Limits Zone',
+            placePath: targetBlockedPath,
+            status: 'never',
+            reason: guardDecision.reason,
+          };
+        } else if (isWhereIsQuery) {
+          const findResult = placesFind(text, indexedPlaceFiles, userPlaces);
+          const top = findResult.candidates[0];
+          if (top) {
+            replyContent = `I found **${top.file.name}** in **${top.place.label}** (${Math.round(top.confidence * 100)}% confidence — ${top.reason}). Want me to open **Library > Places**?`;
+            proofSummary = `Verified · Matched in File Map (${top.place.label})`;
+            placesCard = {
+              kind: 'where_is',
+              title: top.file.name,
+              placeLabel: top.place.label,
+              placePath: `${top.file.parentPath}/${top.file.name}`,
+              status: top.place.status,
+              reason: top.reason,
+              confidencePct: Math.round(top.confidence * 100),
+            };
+          } else {
+            const fallbackPlace = userPlaces.find((p) => p.status !== 'never') || userPlaces[0];
+            replyContent = `I checked your File Map and the closest place is **${fallbackPlace.label}** (${fallbackPlace.purpose}). Want me to open **Library > Places** so you can browse or rescan?`;
+            proofSummary = 'Verified · File Map searched without reading Never zones';
+            placesCard = {
+              kind: 'where_is',
+              title: fallbackPlace.label,
+              placeLabel: fallbackPlace.label,
+              placePath: fallbackPlace.path,
+              status: fallbackPlace.status,
+              reason: fallbackPlace.purpose,
+              confidencePct: 78,
+            };
+          }
+        } else if (isWhereShouldGoQuery) {
+          const suggestion = placesSuggestDestination({ name: text }, userPlaces);
+          const top = suggestion.topSuggestion;
+          const targetPlace =
+            top?.place || userPlaces.find((p) => p.status !== 'never') || userPlaces[0];
+          const conf = top?.confidence ?? 0.88;
+          const reasonText = top?.reason || targetPlace.purpose;
+          replyContent = `Based on your File Map rules, this belongs in **${targetPlace.label}** (${reasonText}). ${
+            targetPlace.status === 'allowed'
+              ? 'Since this place is Allowed, I can move it for you with one-click Undo whenever you hand it over.'
+              : 'This place is set to Ask first, so I will wait for your confirmation before moving anything.'
+          }`;
+          proofSummary = `Verified · Destination suggested by PlaceRules (${targetPlace.label})`;
+          placesCard = {
+            kind: 'where_should_go',
+            title: `Suggested: ${targetPlace.label}`,
+            placeLabel: targetPlace.label,
+            placePath: targetPlace.path,
+            status: targetPlace.status,
+            reason: reasonText,
+            confidencePct: Math.round(conf * 100),
+          };
+        }
+      } else if (isBrowserOrDocsTask) {
         replyContent =
-          'I opened **docs.workspace.local** in the AI Browser and verified the page state. You can open **Workbench > AI Browser** anytime to inspect the session.';
+          'I checked **docs.workspace.local** in the AI Browser and verified the page state. Want me to open **Workbench > AI Browser** so you can inspect the session?';
         proofSummary = 'Verified · Isolated browser session ready';
-      } else if (
-        lower.includes('artifact') ||
-        lower.includes('report') ||
-        lower.includes('summary')
-      ) {
+      } else if (isArtifactOrSummaryTask) {
         replyContent =
-          'I compiled the workspace summary report, verified the file checksums, and opened the interactive artifact preview in the right drawer.';
+          'I prepared the workspace summary report, verified the file checksums, and opened the interactive artifact preview in the right drawer. I can export or refine it whenever you like.';
         proofSummary = 'Verified · Artifact checksums match workspace state';
         linkedArtifactId = artifacts[0]?.id;
         if (artifacts[0]?.id) {
@@ -1846,10 +2306,8 @@ export default function App() {
         setChatArtifactDrawerOpen(true);
       }
 
-      const voicedContent = applySoulVoiceToResponse(
-        replyContent,
-        soulDocument,
-        matchedSkills
+      const voicedContent = sanitizeAssistantToneCopy(
+        applySoulVoiceToResponse(replyContent, soulDocument, matchedSkills)
       );
       voiceControllerRef.current?.speakReply(voicedContent);
 
@@ -1860,6 +2318,7 @@ export default function App() {
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         toolsUsed: activeToolNames.length > 0 ? activeToolNames : ['Workspace Assistant'],
         linkedArtifactId,
+        placesCard,
         verifiedProof: {
           hash: computeDeterministicHash(`${text}|${Date.now()}`).slice(0, 16),
           summary: proofSummary,
@@ -1868,7 +2327,7 @@ export default function App() {
 
       setThreads((prev) =>
         prev.map((th) =>
-          th.id === activeThread.id ? { ...th, messages: [...th.messages, assistantMsg] } : th
+          th.id === targetThreadId ? { ...th, messages: [...th.messages, assistantMsg] } : th
         )
       );
     }, 320);
@@ -1984,12 +2443,21 @@ export default function App() {
       ? 'activity'
       : activeView === 'memory_privacy'
         ? 'memory'
-        : activeView === 'apps_devices' || activeView === 'doctor'
-          ? 'settings'
-          : (activeView as HubPageId);
+        : activeView === 'places'
+          ? 'skills'
+          : activeView === 'apps_devices' || activeView === 'doctor' || activeView === 'pc_operator'
+            ? 'settings'
+            : (activeView as HubPageId);
   const activeSidebarGroupId: TopLevelSidebarGroupId =
     getActiveGroupForPage(normalizedHubPageId);
-  const topBarBreadcrumbText = formatTopBarBreadcrumb(normalizedHubPageId);
+  const topBarBreadcrumbText =
+    activeView === 'places'
+      ? 'Library > Places'
+      : activeView === 'pc_operator'
+        ? 'Workbench > PC Operator'
+        : activeView === 'doctor'
+          ? 'Settings > Blaize Doctor'
+          : formatTopBarBreadcrumb(normalizedHubPageId);
   const pendingReviewCount = useMemo(
     () => reviewProposals.filter((p) => p.status === 'pending').length,
     [reviewProposals]
@@ -2076,7 +2544,7 @@ export default function App() {
           <div className="space-y-1">
             <button
               type="button"
-              onClick={handleNewChat}
+              onClick={() => handleNewChat()}
               title="New chat"
               className={`w-full flex items-center justify-center sm:justify-start gap-2 px-2.5 py-1.5 rounded-xl text-xs font-medium border transition-colors ${
                 isLight
@@ -2240,14 +2708,14 @@ export default function App() {
       {/* POPOVER / BOTTOM SHEET FOR LIBRARY, WORKBENCH, AUTOMATIONS, PROOF */}
       <SidebarGroupPopover
         openGroupId={openPopoverGroupId}
-        activePageId={normalizedHubPageId}
+        activePageId={activeView === 'places' ? 'places' : normalizedHubPageId}
         anchorTopPx={popoverAnchorTopPx}
         sidebarCollapsed={sidebarCollapsed}
         pendingReviewCount={pendingReviewCount}
         isLight={isLight}
         onSelectPage={(pageId) => {
           setOpenPopoverGroupId(null);
-          setActiveView(pageId);
+          setActiveView(pageId as MainWorkspaceView);
           setMobileSidebarOpen(false);
         }}
         onClose={() => setOpenPopoverGroupId(null)}
@@ -2279,10 +2747,27 @@ export default function App() {
             >
               {topBarBreadcrumbText}
             </h1>
-            <span className="text-stone-400">·</span>
-            <span className="text-xs text-stone-400 truncate" data-testid="top-bar-project-name">
-              {activeGeneralProject.name}
-            </span>
+            {activeView === 'projects' ? (
+              <>
+                <span className="text-stone-400">·</span>
+                <span
+                  className="text-xs text-stone-400 truncate"
+                  data-testid="top-bar-project-name"
+                >
+                  {activeGeneralProject.name}
+                </span>
+              </>
+            ) : activeView === 'chat' ? (
+              <>
+                <span className="text-stone-400">·</span>
+                <span
+                  className="text-xs text-stone-400 truncate"
+                  data-testid="top-bar-chat-title"
+                >
+                  {activeThread.title}
+                </span>
+              </>
+            ) : null}
             <span
               data-testid="runtime-mode-status-chip"
               title="AgentRuntime mode & live event bus status"
@@ -2303,7 +2788,27 @@ export default function App() {
             </span>
           </div>
 
-          <div className="flex items-center gap-2 text-xs">
+          <div
+            className={`flex items-center gap-2 text-xs ${
+              activeView !== 'chat' ? 'mr-36' : ''
+            }`}
+          >
+            <button
+              type="button"
+              data-testid="open-pc-operator-btn"
+              onClick={() => setActiveView('pc_operator')}
+              className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-xs font-medium transition-colors ${
+                activeView === 'pc_operator'
+                  ? 'bg-amber-500 text-black border-amber-400 font-semibold'
+                  : isLight
+                    ? 'bg-white border-stone-200 text-stone-700 hover:bg-stone-50'
+                    : 'bg-stone-900 border-amber-500/40 text-amber-300 hover:bg-stone-800'
+              }`}
+            >
+              <Laptop className="w-3.5 h-3.5" />
+              <span>PC Operator</span>
+            </button>
+
             <button
               type="button"
               data-testid="open-onboarding-btn"
@@ -2414,7 +2919,126 @@ export default function App() {
                     </div>
                   )}
 
-                  {/* Welcome Card & Starter Suggestions (ONLY on an empty/fresh chat) */}
+                  {/* CLAUDE-STYLE PROJECT CONTEXT BAR (When the active chat belongs to a Project) */}
+                  {activeThread.projectId &&
+                    (() => {
+                      const activeChatProj =
+                        generalProjects.find((p) => p.id === activeThread.projectId) ||
+                        activeGeneralProject;
+                      const projFilesCount = universalArtifacts.filter(
+                        (a) => a.projectId === activeChatProj.id
+                      ).length;
+                      return (
+                        <div
+                          data-testid="chat-project-context-bar"
+                          className={`p-3.5 rounded-2xl border flex flex-wrap items-center justify-between gap-3 ${
+                            isLight
+                              ? 'bg-sky-50/70 border-sky-200 text-stone-800'
+                              : 'bg-sky-500/10 border-sky-500/30 text-stone-100'
+                          }`}
+                        >
+                          <div className="flex flex-wrap items-center gap-2 min-w-0">
+                            <button
+                              type="button"
+                              data-testid="chat-active-project-pill"
+                              onClick={() => {
+                                setActiveGeneralProjectId(activeChatProj.id);
+                                setActiveView('projects');
+                              }}
+                              title={`Back to ${activeChatProj.name} project overview`}
+                              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-sky-600 hover:bg-sky-500 text-white text-xs font-semibold transition-colors"
+                            >
+                              <FolderKanban className="w-3.5 h-3.5" />
+                              <span>{activeChatProj.name}</span>
+                              <span className="text-[10px] opacity-80">← Project</span>
+                            </button>
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-stone-500/10 text-[11px] text-stone-300 border border-stone-700/50">
+                              <BookOpen className="w-3 h-3 text-sky-400" />
+                              <span>{projFilesCount} knowledge files in context</span>
+                            </span>
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-emerald-500/10 text-[11px] text-emerald-400 border border-emerald-500/20">
+                              <Sparkles className="w-3 h-3" />
+                              <span>Project instructions active</span>
+                            </span>
+                          </div>
+
+                          <button
+                            type="button"
+                            data-testid="chat-new-in-project-btn"
+                            onClick={() => handleNewChat(activeChatProj.id)}
+                            className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-xl text-xs font-medium border transition-colors ${
+                              isLight
+                                ? 'bg-white border-sky-200 text-sky-700 hover:bg-sky-50'
+                                : 'bg-stone-900/90 border-sky-500/30 text-sky-300 hover:bg-stone-900'
+                            }`}
+                          >
+                            <Plus className="w-3.5 h-3.5" />
+                            <span>New chat in project</span>
+                          </button>
+                        </div>
+                      );
+                    })()}
+
+                  {/* Claude-Style Recent Chats Switcher Bar (Shows Standalone & Project Chats with Project Badges) */}
+                  <div
+                    data-testid="normal-chats-switcher"
+                    className={`p-2.5 rounded-2xl border flex items-center justify-between gap-2 flex-wrap ${
+                      isLight
+                        ? 'bg-white border-stone-200'
+                        : 'bg-stone-900/60 border-stone-800/80'
+                    }`}
+                  >
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span className="text-[11px] font-semibold uppercase tracking-wider text-stone-400 px-2">
+                        Recents
+                      </span>
+                      {threads.map((th) => {
+                        const isSelected = th.id === activeThread.id;
+                        const thProj = th.projectId
+                          ? generalProjects.find((p) => p.id === th.projectId)
+                          : undefined;
+                        return (
+                          <button
+                            key={th.id}
+                            type="button"
+                            data-testid={`normal-chat-tab-${th.id}`}
+                            onClick={() => setActiveThreadId(th.id)}
+                            className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl text-xs font-medium transition-colors max-w-[240px] ${
+                              isSelected
+                                ? 'bg-sky-600 text-white'
+                                : isLight
+                                  ? 'bg-stone-100 text-stone-700 hover:bg-stone-200'
+                                  : 'bg-stone-800/70 text-stone-300 hover:bg-stone-800'
+                            }`}
+                          >
+                            {thProj && (
+                              <FolderKanban
+                                className={`w-3 h-3 shrink-0 ${
+                                  isSelected ? 'text-white' : 'text-sky-400'
+                                }`}
+                              />
+                            )}
+                            <span className="truncate">{th.title}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <button
+                      type="button"
+                      data-testid="normal-chat-new-btn"
+                      onClick={() => handleNewChat()}
+                      className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-xl text-xs font-medium border transition-colors ${
+                        isLight
+                          ? 'bg-stone-50 border-stone-200 text-stone-700 hover:bg-stone-100'
+                          : 'bg-stone-800/60 border-stone-700/80 text-stone-200 hover:bg-stone-800'
+                      }`}
+                    >
+                      <Plus className="w-3.5 h-3.5 text-sky-400" />
+                      <span>New chat</span>
+                    </button>
+                  </div>
+
+                  {/* Welcome Card & Starter Suggestions (ONLY on an empty/fresh chat — no Rename or Size/Appearance clutter) */}
                   {isEmptyOrWelcomeChat && (
                     <div className="space-y-4">
                       <div
@@ -2425,29 +3049,20 @@ export default function App() {
                         }`}
                       >
                         <div className="space-y-1">
-                          <h2 className="text-base font-semibold">
+                          <h2
+                            data-testid="chat-welcome-heading"
+                            className="text-base font-semibold"
+                          >
                             Hello, I&apos;m {companionName}
                           </h2>
-                          <p className="text-xs text-stone-400 max-w-md">
-                            Your workspace companion for verified tasks, research, code,
-                            automations, and browser sessions. You can rename me anytime or drag me to any perch.
+                          <p className="text-xs text-stone-400 max-w-xl">
+                            {activeThread.projectId
+                              ? `You're chatting inside "${
+                                  generalProjects.find((p) => p.id === activeThread.projectId)
+                                    ?.name || 'Project'
+                                }". Your project instructions and knowledge files are automatically included in this chat.`
+                              : `I'm your desktop assistant. Start a standalone chat below, pick a Project in the composer to use its knowledge and instructions, or hand over a chore when you need help.`}
                           </p>
-                        </div>
-                        <div className="flex items-center gap-2 shrink-0">
-                          <label htmlFor="welcome-companion-name" className="text-xs text-stone-400">
-                            Name:
-                          </label>
-                          <input
-                            id="welcome-companion-name"
-                            type="text"
-                            value={companionName}
-                            onChange={(e) => setCompanionName(e.target.value)}
-                            className={`w-28 px-2.5 py-1 rounded-lg border text-xs font-medium ${
-                              isLight
-                                ? 'bg-stone-50 border-stone-200 text-stone-900'
-                                : 'bg-stone-950 border-stone-800 text-stone-100'
-                            }`}
-                          />
                         </div>
                       </div>
 
@@ -2588,6 +3203,57 @@ export default function App() {
                         >
                           <div>{renderCleanMarkdown(msg.content)}</div>
 
+                          {/* Morrow 'where is X?' / 'where should this go?' small card with Open button */}
+                          {msg.role === 'assistant' && msg.placesCard && (
+                            <div
+                              data-testid="morrow-chat-places-card"
+                              className={`mt-2.5 p-3 rounded-xl border flex flex-wrap items-center justify-between gap-3 text-xs ${
+                                isLight
+                                  ? 'bg-stone-50 border-stone-200 text-stone-800'
+                                  : 'bg-stone-950/80 border-stone-800 text-stone-200'
+                              }`}
+                            >
+                              <div className="space-y-1 min-w-0">
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <span className="font-semibold text-xs">
+                                    {msg.placesCard.title}
+                                  </span>
+                                  <span
+                                    className={`px-2 py-0.5 rounded-md text-[10px] font-semibold border ${
+                                      msg.placesCard.status === 'allowed'
+                                        ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
+                                        : msg.placesCard.status === 'ask_first'
+                                          ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                                          : 'bg-rose-500/15 text-rose-400 border-rose-500/30'
+                                    }`}
+                                  >
+                                    {msg.placesCard.status === 'allowed'
+                                      ? 'Allowed'
+                                      : msg.placesCard.status === 'ask_first'
+                                        ? 'Ask first'
+                                        : 'Never'}
+                                  </span>
+                                  {typeof msg.placesCard.confidencePct === 'number' && (
+                                    <span className="font-mono text-[10px] text-sky-400">
+                                      {msg.placesCard.confidencePct}% match
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="text-[11px] text-stone-400">
+                                  Place: <span className="font-medium text-stone-300">{msg.placesCard.placeLabel}</span> · {msg.placesCard.reason}
+                                </div>
+                              </div>
+                              <button
+                                type="button"
+                                data-testid="morrow-chat-places-open-btn"
+                                onClick={() => setActiveView('places')}
+                                className="px-3 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-semibold text-xs shrink-0"
+                              >
+                                Open
+                              </button>
+                            </div>
+                          )}
+
                           {/* Assistant 'What I did' collapsed card + actions */}
                           {msg.role === 'assistant' && (
                             <WhatIDidCard
@@ -2727,7 +3393,7 @@ export default function App() {
                   >
                     <textarea
                       rows={2}
-                      aria-label="Message Blaize"
+                      aria-label={`Message ${companionName}`}
                       value={chatInput}
                       onFocus={() => setIsTypingInComposer(true)}
                       onBlur={() => setIsTypingInComposer(false)}
@@ -2745,19 +3411,56 @@ export default function App() {
                       className="w-full bg-transparent outline-none resize-none text-sm placeholder:text-stone-400"
                     />
 
-                    <div className="flex items-center justify-between gap-2 pt-2 border-t border-stone-700/20">
-                      <button
-                        type="button"
-                        onClick={() => setToolsMenuOpen((o) => !o)}
-                        className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl text-xs font-medium border transition-colors ${
-                          isLight
-                            ? 'bg-stone-50 border-stone-200 text-stone-700 hover:bg-stone-100'
-                            : 'bg-stone-950 border-stone-800 text-stone-300 hover:bg-stone-800'
-                        }`}
-                      >
-                        <Puzzle className="w-3.5 h-3.5 text-sky-400" />
-                        <span>Tools ({enabledChatPlugins.length})</span>
-                      </button>
+                    <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-stone-700/20">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setToolsMenuOpen((o) => !o)}
+                          className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl text-xs font-medium border transition-colors ${
+                            isLight
+                              ? 'bg-stone-50 border-stone-200 text-stone-700 hover:bg-stone-100'
+                              : 'bg-stone-950 border-stone-800 text-stone-300 hover:bg-stone-800'
+                          }`}
+                        >
+                          <Puzzle className="w-3.5 h-3.5 text-sky-400" />
+                          <span>Tools ({enabledChatPlugins.length})</span>
+                        </button>
+
+                        {/* Claude-Style Project Selector Pill in Composer */}
+                        <div className="inline-flex items-center gap-1.5">
+                          <FolderKanban className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+                          <select
+                            aria-label="Project scope for this chat"
+                            data-testid="chat-composer-project-selector"
+                            value={activeThread.projectId || ''}
+                            onChange={(e) => {
+                              const nextProjId = e.target.value || undefined;
+                              setThreads((prev) =>
+                                prev.map((th) =>
+                                  th.id === activeThread.id ? { ...th, projectId: nextProjId } : th
+                                )
+                              );
+                              if (nextProjId) {
+                                setActiveGeneralProjectId(nextProjId);
+                              }
+                            }}
+                            className={`px-2.5 py-1 rounded-xl text-xs font-medium border outline-none transition-colors ${
+                              activeThread.projectId
+                                ? 'bg-sky-500/15 border-sky-500/40 text-sky-300'
+                                : isLight
+                                  ? 'bg-stone-50 border-stone-200 text-stone-700'
+                                  : 'bg-stone-950 border-stone-800 text-stone-300'
+                            }`}
+                          >
+                            <option value="">No project (Standalone chat)</option>
+                            {generalProjects.map((proj) => (
+                              <option key={proj.id} value={proj.id}>
+                                Project: {proj.name}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      </div>
 
                       <div className="flex items-center gap-1.5">
                         <button
@@ -2841,26 +3544,74 @@ export default function App() {
               }
               unifiedSkills={unifiedSkills}
               schedules={scheduledTasks}
-              chatSummaries={threads.map((t) => ({
-                id: t.id,
-                projectId:
-                  t.projectId === activeProject.id ? activeGeneralProject.id : t.projectId,
-                title: t.title,
-                updatedAt: t.updatedAt,
-                lastMessagePreview:
-                  t.messages[t.messages.length - 1]?.content || 'Empty conversation',
-              }))}
+              chatSummaries={threads
+                .filter((th) => Boolean(th.projectId))
+                .map((th) => ({
+                  id: th.id,
+                  projectId: th.projectId!,
+                  title: th.title,
+                  updatedAt: th.updatedAt,
+                  lastMessagePreview:
+                    th.messages[th.messages.length - 1]?.content ||
+                    'Started a chat in this project.',
+                  messages: th.messages.map((m) => ({
+                    id: m.id,
+                    role: m.role,
+                    content: m.content,
+                    timestamp: m.timestamp,
+                  })),
+                }))}
               onOpenChatThread={(threadId) => {
+                const found = threads.find((t) => t.id === threadId);
+                if (found?.projectId) {
+                  setActiveGeneralProjectId(found.projectId);
+                }
                 setActiveThreadId(threadId);
                 setActiveView('chat');
               }}
-              onStartNewProjectChat={(projectId) => {
+              onStartNewProjectChat={(projectId, initialPrompt) => {
                 setActiveGeneralProjectId(projectId);
-                handleNewChat();
+                const proj =
+                  generalProjects.find((p) => p.id === projectId) || activeGeneralProject;
+                const newThreadId = `proj-thread-${Date.now()}`;
+                const createdThread: ConversationThread = {
+                  id: newThreadId,
+                  projectId,
+                  title: initialPrompt
+                    ? initialPrompt.slice(0, 42)
+                    : `${proj.name} Discussion #${
+                        threads.filter((t) => t.projectId === projectId).length + 1
+                      }`,
+                  updatedAt: 'Just now',
+                  messages: initialPrompt
+                    ? []
+                    : [
+                        {
+                          id: `pt-init-${Date.now()}`,
+                          role: 'assistant',
+                          content: `Started a new chat in **${proj.name}**. Your project instructions and ${
+                            universalArtifacts.filter((a) => a.projectId === projectId).length
+                          } knowledge files are active in this conversation.`,
+                          timestamp: 'Just now',
+                        },
+                      ],
+                };
+                setThreads((prev) => [createdThread, ...prev]);
+                setActiveThreadId(newThreadId);
+                setActiveView('chat');
+                if (initialPrompt && initialPrompt.trim()) {
+                  window.setTimeout(() => {
+                    handleSendMessage(initialPrompt.trim(), newThreadId, projectId);
+                  }, 10);
+                }
+              }}
+              onSendProjectMessage={(projectId, threadId, text) => {
+                handleSendMessage(text, threadId, projectId);
               }}
               onNavigateWorkspace={(view) => setActiveView(view)}
               modelRuntimeMode={modelMode}
               uiTheme={uiTheme}
+              companionName={companionName}
             />
           </main>
         )}
@@ -2888,7 +3639,10 @@ export default function App() {
                 onDeleteFile={(fileId) => setIdeFiles((prev) => prev.filter((f) => f.id !== fileId))}
                 onPublishFileAsArtifact={(artInput) => {
                   handleSaveArtifactVersion({
-                    ...artInput,
+                    title: artInput.name,
+                    kind: 'react_component',
+                    language: 'typescript',
+                    content: artInput.content,
                     summary: 'Published from Code editor',
                   });
                 }}
@@ -2896,6 +3650,7 @@ export default function App() {
                   setActiveView('chat');
                   handleSendMessage(prompt);
                 }}
+                companionName={companionName}
                 uiTheme={uiTheme}
               />
             </Suspense>
@@ -2961,11 +3716,11 @@ export default function App() {
               soulProfile={soulProfile}
               onUpdateSoulProfile={(next) => {
                 setSoulProfile(next);
-                setCompanionName(next.identity.name);
+                handleRenameCompanion(next.identity.name);
                 ledger.appendEvent({
                   actor: 'operator',
                   type: 'soul_profile_updated',
-                  summary: `Updated Soul profile for ${next.identity.name} (${next.voiceStyle.cadence}).`,
+                  summary: `Updated Soul profile for ${next.identity.name} (${next.voiceStyle.cadenceId}).`,
                   payload: JSON.stringify(next),
                   trustLevel: 'verified_by_evidence',
                   missionId: 'library-soul',
@@ -3028,6 +3783,80 @@ export default function App() {
           />
         )}
 
+        {/* VIEW 6B: LIBRARY -> PLACES ('My Places' File Map, Never-Go Zones, Teach 3 Ways, Where does this go?, Map Health) */}
+        {activeView === 'places' && (
+          <main className="flex-1 overflow-y-auto">
+            <PlacesMapView
+              places={userPlaces}
+              onUpdatePlaces={(next) => {
+                setUserPlaces(next);
+                ledger.appendEvent({
+                  actor: 'operator',
+                  type: 'places_map_updated',
+                  summary: `Updated File Map ('My Places') — ${next.length} places configured.`,
+                  payload: JSON.stringify({ count: next.length }),
+                  trustLevel: 'verified_by_evidence',
+                  missionId: 'library-places',
+                });
+                bumpLedger();
+              }}
+              indexedFiles={indexedPlaceFiles}
+              onUpdateIndexedFiles={setIndexedPlaceFiles}
+              isLight={isLight}
+              isLiveModelMode={modelMode === 'live'}
+              onPromoteProposalToReview={(proposal) => {
+                reviewInboxRef.current!.addProposal({
+                  id: `rev-place-${Date.now()}`,
+                  type: 'rule',
+                  title: proposal.title,
+                  summary: proposal.summary,
+                  scopeLabel: 'Place',
+                  proposedBy: 'agent',
+                  createdAt: 'Just now',
+                  status: 'pending',
+                  plainDiff: {
+                    before: proposal.before,
+                    after: proposal.after,
+                  },
+                });
+                setReviewProposals(reviewInboxRef.current!.getAll());
+                bumpLedger();
+              }}
+              onScheduleFridayTidyWithPlaces={() => {
+                const newSched: EverydayScheduleItem = {
+                  id: `sched-places-friday-${Date.now()}`,
+                  title: 'Every Friday tidy Downloads using my Places',
+                  prompt:
+                    'Scan ~/Downloads and move files into their matching Allowed destinations in Library > Places with Undo journal logging.',
+                  frequency: 'weekly',
+                  timeOfDay: '16:00',
+                  daysOfWeek: ['fri'],
+                  mode: 'do_for_me',
+                  channel: 'chat',
+                  missedRunPolicy: 'ask_me',
+                  enabled: true,
+                  nextRunLocal: 'Friday, 4:00 PM',
+                  nextRunEpochMs: Date.now() + 86400_000,
+                  lastRunAt: 'Scheduled with Places',
+                  lastRunStatus: 'done',
+                  advancedCron: '0 16 * * 5',
+                  requiresMoneyOrSensitive: false,
+                };
+                setEverydaySchedules((prev) => [newSched, ...prev]);
+                ledger.appendEvent({
+                  actor: 'operator',
+                  type: 'schedule_registered',
+                  summary: `Scheduled 'Every Friday tidy Downloads using my Places'.`,
+                  payload: JSON.stringify(newSched),
+                  trustLevel: 'verified_by_evidence',
+                  missionId: newSched.id,
+                });
+                bumpLedger();
+              }}
+            />
+          </main>
+        )}
+
         {/* VIEW 7A: LIBRARY -> CONNECTORS (WorkingConnectorsView with honest status, 3-step guides, SSRF proxy & real test buttons) */}
         {activeView === 'connectors' && (
           <main className="flex-1 overflow-y-auto">
@@ -3052,7 +3881,7 @@ export default function App() {
               isLight={isLight}
               onOpenKeyVault={() => {
                 setActiveView('settings');
-                setSettingsSection('vault');
+                setActiveSettingsSection('vault');
               }}
               onStoreVaultKey={async (keyId, label, token) => {
                 try {
@@ -3264,8 +4093,9 @@ export default function App() {
                 }}
                 onSaveArtifact={(artifact) => {
                   handleSaveArtifactVersion({
-                    name: artifact.name,
-                    type: artifact.type as any,
+                    title: artifact.name,
+                    kind: 'markdown_doc',
+                    language: 'markdown',
                     content: artifact.content,
                     summary: 'Saved from AI Browser',
                   });
@@ -3282,6 +4112,7 @@ export default function App() {
             plugins={installedPlugins}
             scopedRules={scopedRules}
             isLight={isLight}
+            companionName={companionName}
             onTogglePlugin={(id) => {
               setInstalledPlugins((prev) =>
                 prev.map((p) => (p.id === id ? { ...p, enabled: !p.enabled } : p))
@@ -3515,9 +4346,32 @@ export default function App() {
           </main>
         )}
 
-        {/* VIEW 13: PROOF -> EVALUATIONS (General Plugin & Connector Evaluations + Runtime & Sleep Suite) */}
+        {/* VIEW 13: PROOF -> EVALUATIONS (General Plugin & Connector Evaluations + 64-Task PC Benchmark Banner) */}
         {activeView === 'evaluations' && (
           <div className="flex-1 overflow-y-auto">
+            <div className="max-w-6xl mx-auto px-6 pt-5">
+              <div className="p-4 rounded-2xl border border-amber-500/30 bg-amber-500/10 flex flex-wrap items-center justify-between gap-3 text-xs">
+                <div className="flex items-center gap-2.5">
+                  <Laptop className="w-4 h-4 text-amber-400 shrink-0" />
+                  <div>
+                    <div className="font-semibold text-amber-200">
+                      PC Operator 64-Task Everyday Benchmark & KPI Suite (Ladder-On vs Vision-Only)
+                    </div>
+                    <div className="text-stone-300">
+                      64 deterministic tasks across Files, Browser, Documents, Email, Settings &amp; Multi-App with 0 false successes.
+                    </div>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  data-testid="open-pc-benchmark-from-evals-btn"
+                  onClick={() => setActiveView('pc_operator')}
+                  className="px-3.5 py-1.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-black font-semibold text-xs"
+                >
+                  Open PC Operator &amp; 64-Task Suite →
+                </button>
+              </div>
+            </div>
             <GeneralEvaluationsView
               plugins={installedPlugins}
               connectors={connectors}
@@ -3557,6 +4411,39 @@ export default function App() {
               }}
               onNavigateToReview={() => setActiveView('review')}
               isLight={isLight}
+            />
+          </div>
+        )}
+
+        {/* VIEW 14: PC OPERATOR & BLAIZE DOCTOR (Prompt B: 4-Tier Action Ladder, Perception, Execution Loop, App Knowledge, Autonomy, Doctor, 64-Task Benchmark) */}
+        {(activeView === 'pc_operator' || activeView === 'doctor' || activeView === 'apps_devices') && (
+          <div className="flex-1 overflow-hidden">
+            <PCOperatorView
+              initialTab={activeView === 'doctor' ? 'doctor' : 'loop'}
+              howMuchShouldIAsk={howMuchShouldIAsk}
+              onChangeHowMuchShouldIAsk={setHowMuchShouldIAsk}
+              onRecordAuditEvent={(summary, details) => {
+                ledger.appendEvent({
+                  actor: 'agent',
+                  type: 'pc_operator_action',
+                  summary,
+                  payload: JSON.stringify(details),
+                  trustLevel: 'verified_by_evidence',
+                  missionId: 'pc-operator-run',
+                });
+                bumpLedger();
+              }}
+              onSendPatchToReview={(patch) => {
+                ledger.appendEvent({
+                  actor: 'operator',
+                  type: 'skill_patch_approved',
+                  summary: `Approved PC Skill Patch ${patch.patchId} for ${patch.appId}/${patch.skillName}`,
+                  payload: JSON.stringify(patch),
+                  trustLevel: 'verified_by_evidence',
+                  missionId: 'pc-skill-patch',
+                });
+                bumpLedger();
+              }}
             />
           </div>
         )}
@@ -3642,6 +4529,142 @@ export default function App() {
                       </button>
                     </div>
 
+                    {/* Assistant Rename, Size & Appearance in Settings */}
+                    <div
+                      data-testid="settings-general-companion-card"
+                      className="py-3 border-t border-stone-800/50 space-y-3"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div>
+                          <div className="font-semibold text-sm">
+                            Assistant Name, Size &amp; Appearance
+                          </div>
+                          <div className="text-stone-400">
+                            Rename {companionName}, adjust the floating figure size ({characterParametricState.scalePct}%), or customize outfits in Settings.
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          data-testid="settings-open-character-appearance-btn"
+                          onClick={() => setActiveSettingsSection('character')}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-sky-600 hover:bg-sky-500 text-white font-medium"
+                        >
+                          <Sparkles className="w-3.5 h-3.5" />
+                          <span>Open Size &amp; Appearance Studio</span>
+                        </button>
+                      </div>
+                      <form
+                        onSubmit={(e) => {
+                          e.preventDefault();
+                          handleRenameCompanion(renameCompanionDraft);
+                        }}
+                        className="flex flex-wrap items-center gap-2"
+                      >
+                        <input
+                          type="text"
+                          data-testid="settings-general-rename-input"
+                          value={renameCompanionDraft}
+                          onChange={(e) => setRenameCompanionDraft(e.target.value)}
+                          placeholder="Assistant name..."
+                          className={`px-3 py-1.5 rounded-xl border text-xs font-medium outline-none focus:border-sky-500 ${
+                            isLight
+                              ? 'bg-stone-50 border-stone-300 text-stone-900'
+                              : 'bg-stone-950 border-stone-800 text-stone-100'
+                          }`}
+                        />
+                        <button
+                          type="submit"
+                          data-testid="settings-general-rename-save-btn"
+                          className="px-3 py-1.5 rounded-xl bg-sky-600 hover:bg-sky-500 text-white font-medium text-xs"
+                        >
+                          Save Name
+                        </button>
+                        <div className="flex items-center gap-1.5 ml-auto">
+                          <span className="text-[11px] text-stone-400">Figure Size:</span>
+                          {[85, 100, 125].map((pct) => (
+                            <button
+                              key={pct}
+                              type="button"
+                              data-testid={`settings-general-size-${pct}`}
+                              onClick={() => {
+                                const next = characterHistoryRef.current!.applyPatch({
+                                  scalePct: pct,
+                                });
+                                setCharacterParametricState(next);
+                                setCanUndoCharacter(characterHistoryRef.current!.canUndo());
+                              }}
+                              className={`px-2.5 py-1 rounded-lg border text-[11px] font-semibold ${
+                                characterParametricState.scalePct === pct
+                                  ? 'bg-sky-600 text-white border-sky-500'
+                                  : isLight
+                                    ? 'bg-stone-50 border-stone-200 text-stone-700'
+                                    : 'bg-stone-950 border-stone-800 text-stone-300'
+                              }`}
+                            >
+                              {pct}%
+                            </button>
+                          ))}
+                        </div>
+                      </form>
+                    </div>
+
+                    {/* Setting: 'How much should I ask?' mapped to Autonomy Levels */}
+                    <div
+                      data-testid="settings-how-much-should-i-ask"
+                      className="py-3 border-t border-stone-800/50 space-y-2.5"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div>
+                          <div className="font-semibold text-sm">
+                            How much should I ask?
+                          </div>
+                          <div className="text-stone-400">
+                            Choose how often {companionName} asks before running a handed-over chore.
+                            Sensitive categories (people, money, identity, sending messages, deleting,
+                            or ambiguity) always ask with clear options.
+                          </div>
+                        </div>
+                        <span className="px-2.5 py-0.5 rounded-full text-[11px] font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/25">
+                          Human stays in charge
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                        {Object.values(HOW_MUCH_SHOULD_I_ASK_OPTIONS).map((opt) => {
+                          const active = howMuchShouldIAsk === opt.preference;
+                          return (
+                            <button
+                              key={opt.preference}
+                              type="button"
+                              data-testid={`settings-how-much-ask-${opt.preference}`}
+                              onClick={() => setHowMuchShouldIAsk(opt.preference)}
+                              className={`text-left p-3 rounded-xl border transition-colors ${
+                                active
+                                  ? 'bg-sky-500/15 border-sky-500/50 text-sky-300'
+                                  : isLight
+                                    ? 'bg-stone-50 border-stone-200 text-stone-700 hover:border-stone-300'
+                                    : 'bg-stone-950/70 border-stone-800 text-stone-300 hover:border-stone-700'
+                              }`}
+                            >
+                              <div className="flex items-center justify-between gap-2 font-semibold">
+                                <span>{opt.label}</span>
+                                {opt.isDefault && (
+                                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-stone-500/20 text-stone-300">
+                                    Default
+                                  </span>
+                                )}
+                              </div>
+                              <div className="text-[11px] text-stone-400 mt-1">
+                                {opt.description}
+                              </div>
+                              <div className="text-[10px] font-mono text-emerald-400 mt-1.5">
+                                Maps to: {opt.mappedAutonomyLevel}
+                              </div>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+
                     {/* Local Usage Suggestions Inbox */}
                     <div className="pt-3 border-t border-stone-800/50 space-y-2">
                       <div className="flex items-center justify-between">
@@ -3725,6 +4748,13 @@ export default function App() {
                   activeSettingsSection === 'morrow') && (
                   <CharacterStudioPanel
                     companionName={companionName}
+                    onChangeCompanionName={handleRenameCompanion}
+                    activeLookId={activeLookId}
+                    onChangeLookId={setActiveLookId}
+                    activeLive2DProportion={activeLive2DProportion}
+                    onChangeLive2DProportion={setActiveLive2DProportion}
+                    activeLive2DProp={activeLive2DProp}
+                    onChangeLive2DProp={setActiveLive2DProp}
                     parametricState={characterParametricState}
                     canUndo={canUndoCharacter}
                     onApplyPatch={(patch: CharacterPatch, description: string) => {
@@ -3880,7 +4910,7 @@ export default function App() {
                     soulProfile={soulProfile}
                     onUpdateSoulProfile={(next) => {
                       setSoulProfile(next);
-                      setCompanionName(next.identity.name);
+                      handleRenameCompanion(next.identity.name);
                       bumpLedger();
                     }}
                     isLight={isLight}
@@ -4100,7 +5130,7 @@ export default function App() {
                           onClick={() => {
                             const resetSnap = clearPersistedSnapshotSync();
                             setRuleBook(resetSnap.rules);
-                            setCompanionName(resetSnap.companionName);
+                            handleRenameCompanion(resetSnap.companionName);
                           }}
                           className="px-3 py-1.5 rounded-xl border border-stone-700 text-rose-400 hover:bg-stone-800"
                         >
@@ -4286,8 +5316,9 @@ export default function App() {
             <div className="space-y-2.5">
               {[
                 { label: 'Open Command Palette', keys: 'Ctrl / Cmd + K' },
-                { label: 'Toggle Morrow Chat Popover', keys: 'Alt + M' },
-                { label: 'Collapse Morrow to Status Dot', keys: 'Alt + H' },
+                { label: 'Stop running chore & hand control back', keys: 'Alt + Shift + S' },
+                { label: `Toggle ${companionName} Chat Popover`, keys: 'Alt + M' },
+                { label: `Collapse ${companionName} to Status Dot`, keys: 'Alt + H' },
                 { label: 'Show Keyboard Shortcuts', keys: '?' },
                 { label: 'Close active popover or sheet', keys: 'Esc' },
               ].map((s) => (
@@ -4303,13 +5334,13 @@ export default function App() {
         </div>
       )}
 
-      {/* FIRST-RUN BRIEFING MODAL (Name Morrow, Role Templates, Job Description, Off Limits, Vault Identity, Spoken Summary Card) */}
+      {/* FIRST-RUN BRIEFING MODAL (Name Companion, Role Templates, Job Description, Off Limits, Vault Identity, Spoken Summary Card) */}
       <FirstRunBriefingModal
         isOpen={onboardingModalOpen}
         onClose={() => setOnboardingModalOpen(false)}
         isLight={isLight}
         companionName={companionName}
-        onChangeCompanionName={setCompanionName}
+        onChangeCompanionName={handleRenameCompanion}
         selectedTemplates={selectedRoleTemplates}
         onChangeSelectedTemplates={setSelectedRoleTemplates}
         jobDescription={standingJobDescription}
@@ -4407,7 +5438,7 @@ export default function App() {
                     compiler until you review and approve selected keyframes.
                   </li>
                   <li>
-                    <strong>How to Stop Anytime:</strong> Click the red Stop button on Morrow or
+                    <strong>How to Stop Anytime:</strong> Click the red Stop button on {companionName} or
                     press <kbd className="px-1.5 py-0.5 rounded bg-stone-800 font-mono">Alt+Shift+R</kbd>.
                   </li>
                 </ul>
@@ -4566,7 +5597,7 @@ export default function App() {
               </button>
             </div>
             <p className="text-stone-300">
-              You asked Morrow to look at your screen. In <strong>Ask Mode</strong>, Blaize captures
+              You asked {companionName} to look at your screen. In <strong>Ask Mode</strong>, Blaize captures
               a single downscaled snapshot and shows this preview before anything is analyzed.
             </p>
             <div className="p-4 rounded-xl bg-stone-950 border border-stone-800 font-mono text-[11px] text-stone-300 space-y-1">
@@ -4637,7 +5668,15 @@ export default function App() {
         onRecordUserCorrection={() => bumpLedger()}
         onSubmitVoiceMission={(transcript) => handleSendMessage(transcript)}
         companionName={companionName}
-        onChangeCompanionName={setCompanionName}
+        onChangeCompanionName={handleRenameCompanion}
+        companionScale={characterParametricState.scalePct / 100}
+        onChangeCompanionScale={(scale) => {
+          const next = characterHistoryRef.current!.applyPatch({
+            scalePct: Math.round(scale * 100),
+          });
+          setCharacterParametricState(next);
+          setCanUndoCharacter(characterHistoryRef.current!.canUndo());
+        }}
         activeLookId={activeLookId}
         onChangeLookId={setActiveLookId}
         activeAnimAction={activeAnimAction}

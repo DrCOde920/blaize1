@@ -37,6 +37,8 @@ import {
   Square,
   Flag,
   MessageSquarePlus,
+  Minus,
+  Plus,
 } from 'lucide-react';
 import {
   MorrowState,
@@ -180,6 +182,7 @@ interface MorrowCompanionProps {
 
 const PERCH_STORAGE_KEY = 'blaize_perch_by_page_v1';
 const DOT_COLLAPSED_STORAGE_KEY = 'blaize_morrow_collapsed_dot_v1';
+const COMPANION_SCALE_STORAGE_KEY = 'blaize_companion_scale_pct_v1';
 
 export const MorrowCompanion: React.FC<MorrowCompanionProps> = ({
   morrowState,
@@ -203,6 +206,8 @@ export const MorrowCompanion: React.FC<MorrowCompanionProps> = ({
   onToggleVoice,
   isPlayingMusic = false,
   onToggleMusic,
+  companionScale,
+  onChangeCompanionScale,
   uiTheme = 'dark',
   missionActivityEvent,
   activeView,
@@ -234,6 +239,58 @@ export const MorrowCompanion: React.FC<MorrowCompanionProps> = ({
 }) => {
   const [quickNoteOpen, setQuickNoteOpen] = useState(false);
   const [quickNoteText, setQuickNoteText] = useState('');
+
+  // Adjustable floating figure scale (50% to 200%)
+  const [localScalePct, setLocalScalePct] = useState<number>(() => {
+    if (typeof companionScale === 'number' && companionScale > 0) {
+      return Math.round(companionScale <= 3 ? companionScale * 100 : companionScale);
+    }
+    if (typeof characterParametricState?.scalePct === 'number') {
+      return characterParametricState.scalePct;
+    }
+    if (typeof window !== 'undefined') {
+      try {
+        const raw = window.localStorage.getItem(COMPANION_SCALE_STORAGE_KEY);
+        if (raw) {
+          const parsed = Number(raw);
+          if (!Number.isNaN(parsed) && parsed >= 50 && parsed <= 200) return parsed;
+        }
+      } catch {
+        // ignore storage errors
+      }
+    }
+    return 100;
+  });
+
+  useEffect(() => {
+    if (typeof companionScale === 'number' && companionScale > 0) {
+      const pct = Math.round(companionScale <= 3 ? companionScale * 100 : companionScale);
+      setLocalScalePct(Math.max(50, Math.min(200, pct)));
+    } else if (typeof characterParametricState?.scalePct === 'number') {
+      setLocalScalePct(Math.max(50, Math.min(200, characterParametricState.scalePct)));
+    }
+  }, [companionScale, characterParametricState?.scalePct]);
+
+  const effectiveScalePct = Math.max(50, Math.min(200, localScalePct));
+  const effectiveScale = effectiveScalePct / 100;
+  const scaledWidthPx = Math.round(80 * effectiveScale);
+  const scaledHeightPx = Math.round(96 * effectiveScale);
+
+  const handleUpdateScalePct = useCallback(
+    (nextPctRaw: number) => {
+      const clamped = Math.max(50, Math.min(200, Math.round(nextPctRaw)));
+      setLocalScalePct(clamped);
+      try {
+        window.localStorage.setItem(COMPANION_SCALE_STORAGE_KEY, String(clamped));
+      } catch {
+        // ignore storage errors
+      }
+      if (onChangeCompanionScale) {
+        onChangeCompanionScale(clamped / 100);
+      }
+    },
+    [onChangeCompanionScale]
+  );
   const formattedRecTimer = `${String(Math.floor(recordingElapsedSec / 60)).padStart(2, '0')}:${String(
     recordingElapsedSec % 60
   ).padStart(2, '0')}`;
@@ -644,9 +701,11 @@ export const MorrowCompanion: React.FC<MorrowCompanionProps> = ({
         data-gaze-direction={perchPlacement.gazeDirection}
         data-moved-aside={perchPlacement.movedAsideForObstacle ? 'true' : 'false'}
         data-presence-state={effectivePresenceState}
+        data-scale-pct={effectiveScalePct}
         style={{
-          left: `${perchPlacement.x + dragDelta.x}px`,
-          top: `${perchPlacement.y + dragDelta.y}px`,
+          left: `${perchPlacement.x + dragDelta.x - Math.round((scaledWidthPx - 80) / 2)}px`,
+          top: `${perchPlacement.y + dragDelta.y - Math.round((scaledHeightPx - 96) * 0.78)}px`,
+          opacity: (characterParametricState?.opacityPct ?? 100) / 100,
           transition: isDragging
             ? 'none'
             : 'left 160ms cubic-bezier(0.22, 1, 0.36, 1), top 160ms cubic-bezier(0.22, 1, 0.36, 1)',
@@ -764,42 +823,51 @@ export const MorrowCompanion: React.FC<MorrowCompanionProps> = ({
             </div>
           )}
 
-          <MorrowLive2DRig
-            action={
-              effectivePresenceState === 'sit_idle' || effectivePresenceState === 'sit_down'
-                ? 'sit'
-                : effectivePresenceState === 'walk_left' || effectivePresenceState === 'walk_right'
-                  ? 'run'
-                  : effectivePresenceState === 'dance_loop'
-                    ? 'dance'
-                    : effectivePresenceState === 'rest' || effectivePresenceState === 'sleep'
-                      ? 'sleep_rest'
-                      : 'idle'
-            }
-            presenceState={effectivePresenceState}
-            badge={activityPresence.badge}
-            lookId={activeLookId}
-            propId={activeLive2DProp}
-            expressionId={
-              perchPlacement.gazeDirection === 'up_thinking'
-                ? 'starry_eyed'
-                : activeLive2DExpression
-            }
-            proportionMode={activeLive2DProportion}
-            viewAngle={perchPlacement.gazeDirection === 'cursor' ? 'left_quarter' : 'auto'}
-            animationPaused={
-              effectivePresenceState === 'rest' || effectivePresenceState === 'sleep'
-            }
-            isSpeaking={!isRecordingSkill && (morrowState === 'speaking' || isAiThinking)}
-            isPlayingMusic={isPlayingMusic}
-            customPalette={characterParametricState?.palette}
-            customAccessories={characterParametricState?.accessories}
-            className="w-20 h-24"
-          />
-
-          {/* Subtle status badge & Voice on/off button floating above Morrow */}
           <div
-            className={`absolute bottom-full left-1/2 -translate-x-1/2 mb-0.5 px-2 py-0.5 rounded-full border text-[10px] font-medium shadow-sm whitespace-nowrap flex items-center gap-1.5 transition-opacity duration-150 ${
+            data-testid="morrow-figure-scale-box"
+            style={{
+              width: `${scaledWidthPx}px`,
+              height: `${scaledHeightPx}px`,
+              transition: isDragging ? 'none' : 'width 140ms ease-out, height 140ms ease-out',
+            }}
+          >
+            <MorrowLive2DRig
+              action={
+                effectivePresenceState === 'sit_idle' || effectivePresenceState === 'sit_down'
+                  ? 'sit'
+                  : effectivePresenceState === 'walk_left' || effectivePresenceState === 'walk_right'
+                    ? 'run'
+                    : effectivePresenceState === 'dance' || effectivePresenceState === 'dance_groove'
+                      ? 'dance'
+                      : effectivePresenceState === 'rest' || effectivePresenceState === 'sleep'
+                        ? 'sleep_rest'
+                        : 'idle'
+              }
+              presenceState={effectivePresenceState}
+              badge={activityPresence.badge}
+              lookId={activeLookId}
+              propId={activeLive2DProp}
+              expressionId={
+                perchPlacement.gazeDirection === 'up_thinking'
+                  ? 'starry_surprise'
+                  : activeLive2DExpression
+              }
+              proportionMode={activeLive2DProportion}
+              viewAngle={perchPlacement.gazeDirection === 'cursor' ? 'three_quarter' : 'auto'}
+              animationPaused={
+                effectivePresenceState === 'rest' || effectivePresenceState === 'sleep'
+              }
+              isSpeaking={!isRecordingSkill && (morrowState === 'speaking' || isAiThinking)}
+              isPlayingMusic={isPlayingMusic}
+              customPalette={characterParametricState?.palette}
+              customAccessories={characterParametricState?.accessories}
+              className="w-full h-full"
+            />
+          </div>
+
+          {/* Subtle status badge & Voice on/off button floating above companion */}
+          <div
+            className={`absolute bottom-full left-1/2 -translate-x-1/2 mb-0.5 px-2.5 py-0.5 rounded-full border text-[10px] font-medium shadow-sm whitespace-nowrap flex items-center gap-1.5 transition-opacity duration-150 ${
               pendingApproval
                 ? 'opacity-100 bg-amber-500/15 border-amber-500/40 text-amber-300'
                 : 'opacity-95 group-hover:opacity-100 ' +
@@ -925,15 +993,15 @@ export const MorrowCompanion: React.FC<MorrowCompanionProps> = ({
                 type="button"
                 data-testid="morrow-popover-gear-btn"
                 onClick={() => {
+                  setPopoutChatOpen(false);
                   if (onOpenSettingsSection) {
-                    setPopoutChatOpen(false);
-                    onOpenSettingsSection('morrow');
+                    onOpenSettingsSection('character');
                   } else {
                     setCustomizeOpen(!customizeOpen);
                   }
                 }}
-                aria-label="Morrow settings"
-                title="Morrow settings & perch options"
+                aria-label={`${companionName} settings`}
+                title={`Open ${companionName} settings (Name, Size & Appearance)`}
                 className="p-1.5 rounded-lg text-stone-400 hover:text-stone-200 hover:bg-stone-500/15"
               >
                 <Settings className="w-3.5 h-3.5" />
@@ -951,7 +1019,7 @@ export const MorrowCompanion: React.FC<MorrowCompanionProps> = ({
 
           {/* Perch selector & Collapse to dot bar */}
           <div
-            className={`px-3 py-1.5 border-b flex items-center justify-between gap-2 text-[11px] ${
+            className={`px-3 py-2 border-b flex items-center justify-between gap-2 text-[11px] ${
               isLight ? 'bg-stone-50/60 border-stone-200 text-stone-600' : 'bg-stone-950/50 border-stone-800 text-stone-400'
             }`}
           >
@@ -1145,7 +1213,7 @@ export const MorrowCompanion: React.FC<MorrowCompanionProps> = ({
         <div
           role="dialog"
           aria-modal="false"
-          aria-label="Morrow preferences"
+          aria-label={`${companionName} preferences`}
           className={`fixed top-16 right-6 z-50 w-76 rounded-2xl border p-4 shadow-xl space-y-3 text-xs ${
             isLight
               ? 'bg-white border-stone-200 text-stone-900'
@@ -1173,6 +1241,7 @@ export const MorrowCompanion: React.FC<MorrowCompanionProps> = ({
             </label>
             <input
               id="morrow-name-input"
+              data-testid="companion-prefs-name-input"
               type="text"
               value={companionName}
               onChange={(e) => onChangeCompanionName && onChangeCompanionName(e.target.value)}
@@ -1180,6 +1249,48 @@ export const MorrowCompanion: React.FC<MorrowCompanionProps> = ({
                 isLight ? 'bg-stone-50 border-stone-300' : 'bg-stone-950 border-stone-800'
               }`}
             />
+          </div>
+
+          {/* Floating Figure Size Slider & Presets */}
+          <div className="space-y-1.5 pt-1">
+            <div className="flex items-center justify-between">
+              <label htmlFor="morrow-prefs-size-slider" className="text-stone-400">
+                Figure size
+              </label>
+              <span className="font-mono text-[11px] text-sky-400">{effectiveScalePct}%</span>
+            </div>
+            <input
+              id="morrow-prefs-size-slider"
+              data-testid="morrow-prefs-size-slider"
+              type="range"
+              min={50}
+              max={200}
+              step={5}
+              value={effectiveScalePct}
+              onChange={(e) => handleUpdateScalePct(Number(e.target.value))}
+              className="w-full accent-sky-500 cursor-pointer"
+            />
+            <div className="grid grid-cols-4 gap-1">
+              {[
+                { label: 'S (75%)', pct: 75 },
+                { label: 'M (100%)', pct: 100 },
+                { label: 'L (135%)', pct: 135 },
+                { label: 'XL (165%)', pct: 165 },
+              ].map((preset) => (
+                <button
+                  key={preset.pct}
+                  type="button"
+                  onClick={() => handleUpdateScalePct(preset.pct)}
+                  className={`py-1 rounded border text-[10px] font-medium transition-colors ${
+                    effectiveScalePct === preset.pct
+                      ? 'bg-sky-500/15 border-sky-500/40 text-sky-400'
+                      : 'border-stone-700/60 hover:bg-stone-500/10'
+                  }`}
+                >
+                  {preset.label}
+                </button>
+              ))}
+            </div>
           </div>
 
           <div className="grid grid-cols-2 gap-1.5 pt-1">

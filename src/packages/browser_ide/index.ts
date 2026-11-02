@@ -43,7 +43,7 @@ export interface BrowserExtractedTable {
 export interface BrowserExtractedLink {
   text: string;
   href: string;
-  isExternal: boolean;
+  isExternal?: boolean;
 }
 
 export interface BrowserExtractedForm {
@@ -56,22 +56,28 @@ export interface BrowserExtractedForm {
 export interface BrowserPageResult {
   url: string;
   title: string;
-  engineUsed: BrowserEngineType;
-  engineDisplay: string;
-  statusCode: number;
+  engineUsed?: BrowserEngineType;
+  engineDisplay?: string;
+  statusCode?: number;
   readableText: string;
-  readableMarkdown: string;
-  contentLengthBytes: number;
+  readableMarkdown?: string;
+  contentLengthBytes?: number;
   tables: BrowserExtractedTable[];
   links: BrowserExtractedLink[];
-  forms: BrowserExtractedForm[];
-  isUntrustedContent: true; // All external web content is tagged untrusted
+  forms?: BrowserExtractedForm[];
+  isUntrustedContent?: boolean;
+  untrustedTag?: string;
+  metadata?: any;
   injectionFlags: string[];
   screenshotBlobUrl?: string;
-  canEmbedInIframe: boolean;
+  canEmbedInIframe?: boolean;
   unsupportedReason?: string;
-  fetchedAt: string;
+  fetchedAt?: string;
 }
+
+export type BrowserEngineId = BrowserEngineType | string;
+export type BrowserPageExtraction = BrowserPageResult;
+export type BrowserSelfTestResult = any;
 
 export interface BrowserEngine {
   name: string;
@@ -334,7 +340,7 @@ export async function runBrowserSelfTest(): Promise<{
 
   return {
     ok: result.statusCode === 200 && result.readableText.length > 0,
-    engineUsed: result.engineDisplay,
+    engineUsed: result.engineDisplay || 'ReaderEngine',
     extractedTitle: result.title,
     sampleTextSnippet: result.readableText.slice(0, 120),
     tablesFoundCount: result.tables.length,
@@ -345,10 +351,10 @@ export async function runBrowserSelfTest(): Promise<{
 
 // Neutral Starter Bookmarks (Zero finance/bank defaults)
 export const NEUTRAL_STARTER_BOOKMARKS = [
-  { id: 'bm-wiki', title: 'Wikipedia Kyoto', url: 'https://en.wikipedia.org/wiki/Kyoto', category: 'Reference' },
-  { id: 'bm-weather', title: 'Open-Meteo Weather', url: 'https://open-meteo.com', category: 'Science' },
-  { id: 'bm-github', title: 'GitHub Open Source', url: 'https://github.com', category: 'Development' },
-  { id: 'bm-archive', title: 'Internet Archive', url: 'https://archive.org', category: 'History' },
+  { id: 'bm-wiki', title: 'Wikipedia Kyoto', url: 'https://en.wikipedia.org/wiki/Kyoto', category: 'Reference', description: 'Encyclopedia article on Kyoto' },
+  { id: 'bm-weather', title: 'Open-Meteo Weather', url: 'https://open-meteo.com', category: 'Science', description: 'Free open weather forecast API' },
+  { id: 'bm-github', title: 'GitHub Open Source', url: 'https://github.com', category: 'Development', description: 'Global software repository and hub' },
+  { id: 'bm-archive', title: 'Internet Archive', url: 'https://archive.org', category: 'History', description: 'Universal digital library' },
 ];
 
 // ============================================================================
@@ -360,6 +366,7 @@ export type ExtensionTargetPlatform = 'works_here' | 'needs_desktop' | 'theme_gr
 export interface OpenVsxExtensionRecord {
   id: string; // publisher.name
   publisher: string;
+  namespace?: string;
   name: string;
   displayName: string;
   version: string;
@@ -379,6 +386,9 @@ export interface OpenVsxExtensionRecord {
     snippets?: boolean;
   };
 }
+
+export type OpenVsxExtension = OpenVsxExtensionRecord;
+export type WorkspaceProposedDiff = WorkspaceDiffProposal;
 
 // Extension Classification Rule
 export function classifyExtensionPlatform(input: {
@@ -578,6 +588,7 @@ export async function searchOpenVsxRegistry(
 // .vsix Sideload Manifest Parser
 export interface VsixPackageManifest {
   valid: boolean;
+  id?: string;
   name: string;
   publisher: string;
   version: string;
@@ -638,11 +649,12 @@ export function parseVsixManifestText(rawJson: string): VsixPackageManifest {
 }
 
 // Real Formatting with Prettier Standalone
-export async function formatCodeWithPrettier(input: {
-  code: string;
-  language: string;
-}): Promise<{ formatted: string; changed: boolean; error?: string }> {
-  const { code, language } = input;
+export async function formatCodeWithPrettier(
+  inputOrCode: { code: string; language: string } | string,
+  fileNameOrLang = 'file.tsx'
+): Promise<{ formatted: string; changed: boolean; error?: string }> {
+  const code = typeof inputOrCode === 'string' ? inputOrCode : inputOrCode.code;
+  const language = typeof inputOrCode === 'string' ? fileNameOrLang : inputOrCode.language;
   let parserName = 'babel';
 
   if (language === 'typescript' || language === 'tsx') {
@@ -756,21 +768,28 @@ export function lintCodeSyntax(code: string, language: string): CodeProblem[] {
 export interface WorkspaceDiffProposal {
   id: string;
   filePath: string;
+  fileName?: string;
   originalContent: string;
   proposedContent: string;
   summary: string;
+  description?: string;
   addedLinesCount: number;
+  addedLines?: number;
   removedLinesCount: number;
+  removedLines?: number;
   checkpointId: string;
   status: 'staged' | 'accepted' | 'rejected' | 'reverted';
   createdAt: string;
 }
 
 export function proposeWorkspaceDiff(input: {
-  filePath: string;
+  filePath?: string;
+  fileId?: string;
+  fileName?: string;
   originalContent: string;
   proposedContent: string;
-  summary: string;
+  summary?: string;
+  description?: string;
 }): WorkspaceDiffProposal {
   const origLines = input.originalContent.split('\n');
   const propLines = input.proposedContent.split('\n');
@@ -785,12 +804,15 @@ export function proposeWorkspaceDiff(input: {
     added = 1;
   }
 
+  const effectivePath = input.filePath || input.fileName || input.fileId || 'file.tsx';
+  const effectiveSummary = input.summary || input.description || 'Staged AI workspace diff proposal';
+
   return {
     id: `diff-${Date.now()}`,
-    filePath: input.filePath,
+    filePath: effectivePath,
     originalContent: input.originalContent,
     proposedContent: input.proposedContent,
-    summary: input.summary,
+    summary: effectiveSummary,
     addedLinesCount: added,
     removedLinesCount: removed,
     checkpointId: `chk-${Date.now().toString(36)}`,

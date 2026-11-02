@@ -604,7 +604,7 @@ export const UniversalControlAndHermesView: React.FC<UniversalControlAndHermesVi
                     key={m.id}
                     className="p-2.5 rounded-xl border border-stone-800 flex items-center justify-between gap-2 text-xs"
                   >
-                    <span className="truncate">{m.fact}</span>
+                    <span className="truncate">{m.fact || m.content}</span>
                     <button
                       type="button"
                       onClick={() => onDeleteMemory(m.id)}

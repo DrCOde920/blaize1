@@ -1199,6 +1199,8 @@ export interface InstalledPluginRecord {
   manifestConstraints: PluginManifestConstraint[];
 }
 
+export type InstalledPluginItem = InstalledPluginRecord;
+
 export const INITIAL_INSTALLED_PLUGINS: InstalledPluginRecord[] = [
   {
     id: 'plugin-workspace-files',
@@ -1296,13 +1298,13 @@ export function generatePluginTemplateJson(): string {
 // 7. RULE BOOK AND REVIEW (Scoped Rules + Manifest Tightening + Unified Review Inbox)
 // ============================================================================
 
-export type ScopedRuleScope = 'Everywhere' | 'Project' | 'Plugin' | 'Connector';
+export type ScopedRuleScope = 'Everywhere' | 'Project' | 'Plugin' | 'Connector' | 'Place';
 
 export interface ScopedRuleItem {
   id: string;
   text: string;
   scope: ScopedRuleScope;
-  /** Optional target name when scope is Project, Plugin, or Connector */
+  /** Optional target name when scope is Project, Plugin, Connector, or Place */
   targetName?: string;
   actionClass: 'read' | 'write' | 'destructive' | 'external_send' | 'credential' | 'system';
   enforcement: RuleEnforcementMode;
@@ -1385,6 +1387,7 @@ export function evaluatePluginActionWithScopedRules(input: {
   actionSummary: string;
   projectName?: string;
   connectorName?: string;
+  placeName?: string;
   rules: ScopedRuleItem[];
 }): {
   effectiveEnforcement: RuleEnforcementMode;
@@ -1425,7 +1428,12 @@ export function evaluatePluginActionWithScopedRules(input: {
         Boolean(input.connectorName) &&
         (!rule.targetName ||
           rule.targetName === 'All Connectors' ||
-          rule.targetName.toLowerCase() === input.connectorName.toLowerCase()));
+          rule.targetName.toLowerCase() === (input.connectorName || '').toLowerCase())) ||
+      (rule.scope === 'Place' &&
+        (!rule.targetName ||
+          rule.targetName === 'All Places' ||
+          (input.placeName &&
+            rule.targetName.toLowerCase() === input.placeName.toLowerCase())));
 
     if (matchesScope) {
       appliedRuleIds.push(rule.id);

@@ -172,7 +172,7 @@ export interface PolicyDecision {
   evaluatedAt: string;
 }
 
-export type LedgerActor = 'user' | 'agent' | 'verifier' | 'guard' | 'sleep_cycle';
+export type LedgerActor = 'user' | 'agent' | 'verifier' | 'guard' | 'sleep_cycle' | 'operator';
 export type TrustLevel =
   | 'user_stated'
   | 'verified_by_evidence'
@@ -193,19 +193,32 @@ export interface LedgerEvent {
     | 'approval_denied'
     | 'verification_passed'
     | 'verification_failed'
+    | 'verifier_passed'
+    | 'verifier_failed'
     | 'memory_proposed'
     | 'memory_promoted'
+    | 'memory_created'
+    | 'memory_edited'
+    | 'memory_deleted'
+    | 'tool_executed'
     | 'user_correction'
     | 'user_deleted'
     | 'plugin_permission_grant'
     | 'plugin_blocked'
     | 'credential_takeover'
-    | 'sleep_consolidation';
+    | 'sleep_consolidation'
+    | 'vault_key_event'
+    | 'first_run_briefing_approved'
+    | string;
   summary: string;
   contentRef: string;
   evidenceHash: string;
   previousHash: string;
   ownHash: string;
+  entryHash?: string;
+  prevHash?: string;
+  contentDeleted?: boolean;
+  payload?: string;
   trustLevel: TrustLevel;
   missionId: string;
   orgId: string;
@@ -364,7 +377,7 @@ export interface PluginToolSchema {
   name: string;
   description: string;
   risk: GenericRiskClass | RiskLevel;
-  verifier: VerifierStrategyId;
+  verifier?: VerifierStrategyId;
   inputSchema: Record<string, string>;
   outputSchema: Record<string, string>;
   loadedInContext: boolean;

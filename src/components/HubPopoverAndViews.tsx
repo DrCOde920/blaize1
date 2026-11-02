@@ -115,12 +115,12 @@ const SKILL_CARD_ICONS: Record<
 
 export const SidebarGroupPopover: React.FC<{
   openGroupId: 'library' | 'workbench' | 'automations' | 'proof' | null;
-  activePageId: HubPageId;
+  activePageId: HubPageId | 'places';
   pendingReviewCount: number;
   isLight: boolean;
   anchorTopPx: number;
   sidebarCollapsed: boolean;
-  onSelectPage: (pageId: HubPageId) => void;
+  onSelectPage: (pageId: HubPageId | 'places') => void;
   onClose: () => void;
 }> = ({
   openGroupId,
@@ -135,7 +135,27 @@ export const SidebarGroupPopover: React.FC<{
   const [focusedIdx, setFocusedIdx] = useState(0);
   const tileRefs = useRef<Array<HTMLButtonElement | null>>([]);
 
-  const group = SIDEBAR_NAVIGATION_GROUPS.find((g) => g.id === openGroupId);
+  const baseGroup = SIDEBAR_NAVIGATION_GROUPS.find((g) => g.id === openGroupId);
+  const group = baseGroup
+    ? {
+        ...baseGroup,
+        tiles:
+          baseGroup.id === 'library'
+            ? [
+                {
+                  pageId: 'places' as unknown as HubPageId,
+                  groupId: 'library' as const,
+                  tileTitle: 'Places',
+                  pageName: 'Places',
+                  hint: 'Folder map and off-limits zones',
+                  iconName: 'BookOpen' as const,
+                  shortcutKeywords: ['places', 'folders', 'map', 'library'],
+                },
+                ...baseGroup.tiles,
+              ]
+            : baseGroup.tiles,
+      }
+    : undefined;
 
   useEffect(() => {
     setFocusedIdx(0);
@@ -1910,10 +1930,19 @@ export const UnifiedPluginsPageView: React.FC<{
   plugins: InstalledPluginRecord[];
   scopedRules: ScopedRuleItem[];
   isLight: boolean;
+  companionName?: string;
   onTogglePlugin: (id: string) => void;
   onRemovePlugin: (id: string) => void;
   onAddPlugin: (plugin: InstalledPluginRecord) => void;
-}> = ({ plugins, scopedRules, isLight, onTogglePlugin, onRemovePlugin, onAddPlugin }) => {
+}> = ({
+  plugins,
+  scopedRules,
+  isLight,
+  companionName = 'Morrow',
+  onTogglePlugin,
+  onRemovePlugin,
+  onAddPlugin,
+}) => {
   const [modalMode, setModalMode] = useState<'import' | 'create' | 'template' | null>(null);
   const [importJson, setImportJson] = useState(() => generatePluginTemplateJson());
   const [createName, setCreateName] = useState('');
@@ -1934,7 +1963,7 @@ export const UnifiedPluginsPageView: React.FC<{
             </p>
           </div>
 
-          {/* Three required buttons: Import, Create with Morrow, Download Template */}
+          {/* Three required buttons: Import, Create with companion, Download Template */}
           <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
@@ -1957,7 +1986,7 @@ export const UnifiedPluginsPageView: React.FC<{
               className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-sky-600 hover:bg-sky-500 text-white font-semibold"
             >
               <Sparkles className="w-3.5 h-3.5" />
-              <span>Create with Morrow</span>
+              <span>Create with {companionName}</span>
             </button>
 
             <button
@@ -1989,7 +2018,7 @@ export const UnifiedPluginsPageView: React.FC<{
           </div>
         )}
 
-        {/* Import / Create with Morrow / Download Template Drawer */}
+        {/* Import / Create with companion / Download Template Drawer */}
         {modalMode && (
           <div
             data-testid={`plugins-modal-${modalMode}`}
@@ -2002,7 +2031,7 @@ export const UnifiedPluginsPageView: React.FC<{
                 {modalMode === 'import'
                   ? 'Import Plugin Manifest'
                   : modalMode === 'create'
-                    ? 'Create Plugin with Morrow'
+                    ? `Create Plugin with ${companionName}`
                     : 'Plugin Manifest Template (JSON)'}
               </span>
               <button
@@ -2113,7 +2142,7 @@ export const UnifiedPluginsPageView: React.FC<{
                       setCreateName('');
                       setModalMode(null);
                       setFeedback(
-                        `Created "${created.name}" with Morrow. Rule Book boundaries automatically enforced.`
+                        `Created "${created.name}" with ${companionName}. Rule Book boundaries automatically enforced.`
                       );
                     }}
                     className="px-4 py-2 rounded-xl bg-sky-600 text-white font-semibold"
@@ -2292,6 +2321,7 @@ export const UnifiedRulesPageView: React.FC<{
               }`}
             >
               <option value="Everywhere">Scope: Everywhere</option>
+              <option value="Place">Scope: Place</option>
               <option value="Project">Scope: Project</option>
               <option value="Plugin">Scope: Plugin</option>
               <option value="Connector">Scope: Connector</option>
@@ -2368,7 +2398,7 @@ export const UnifiedRulesPageView: React.FC<{
 
         {/* Scope Filter Pills */}
         <div className="flex flex-wrap items-center gap-1.5">
-          {(['All', 'Everywhere', 'Project', 'Plugin', 'Connector'] as const).map((sc) => (
+          {(['All', 'Everywhere', 'Place', 'Project', 'Plugin', 'Connector'] as const).map((sc) => (
             <button
               key={sc}
               type="button"

@@ -58,10 +58,11 @@ export interface ReusableSkill {
   id: string;
   name: string;
   slug: string;
-  category: 'financial' | 'engineering' | 'research' | 'automation' | 'creative';
+  category: 'financial' | 'engineering' | 'research' | 'automation' | 'creative' | 'browser_workflow';
   description: string;
   skillMarkdown: string;
   parameters: SkillParameterSpec[];
+  parameterNames?: string[];
   requiredConnectors: string[];
   usageCount: number;
   guardVerified: boolean;
@@ -96,8 +97,9 @@ export interface SoulDocument {
 
 export interface MemoryEntry {
   id: string;
-  category: 'environment' | 'user_preference' | 'tool_quirk' | 'verified_fact';
+  category: 'environment' | 'user_preference' | 'tool_quirk' | 'verified_fact' | 'financial_guardrail';
   content: string;
+  fact?: string;
   source: 'agent_memory_tool' | 'user_pinned' | 'sleep_consolidation';
   updatedAt: string;
 }
@@ -152,16 +154,20 @@ export interface ScheduledTaskItem {
   lastRunStatus: 'idle' | 'verified_ok' | 'blocked_by_guard';
   guardNote: string;
   offlinePolicy?: OfflineMissedRunPolicy;
+  offlineMissedRunPolicy?: OfflineMissedRunPolicy;
 }
 
 export interface IdeFileNode {
   id: string;
-  projectId: string;
+  projectId?: string;
   path: string;
   name: string;
-  language: 'typescript' | 'tsx' | 'html' | 'css' | 'json' | 'markdown';
+  language?: 'typescript' | 'tsx' | 'html' | 'css' | 'json' | 'markdown' | string;
   content: string;
   linkedArtifactId?: string;
+  kind?: string;
+  isModified?: boolean;
+  version?: number;
 }
 
 export interface VSCodeMarketplaceExtension {
@@ -1471,6 +1477,7 @@ export function createScheduledTask(input: {
   actionPrompt: string;
   linkedSkillId?: string;
   offlinePolicy?: OfflineMissedRunPolicy;
+  offlineMissedRunPolicy?: OfflineMissedRunPolicy;
 }): ScheduledTaskItem {
   const cleanTitle = input.title.trim();
   const cleanPrompt = input.actionPrompt.trim();

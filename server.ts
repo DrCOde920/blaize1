@@ -12,6 +12,7 @@
 
 import express from 'express';
 import dotenv from 'dotenv';
+import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { PassphraseWrapVault, redactSecretsFromText } from './src/packages/vault/index';
@@ -21,6 +22,10 @@ import {
   runBrowserSelfTest,
   searchOpenVsxRegistry,
 } from './src/packages/browser_ide/index';
+import {
+  runEverydayPcBenchmarkSuite,
+  type DesktopOSPlatform,
+} from './src/packages/pc_operator/index';
 import { fileURLToPath } from 'node:url';
 
 dotenv.config();
@@ -227,6 +232,28 @@ export async function createBlaizeServer() {
       return;
     }
     res.status(200).json({ ok: true, locked: false, keys: serverVault.listMasked() });
+  });
+
+  // Live Process & System Metrics Endpoint (Never hardcoded)
+  app.get('/api/system/metrics', (_req, res) => {
+    const mem = process.memoryUsage();
+    res.status(200).json({
+      rssBytes: mem.rss,
+      heapTotalBytes: mem.heapTotal,
+      heapUsedBytes: mem.heapUsed,
+      externalBytes: mem.external,
+      uptimeSeconds: Math.floor(process.uptime()),
+    });
+  });
+
+  app.get('/api/system/platform-info', (_req, res) => {
+    res.status(200).json({
+      platform: process.platform,
+      arch: process.arch,
+      nodeVersion: process.version,
+      electronVersion: 'none (web-preview)',
+      isHeadless: !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY,
+    });
   });
 
   // 1. Honest Connection Check Endpoint (Never leaks key; no silent fallback)
@@ -803,10 +830,11 @@ export async function createBlaizeServer() {
         return;
       }
 
+      const validUrl = sec.sanitizedUrl || String(url);
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 10000);
 
-      const resp = await fetch(sec.sanitizedUrl, {
+      const resp = await fetch(validUrl, {
         headers: {
           'User-Agent': 'Blaize-Accountable-Desktop/3.0 (ReaderEngine; accountable-ai)',
           Accept: 'text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8',
@@ -820,14 +848,14 @@ export async function createBlaizeServer() {
         res.status(resp.status).json({
           ok: false,
           error: `HTTP ${resp.status} fetching URL: ${resp.statusText}`,
-          url: sec.sanitizedUrl,
+          url: validUrl,
         });
         return;
       }
 
       const html = await resp.text();
       const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
-      const title = titleMatch ? titleMatch[1].trim() : new URL(sec.sanitizedUrl).hostname;
+      const title = titleMatch ? titleMatch[1].trim() : new URL(validUrl).hostname;
 
       // Extract links
       const linkRegex = /<a\s+(?:[^>]*?\s+)?href=["']([^"']*)["'][^>]*>(.*?)<\/a>/gi;
@@ -935,13 +963,60 @@ export async function createBlaizeServer() {
       const result = await searchOpenVsxRegistry(query);
       res.status(200).json({
         ok: true,
-        source: result.source,
-        total: result.total,
+        source: result.isRealRegistryResult ? 'open-vsx.org' : 'recorded-fixtures',
+        total: result.extensions.length,
         extensions: result.extensions,
         notice: 'Using Open VSX, the open registry for VS Code-compatible editors.',
       });
     } catch (err: any) {
       res.status(500).json({ ok: false, error: err.message || 'Open VSX query failed.' });
+    }
+  });
+
+  // PC Operator Benchmark & KPIs Endpoint (Prompt B Section 9: writes real run results to evals/results.md)
+  app.post('/api/evals/write-results', (req, res) => {
+    try {
+      const rawPlatform = req.body?.platform;
+      const platform: DesktopOSPlatform =
+        rawPlatform === 'windows' || rawPlatform === 'macos' || rawPlatform === 'linux'
+          ? rawPlatform
+          : 'macos';
+      const report = runEverydayPcBenchmarkSuite(platform);
+      const evalsDir = path.resolve(__dirname, 'evals');
+      fs.mkdirSync(evalsDir, { recursive: true });
+      const resultsFile = path.join(evalsDir, 'results.md');
+      fs.writeFileSync(resultsFile, report.markdownReport, 'utf8');
+      res.status(200).json({
+        ok: true,
+        path: 'evals/results.md',
+        runId: report.runId,
+        executedAtIso: report.executedAtIso,
+        totalTasks: report.totalTasks,
+        ladderSuccessRatePct: report.ladderOn.successRatePct,
+        visionOnlySuccessRatePct: report.visionOnly.successRatePct,
+        falseSuccessCount: report.ladderOn.falseSuccessCount,
+      });
+    } catch (err: any) {
+      res.status(500).json({
+        ok: false,
+        error: err?.message || 'Failed to write evals/results.md',
+      });
+    }
+  });
+
+  app.get('/api/evals/results', (_req, res) => {
+    try {
+      const resultsFile = path.resolve(__dirname, 'evals', 'results.md');
+      const exists = fs.existsSync(resultsFile);
+      const markdown = exists ? fs.readFileSync(resultsFile, 'utf8') : '';
+      res.status(200).json({
+        ok: true,
+        exists,
+        path: 'evals/results.md',
+        markdown,
+      });
+    } catch (err: any) {
+      res.status(500).json({ ok: false, error: err?.message || 'Failed to read evals/results.md' });
     }
   });
 

@@ -64,6 +64,7 @@ export interface MonacoCodeEditorViewProps {
   onDeleteFile?: (fileId: string) => void;
   onPublishFileAsArtifact?: (artifact: { name: string; type: string; content: string; metadata?: any }) => void;
   onAskMorrowInChat?: (prompt: string) => void;
+  companionName?: string;
   uiTheme?: 'dark' | 'light';
 }
 
@@ -109,6 +110,7 @@ export const MonacoCodeEditorView: React.FC<MonacoCodeEditorViewProps> = ({
   onDeleteFile,
   onPublishFileAsArtifact,
   onAskMorrowInChat,
+  companionName = 'Morrow',
   uiTheme = 'dark',
 }) => {
   // Files state (fall back to starter files if empty)
@@ -368,7 +370,8 @@ export const MonacoCodeEditorView: React.FC<MonacoCodeEditorViewProps> = ({
     setVsixError(null);
     try {
       const ext = parseVsixManifestText(vsixInputText);
-      setInstalledExtensions((prev) => [...prev.filter((e) => e.id !== ext.id), { ...ext, enabled: true }]);
+      const extId = ext.id || `${ext.publisher}.${ext.name}`;
+      setInstalledExtensions((prev) => [...prev.filter((e) => e.id !== extId), { ...ext, id: extId, enabled: true } as any]);
       setShowVsixModal(false);
       setVsixInputText('');
       setStatusBarNotice(`Sideloaded "${ext.displayName || ext.name}" successfully.`);
@@ -1063,7 +1066,7 @@ export const MonacoCodeEditorView: React.FC<MonacoCodeEditorViewProps> = ({
                         data-testid="ask-morrow-selection-btn"
                       >
                         <MessageSquare className="w-3.5 h-3.5" />
-                        Ask Morrow
+                        Ask {companionName}
                       </button>
                       <button
                         type="button"

@@ -451,7 +451,7 @@ export const VSCodeIdeView: React.FC<VSCodeIdeViewProps> = ({
                     : activeFile.language === 'markdown'
                     ? 'markdown_doc'
                     : 'react_component',
-                language: activeFile.language,
+                language: activeFile.language || 'typescript',
                 content: activeFile.content,
               });
               setTerminalLines((prev) => [
@@ -1250,7 +1250,7 @@ export const VSCodeIdeView: React.FC<VSCodeIdeViewProps> = ({
 
                 <div className="flex items-center gap-3">
                   <span className="hidden sm:inline text-[10px] font-mono text-stone-400">
-                    UTF-8 · {activeFile?.language.toUpperCase()} · {activeExtensions.length} Addons
+                    UTF-8 · {(activeFile?.language || 'TS').toUpperCase()} · {activeExtensions.length} Addons
                   </span>
                   <button
                     type="button"
@@ -1339,7 +1339,7 @@ export const VSCodeIdeView: React.FC<VSCodeIdeViewProps> = ({
                 </button>
               </div>
               <span>
-                Ln {lineCount} · {activeFile?.language.toUpperCase()} · {activeExtensions.length}{' '}
+                Ln {lineCount} · {(activeFile?.language || 'TS').toUpperCase()} · {activeExtensions.length}{' '}
                 Marketplace Addons
               </span>
             </div>

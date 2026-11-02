@@ -1167,7 +1167,7 @@ export function buildMissionForScenario(
   });
 
   return {
-    morrowState: 'WAITING_FOR_USER' ? 'asking_approval' : 'attentive',
+    morrowState: 'asking_approval',
     talkDecision,
     mission: {
       id: 'mission-credential-takeover',

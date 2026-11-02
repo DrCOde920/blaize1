@@ -44,10 +44,22 @@ import {
   resolvePoseSlotWithFallback,
   validateCharacterPackManifest,
 } from '../packages/character';
+import {
+  COMPANION_LOOK_PRESETS,
+  Live2DPropId,
+  Live2DProportionMode,
+} from '../packages/living';
 import { MorrowLive2DRig } from './MorrowLive2DRig';
 
 interface CharacterStudioPanelProps {
   companionName: string;
+  onChangeCompanionName?: (name: string) => void;
+  activeLookId?: string;
+  onChangeLookId?: (lookId: string) => void;
+  activeLive2DProportion?: Live2DProportionMode;
+  onChangeLive2DProportion?: (mode: Live2DProportionMode) => void;
+  activeLive2DProp?: Live2DPropId;
+  onChangeLive2DProp?: (prop: Live2DPropId) => void;
   parametricState: CharacterParametricState;
   canUndo: boolean;
   onApplyPatch: (patch: CharacterPatch, description: string) => void;
@@ -60,6 +72,13 @@ interface CharacterStudioPanelProps {
 
 export const CharacterStudioPanel: React.FC<CharacterStudioPanelProps> = ({
   companionName,
+  onChangeCompanionName,
+  activeLookId = 'look-sage-emerald',
+  onChangeLookId,
+  activeLive2DProportion = 'vtuber_full',
+  onChangeLive2DProportion,
+  activeLive2DProp = 'none',
+  onChangeLive2DProp,
   parametricState,
   canUndo,
   onApplyPatch,
@@ -70,11 +89,16 @@ export const CharacterStudioPanel: React.FC<CharacterStudioPanelProps> = ({
   onRecordLedgerEvent,
 }) => {
   const [studioMode, setStudioMode] = useState<'adjust' | 'create_pack'>('adjust');
+  const [nameDraft, setNameDraft] = useState<string>(companionName);
   const [nlRequestInput, setNlRequestInput] = useState('');
   const [pendingPreviewPatch, setPendingPreviewPatch] = useState<CharacterPatch | null>(null);
   const [safetyError, setSafetyError] = useState<string | null>(null);
   const [statusBanner, setStatusBanner] = useState<string | null>(null);
   const [showTechDetails, setShowTechDetails] = useState(false);
+
+  React.useEffect(() => {
+    setNameDraft(companionName);
+  }, [companionName]);
 
   // Mode B: Create New Figure & Character Pack state
   const [newFigureName, setNewFigureName] = useState('Astra');
@@ -262,13 +286,13 @@ export const CharacterStudioPanel: React.FC<CharacterStudioPanelProps> = ({
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <div className="flex items-center gap-2">
-            <h2 className="text-base font-semibold">Character Studio</h2>
+            <h2 className="text-base font-semibold">Rename, Size &amp; Appearance</h2>
             <span className="px-2 py-0.5 rounded-full text-[11px] bg-sky-500/15 text-sky-400 font-medium">
               {isLiveModelMode ? 'Live Muse Image' : 'Simulated Preview'}
             </span>
           </div>
           <p className="text-stone-400 mt-0.5">
-            Adjust {companionName} with instant parametric controls or build a new Character Pack.
+            Rename {companionName}, adjust floating figure size on screen, and customize appearance.
           </p>
         </div>
 
@@ -283,7 +307,7 @@ export const CharacterStudioPanel: React.FC<CharacterStudioPanelProps> = ({
                 : 'text-stone-400 hover:text-stone-200'
             }`}
           >
-            Adjust Figure
+            Rename, Size &amp; Look
           </button>
           <button
             type="button"
@@ -298,6 +322,52 @@ export const CharacterStudioPanel: React.FC<CharacterStudioPanelProps> = ({
             New Figure &amp; Packs
           </button>
         </div>
+      </div>
+
+      {/* Assistant Name (Rename) Card — Adapts Everywhere */}
+      <div
+        data-testid="settings-companion-rename-card"
+        className={`p-4 rounded-2xl border flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
+          isLight ? 'bg-stone-50 border-stone-200' : 'bg-stone-950/60 border-stone-800'
+        }`}
+      >
+        <div className="space-y-0.5">
+          <label htmlFor="settings-companion-name-input" className="font-semibold text-xs block">
+            Assistant Name
+          </label>
+          <p className="text-[11px] text-stone-400">
+            Changing this name updates {companionName} across chat, prompts, floating companion, and workspace tools.
+          </p>
+        </div>
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (onChangeCompanionName && nameDraft.trim()) {
+              onChangeCompanionName(nameDraft.trim());
+              setStatusBanner(`Assistant renamed to "${nameDraft.trim()}" across the entire workspace.`);
+            }
+          }}
+          className="flex items-center gap-2 shrink-0"
+        >
+          <input
+            id="settings-companion-name-input"
+            data-testid="settings-companion-name-input"
+            type="text"
+            value={nameDraft}
+            onChange={(e) => setNameDraft(e.target.value)}
+            placeholder="Assistant name..."
+            className={`w-44 px-3 py-1.5 rounded-xl border text-xs font-medium outline-none focus:border-sky-500 ${
+              isLight ? 'bg-white border-stone-300 text-stone-900' : 'bg-stone-900 border-stone-700 text-stone-100'
+            }`}
+          />
+          <button
+            type="submit"
+            data-testid="settings-companion-name-save-btn"
+            className="px-3.5 py-1.5 rounded-xl bg-sky-600 hover:bg-sky-500 text-white font-semibold text-xs transition-colors"
+          >
+            Save Name
+          </button>
+        </form>
       </div>
 
       {safetyError && (
@@ -344,6 +414,9 @@ export const CharacterStudioPanel: React.FC<CharacterStudioPanelProps> = ({
               <MorrowLive2DRig
                 action="idle_breathe"
                 presenceState="stand_idle"
+                lookId={activeLookId}
+                propId={activeLive2DProp}
+                proportionMode={activeLive2DProportion}
                 customPalette={previewState.palette}
                 customAccessories={previewState.accessories}
                 className="w-36 h-48"
@@ -397,6 +470,135 @@ export const CharacterStudioPanel: React.FC<CharacterStudioPanelProps> = ({
 
           {/* Controls Column */}
           <div className="lg:col-span-2 space-y-4">
+            {/* Presets Row & Floating Figure Size Slider (applies immediately to floating companion) */}
+            <div
+              className={`p-4 rounded-2xl border space-y-3 ${
+                isLight ? 'bg-stone-50 border-stone-200' : 'bg-stone-950/50 border-stone-800'
+              }`}
+            >
+              <div className="flex items-center justify-between">
+                <label htmlFor="char-scale-slider" className="font-semibold text-xs">
+                  Floating Figure Size ({previewState.scalePct}%)
+                </label>
+                <span className="text-[11px] text-stone-400">Bounds: 50% – 200%</span>
+              </div>
+              <input
+                id="char-scale-slider"
+                type="range"
+                min={50}
+                max={200}
+                step={5}
+                data-testid="char-scale-slider"
+                value={previewState.scalePct}
+                onChange={(e) => {
+                  const nextScale = Number(e.target.value);
+                  const validated = clampAndValidateCharacterPatch({
+                    ...(pendingPreviewPatch || {}),
+                    scalePct: nextScale,
+                    summary: `Scale ${nextScale}%`,
+                  });
+                  setPendingPreviewPatch(validated);
+                  onApplyPatch(validated, `Scale ${nextScale}%`);
+                }}
+                className="w-full accent-sky-500 cursor-pointer"
+              />
+
+              {/* Presets Row */}
+              <div className="pt-1">
+                <div className="text-[11px] text-stone-400 mb-1.5">Quick Size &amp; Perch Presets</div>
+                <div className="flex flex-wrap gap-1.5">
+                  {CHARACTER_SIZE_PRESETS.map((preset) => (
+                    <button
+                      key={preset.id}
+                      type="button"
+                      data-testid={`char-preset-${preset.id}`}
+                      onClick={() => {
+                        setPendingPreviewPatch(preset.patch);
+                        onApplyPatch(preset.patch, `Preset: ${preset.label}`);
+                        setStatusBanner(`Applied preset: ${preset.label}`);
+                      }}
+                      className="px-3 py-1.5 rounded-xl border border-stone-700/80 hover:border-sky-500/50 text-xs font-medium"
+                    >
+                      {preset.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {/* Outfit / Look Presets & Proportions */}
+            <div
+              className={`p-4 rounded-2xl border space-y-3 ${
+                isLight ? 'bg-stone-50 border-stone-200' : 'bg-stone-950/50 border-stone-800'
+              }`}
+            >
+              <div className="font-semibold text-xs">Appearance &amp; Outfit Presets</div>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                {COMPANION_LOOK_PRESETS.map((look) => (
+                  <button
+                    key={look.id}
+                    type="button"
+                    data-testid={`settings-look-preset-${look.id}`}
+                    onClick={() => {
+                      if (onChangeLookId) onChangeLookId(look.id);
+                      setStatusBanner(`Selected appearance: ${look.name}`);
+                    }}
+                    className={`px-3 py-2 rounded-xl border text-left text-xs transition-colors ${
+                      activeLookId === look.id
+                        ? 'bg-sky-500/15 border-sky-500/50 text-sky-400 font-semibold'
+                        : 'border-stone-800 hover:border-stone-700'
+                    }`}
+                  >
+                    <div className="truncate">{look.name}</div>
+                  </button>
+                ))}
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                <div>
+                  <label className="block text-[11px] text-stone-400 mb-1">
+                    Figure Proportion
+                  </label>
+                  <select
+                    aria-label="Figure Proportion"
+                    value={activeLive2DProportion}
+                    onChange={(e) =>
+                      onChangeLive2DProportion &&
+                      onChangeLive2DProportion(e.target.value as Live2DProportionMode)
+                    }
+                    className={`w-full px-3 py-1.5 rounded-xl border text-xs ${
+                      isLight ? 'bg-white border-stone-200' : 'bg-stone-900 border-stone-800'
+                    }`}
+                  >
+                    <option value="vtuber_full">Full body</option>
+                    <option value="chibi_full">Compact chibi</option>
+                    <option value="vtuber_bust">Portrait bust</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-[11px] text-stone-400 mb-1">
+                    Held Prop
+                  </label>
+                  <select
+                    aria-label="Held Prop"
+                    value={activeLive2DProp}
+                    onChange={(e) =>
+                      onChangeLive2DProp &&
+                      onChangeLive2DProp(e.target.value as Live2DPropId)
+                    }
+                    className={`w-full px-3 py-1.5 rounded-xl border text-xs ${
+                      isLight ? 'bg-white border-stone-200' : 'bg-stone-900 border-stone-800'
+                    }`}
+                  >
+                    <option value="none">None</option>
+                    <option value="boba">Boba tea</option>
+                    <option value="popsicle">Popsicle</option>
+                    <option value="headpat">Headpat</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+
             {/* Natural Language Adjustment Box */}
             <div
               className={`p-4 rounded-2xl border space-y-3 ${
@@ -451,61 +653,6 @@ export const CharacterStudioPanel: React.FC<CharacterStudioPanelProps> = ({
                     {chip}
                   </button>
                 ))}
-              </div>
-            </div>
-
-            {/* Presets Row & Size Slider */}
-            <div
-              className={`p-4 rounded-2xl border space-y-3 ${
-                isLight ? 'bg-stone-50 border-stone-200' : 'bg-stone-950/50 border-stone-800'
-              }`}
-            >
-              <div className="flex items-center justify-between">
-                <label htmlFor="char-scale-slider" className="font-semibold text-xs">
-                  Size Scale ({previewState.scalePct}%)
-                </label>
-                <span className="text-[11px] text-stone-400">Bounds: 50% – 200%</span>
-              </div>
-              <input
-                id="char-scale-slider"
-                type="range"
-                min={50}
-                max={200}
-                step={5}
-                data-testid="char-scale-slider"
-                value={previewState.scalePct}
-                onChange={(e) => {
-                  const nextScale = Number(e.target.value);
-                  setPendingPreviewPatch((prev) =>
-                    clampAndValidateCharacterPatch({
-                      ...(prev || {}),
-                      scalePct: nextScale,
-                      summary: `Scale ${nextScale}%`,
-                    })
-                  );
-                }}
-                className="w-full accent-sky-500"
-              />
-
-              {/* Presets Row */}
-              <div className="pt-1">
-                <div className="text-[11px] text-stone-400 mb-1.5">Quick Presets</div>
-                <div className="flex flex-wrap gap-1.5">
-                  {CHARACTER_SIZE_PRESETS.map((preset) => (
-                    <button
-                      key={preset.id}
-                      type="button"
-                      data-testid={`char-preset-${preset.id}`}
-                      onClick={() => {
-                        setPendingPreviewPatch(preset.patch);
-                        setStatusBanner(`Selected preset: ${preset.label}`);
-                      }}
-                      className="px-3 py-1.5 rounded-xl border border-stone-700/80 hover:border-sky-500/50 text-xs font-medium"
-                    >
-                      {preset.label}
-                    </button>
-                  ))}
-                </div>
               </div>
             </div>
 

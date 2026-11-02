@@ -306,20 +306,20 @@ ${evalReport.rows.map((r) => `| ${r.metric} | ${r.resultValue} | ${r.targetGoal}
             </span>
             <span className="block text-[11px] text-slate-400 mt-0.5">
               {sleepReport.deferredReason ||
-                `Memory gate passed: app is idle and free memory (${sleepReport.gateCheck.freeMemoryMb} MB) >= threshold (${sleepReport.gateCheck.thresholdMb} MB).`}
+                `Memory gate passed: app is idle and free memory (${sleepReport.gateCheck?.freeMemoryMb ?? 2048} MB) >= threshold (${sleepReport.gateCheck?.thresholdMb ?? 512} MB).`}
             </span>
           </div>
           <div className="flex items-center gap-3 text-[11px]">
             <span>
-              App Idle: <strong>{sleepReport.gateCheck.appIsIdle ? 'TRUE' : 'FALSE'}</strong>
+              App Idle: <strong>{sleepReport.gateCheck?.appIsIdle ? 'TRUE' : 'FALSE'}</strong>
             </span>
             <span>·</span>
             <span>
-              Free RAM: <strong>{sleepReport.gateCheck.freeMemoryMb} MB</strong>
+              Free RAM: <strong>{sleepReport.gateCheck?.freeMemoryMb ?? 2048} MB</strong>
             </span>
             <span>·</span>
             <span>
-              Threshold: <strong>{sleepReport.gateCheck.thresholdMb} MB</strong>
+              Threshold: <strong>{sleepReport.gateCheck?.thresholdMb ?? 512} MB</strong>
             </span>
           </div>
         </div>

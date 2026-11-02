@@ -185,23 +185,25 @@ export const GeneralBrowserView: React.FC<GeneralBrowserViewProps> = ({
       return;
     }
 
+    const validUrl = sec.sanitizedUrl || normalizedUrl;
+
     updateActiveTab({
-      url: sec.sanitizedUrl,
+      url: validUrl,
       isLoading: true,
       error: undefined,
     });
 
     // Add to history
     setRecentSites((prev) => {
-      const filtered = prev.filter((s) => s.url !== sec.sanitizedUrl);
-      return [{ title: sec.sanitizedUrl, url: sec.sanitizedUrl, time: 'Just now' }, ...filtered].slice(0, 10);
+      const filtered = prev.filter((s) => s.url !== validUrl);
+      return [{ title: validUrl, url: validUrl, time: 'Just now' }, ...filtered].slice(0, 10);
     });
 
     try {
       const resp = await fetch('/api/browser/read', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: sec.sanitizedUrl }),
+        body: JSON.stringify({ url: validUrl }),
       });
 
       if (!resp.ok) {
@@ -211,8 +213,8 @@ export const GeneralBrowserView: React.FC<GeneralBrowserViewProps> = ({
 
       const extraction: BrowserPageExtraction = await resp.json();
       updateActiveTab({
-        title: extraction.title || new URL(sec.sanitizedUrl).hostname,
-        url: sec.sanitizedUrl,
+        title: extraction.title || new URL(validUrl).hostname,
+        url: validUrl,
         isLoading: false,
         extraction,
         error: undefined,
@@ -220,10 +222,10 @@ export const GeneralBrowserView: React.FC<GeneralBrowserViewProps> = ({
     } catch (err: any) {
       // Fallback with clean reader engine client extract
       const fallbackExtraction: BrowserPageExtraction = {
-        title: new URL(sec.sanitizedUrl).hostname,
-        url: sec.sanitizedUrl,
-        readableText: `Fetched ${sec.sanitizedUrl} via client fallback. Note: External host may block direct CORS embedding.\nUse 'Open in a new tab' to visit the site directly.`,
-        links: [{ href: sec.sanitizedUrl, text: 'Direct External Link' }],
+        title: new URL(validUrl).hostname,
+        url: validUrl,
+        readableText: `Fetched ${validUrl} via client fallback. Note: External host may block direct CORS embedding.\nUse 'Open in a new tab' to visit the site directly.`,
+        links: [{ href: validUrl, text: 'Direct External Link' }],
         tables: [],
         metadata: {
           status: 200,
@@ -232,12 +234,12 @@ export const GeneralBrowserView: React.FC<GeneralBrowserViewProps> = ({
           fetchedAt: new Date().toISOString(),
         },
         untrustedTag: '[Untrusted External Web Content]',
-        injectionFlags: scanContentForPromptInjection(sec.sanitizedUrl),
+        injectionFlags: scanContentForPromptInjection(validUrl),
       };
 
       updateActiveTab({
-        title: new URL(sec.sanitizedUrl).hostname,
-        url: sec.sanitizedUrl,
+        title: new URL(validUrl).hostname,
+        url: validUrl,
         isLoading: false,
         extraction: fallbackExtraction,
         error: err.message,
@@ -780,13 +782,13 @@ export const GeneralBrowserView: React.FC<GeneralBrowserViewProps> = ({
                     <Table className="w-4 h-4 text-sky-400" />
                     Extracted Tables ({activeTab.extraction.tables.length})
                   </h3>
-                  {activeTab.extraction.tables.map((tbl, i) => (
+                  {activeTab.extraction.tables.map((tbl: any, i: number) => (
                     <div key={i} className="overflow-x-auto rounded-lg border border-slate-800 bg-slate-950">
                       <table className="w-full text-left text-xs text-slate-300">
-                        {tbl.headers.length > 0 && (
+                        {tbl.headers && tbl.headers.length > 0 && (
                           <thead className="bg-slate-900 border-b border-slate-800 text-slate-200">
                             <tr>
-                              {tbl.headers.map((h, hi) => (
+                              {tbl.headers.map((h: string, hi: number) => (
                                 <th key={hi} className="px-3 py-2 font-semibold">
                                   {h}
                                 </th>
@@ -795,9 +797,9 @@ export const GeneralBrowserView: React.FC<GeneralBrowserViewProps> = ({
                           </thead>
                         )}
                         <tbody className="divide-y divide-slate-800/60">
-                          {tbl.rows.map((row, ri) => (
+                          {(tbl.rows || []).map((row: string[], ri: number) => (
                             <tr key={ri} className="hover:bg-slate-900/40">
-                              {row.map((cell, ci) => (
+                              {row.map((cell: string, ci: number) => (
                                 <td key={ci} className="px-3 py-1.5">
                                   {cell}
                                 </td>
@@ -818,7 +820,7 @@ export const GeneralBrowserView: React.FC<GeneralBrowserViewProps> = ({
                     Discovered Links ({activeTab.extraction.links.length})
                   </h3>
                   <div className="grid grid-cols-2 gap-2 text-xs">
-                    {activeTab.extraction.links.slice(0, 8).map((lnk, i) => (
+                    {activeTab.extraction.links.slice(0, 8).map((lnk: any, i: number) => (
                       <button
                         key={i}
                         type="button"

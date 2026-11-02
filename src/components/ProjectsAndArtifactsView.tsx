@@ -73,12 +73,20 @@ import {
 import { UnifiedSkillItem } from '../packages/hub';
 import { ScheduledTaskItem } from '../packages/workspace';
 
+export interface ProjectChatTurn {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  timestamp: string;
+}
+
 export interface ProjectChatSummary {
   id: string;
   projectId: string;
   title: string;
   updatedAt: string;
   lastMessagePreview: string;
+  messages?: ProjectChatTurn[];
 }
 
 export interface ProjectsAndArtifactsViewProps {
@@ -94,8 +102,10 @@ export interface ProjectsAndArtifactsViewProps {
   schedules: ScheduledTaskItem[];
   chatSummaries: ProjectChatSummary[];
   onOpenChatThread: (threadId: string) => void;
-  onStartNewProjectChat: (projectId: string) => void;
+  onStartNewProjectChat: (projectId: string, initialPrompt?: string) => void;
+  onSendProjectMessage?: (projectId: string, threadId: string, text: string) => void;
   onNavigateWorkspace: (view: 'chat' | 'ide' | 'skills' | 'connectors' | 'scheduler') => void;
+  companionName?: string;
   modelRuntimeMode?: 'mock' | 'live';
   uiTheme: 'dark' | 'light';
 }
@@ -147,16 +157,22 @@ export const ProjectsAndArtifactsView: React.FC<ProjectsAndArtifactsViewProps> =
   chatSummaries,
   onOpenChatThread,
   onStartNewProjectChat,
+  onSendProjectMessage,
   onNavigateWorkspace,
   modelRuntimeMode = 'mock',
   uiTheme,
+  companionName = 'Morrow',
 }) => {
   const isLight = uiTheme === 'light';
   const activeProject =
     generalProjects.find((p) => p.id === activeGeneralProjectId) || generalProjects[0];
 
-  // Workspace Right-Hand Tabs: Files, Chats, About
+  // Workspace Right-Hand Tabs: Files (Claude Overview + Knowledge), Chats, About
   const [activeTab, setActiveTab] = useState<'files' | 'chats' | 'about'>('files');
+  const [selectedProjectChatId, setSelectedProjectChatId] = useState<string | null>(null);
+  const [projectChatInput, setProjectChatInput] = useState<string>('');
+  const [claudeProjectPrompt, setClaudeProjectPrompt] = useState<string>('');
+  const [editingInstructionsInline, setEditingInstructionsInline] = useState<boolean>(false);
 
   // Artifact Search, Type Filter & Grid/List View
   const [searchQuery, setSearchQuery] = useState('');
@@ -235,6 +251,12 @@ export const ProjectsAndArtifactsView: React.FC<ProjectsAndArtifactsViewProps> =
   const projectChats = useMemo(
     () => chatSummaries.filter((c) => c.projectId === activeProject.id),
     [chatSummaries, activeProject.id]
+  );
+
+  const activeProjectChat = useMemo(
+    () =>
+      projectChats.find((c) => c.id === selectedProjectChatId) || projectChats[0] || null,
+    [projectChats, selectedProjectChatId]
   );
 
   const projectSchedules = useMemo(
@@ -474,26 +496,28 @@ export const ProjectsAndArtifactsView: React.FC<ProjectsAndArtifactsViewProps> =
               </div>
             </div>
 
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 sm:mr-32">
               <button
                 type="button"
                 data-testid="project-header-new-chat-btn"
-                onClick={() => onStartNewProjectChat(activeProject.id)}
+                onClick={() => {
+                  onStartNewProjectChat(activeProject.id);
+                }}
                 className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-sky-600 hover:bg-sky-500 text-white font-semibold transition-colors"
               >
                 <MessageSquare className="w-3.5 h-3.5" />
-                <span>Chat in project</span>
+                <span>New chat in project</span>
               </button>
             </div>
           </div>
 
-          {/* Three Workspace Tabs: Files, Chats, About */}
+          {/* Three Workspace Tabs: Project Overview & Files, Chats, About */}
           <div className="flex items-center gap-2" role="tablist" aria-label="Project sections">
             {(
               [
-                { id: 'files', label: `Files (${projectArtifacts.length})` },
-                { id: 'chats', label: `Chats (${projectChats.length})` },
-                { id: 'about', label: 'About' },
+                { id: 'files', label: `Overview & Files (${projectArtifacts.length})` },
+                { id: 'chats', label: `Project Chats (${projectChats.length})` },
+                { id: 'about', label: 'Instructions & Settings' },
               ] as const
             ).map((tab) => (
               <button
@@ -517,10 +541,10 @@ export const ProjectsAndArtifactsView: React.FC<ProjectsAndArtifactsViewProps> =
           </div>
         </header>
 
-        {/* TAB 1: FILES (ARTIFACTS) */}
+        {/* TAB 1: CLAUDE-STYLE PROJECT OVERVIEW + FILES & ARTIFACTS */}
         {activeTab === 'files' && (
           <div
-            className="flex-1 overflow-y-auto p-6 space-y-5"
+            className="flex-1 overflow-y-auto p-6"
             onDragOver={(e) => {
               e.preventDefault();
               setIsDraggingOver(true);
@@ -532,6 +556,130 @@ export const ProjectsAndArtifactsView: React.FC<ProjectsAndArtifactsViewProps> =
               handleImportBrowserFiles(e.dataTransfer.files);
             }}
           >
+            <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
+              {/* LEFT / MAIN COLUMN (Claude Project Prompt Box + Project Chats + Artifacts Browser) */}
+              <div className="xl:col-span-8 space-y-5 min-w-0">
+                {/* CLAUDE-STYLE PROJECT PROMPT COMPOSER ("Start a new chat in [Project]...") */}
+                <form
+                  data-testid="claude-project-composer"
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    const trimmed = claudeProjectPrompt.trim();
+                    onStartNewProjectChat(activeProject.id, trimmed || undefined);
+                    setClaudeProjectPrompt('');
+                  }}
+                  className={`rounded-2xl border p-4 shadow-sm transition-colors space-y-3 ${
+                    isLight
+                      ? 'bg-white border-stone-200 focus-within:border-sky-500'
+                      : 'bg-stone-900/90 border-stone-800 focus-within:border-sky-500/60'
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-semibold text-xs flex items-center gap-1.5">
+                      <MessageSquare className="w-3.5 h-3.5 text-sky-400" />
+                      <span>Start a new chat in {activeProject.name}</span>
+                    </span>
+                    <span className="text-[11px] text-stone-400">
+                      Opens in Chat with project context
+                    </span>
+                  </div>
+
+                  <textarea
+                    rows={2}
+                    data-testid="claude-project-prompt-input"
+                    value={claudeProjectPrompt}
+                    onChange={(e) => setClaudeProjectPrompt(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault();
+                        const trimmed = claudeProjectPrompt.trim();
+                        onStartNewProjectChat(activeProject.id, trimmed || undefined);
+                        setClaudeProjectPrompt('');
+                      }
+                    }}
+                    placeholder={`Ask ${companionName} anything using ${activeProject.name}'s instructions and ${projectArtifacts.length} knowledge files...`}
+                    className="w-full bg-transparent outline-none resize-none text-sm placeholder:text-stone-400"
+                  />
+
+                  <div className="pt-2 border-t border-stone-800/40 flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex flex-wrap items-center gap-2 text-[11px] text-stone-400">
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-sky-500/10 text-sky-400 border border-sky-500/20 font-medium">
+                        <BookOpen className="w-3 h-3" />
+                        <span>{projectArtifacts.length} knowledge files active</span>
+                      </span>
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-medium">
+                        <Sparkles className="w-3 h-3" />
+                        <span>Project instructions on</span>
+                      </span>
+                    </div>
+
+                    <button
+                      type="submit"
+                      data-testid="claude-project-start-chat-btn"
+                      className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-xl bg-sky-600 hover:bg-sky-500 text-white font-semibold text-xs transition-colors"
+                    >
+                      <span>Start chat</span>
+                      <ChevronRight className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </form>
+
+                {/* CLAUDE-STYLE RECENT CHATS IN THIS PROJECT */}
+                <section
+                  data-testid="claude-project-chats-list"
+                  className={`rounded-2xl border p-4 space-y-3 ${
+                    isLight ? 'bg-white border-stone-200' : 'bg-stone-900/60 border-stone-800/90'
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <div>
+                      <h3 className="text-xs font-semibold">
+                        Chats in {activeProject.name} ({projectChats.length})
+                      </h3>
+                      <p className="text-[11px] text-stone-400">
+                        Click any chat to continue the conversation in the main Chat view with this project&apos;s knowledge.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setActiveTab('chats')}
+                      className="text-[11px] text-sky-400 hover:underline font-medium shrink-0"
+                    >
+                      View all ({projectChats.length})
+                    </button>
+                  </div>
+
+                  {projectChats.length === 0 ? (
+                    <div className="p-4 rounded-xl border border-dashed border-stone-700/60 text-center text-stone-400">
+                      No chats in {activeProject.name} yet. Type above to start your first chat in this project.
+                    </div>
+                  ) : (
+                    <div className="divide-y divide-stone-800/50">
+                      {projectChats.slice(0, 4).map((chat) => (
+                        <div
+                          key={chat.id}
+                          data-testid={`claude-project-chat-row-${chat.id}`}
+                          onClick={() => onOpenChatThread(chat.id)}
+                          className="py-2.5 px-2 first:pt-1 last:pb-1 flex items-center justify-between gap-3 cursor-pointer rounded-xl hover:bg-sky-500/5 transition-colors group"
+                        >
+                          <div className="min-w-0 space-y-0.5">
+                            <div className="font-semibold text-xs truncate group-hover:text-sky-400 transition-colors flex items-center gap-2">
+                              <MessageSquare className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+                              <span className="truncate">{chat.title}</span>
+                            </div>
+                            <p className="text-[11px] text-stone-400 truncate pl-5">
+                              {chat.lastMessagePreview}
+                            </p>
+                          </div>
+                          <div className="flex items-center gap-2 shrink-0 text-[11px] text-stone-400">
+                            <span>{chat.updatedAt}</span>
+                            <ChevronRight className="w-3.5 h-3.5 text-stone-500 group-hover:text-sky-400" />
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </section>
             {/* Undo Delete Toast Banner */}
             {undoTicket && (
               <div
@@ -599,7 +747,7 @@ export const ProjectsAndArtifactsView: React.FC<ProjectsAndArtifactsViewProps> =
                     data-testid="artifact-search-input"
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
-                    placeholder="Search files, tags, or chats..."
+                    placeholder="Search files, tags, or project notes..."
                     className="bg-transparent outline-none w-full"
                   />
                 </div>
@@ -750,7 +898,7 @@ export const ProjectsAndArtifactsView: React.FC<ProjectsAndArtifactsViewProps> =
                 <div className="text-sm font-semibold">No files in this view yet</div>
                 <p className="text-stone-400 max-w-md mx-auto">
                   Drag and drop files from your computer, click &ldquo;New document&rdquo;, or save
-                  any answer from Chat as a file.
+                  any project thread note as a file.
                 </p>
               </div>
             ) : viewLayout === 'grid' ? (
@@ -788,7 +936,7 @@ export const ProjectsAndArtifactsView: React.FC<ProjectsAndArtifactsViewProps> =
                           <span>{formatBytesHuman(art.sizeBytes)}</span>
                         </div>
                         <div className="text-[11px] text-stone-400 truncate">
-                          {art.creator === 'agent' ? 'Created by Morrow' : 'Created by you'} ·{' '}
+                          {art.creator === 'agent' ? `Created by ${companionName}` : 'Created by you'} ·{' '}
                           {art.originChatOrMission}
                         </div>
                         <div className="flex flex-wrap gap-1 pt-1">
@@ -842,26 +990,188 @@ export const ProjectsAndArtifactsView: React.FC<ProjectsAndArtifactsViewProps> =
                 })}
               </div>
             )}
+              </div>
+
+              {/* RIGHT COLUMN: CLAUDE-STYLE PROJECT INSTRUCTIONS & PROJECT KNOWLEDGE SIDEBAR */}
+              <aside className="xl:col-span-4 space-y-4 min-w-0">
+                {/* 1. PROJECT INSTRUCTIONS CARD */}
+                <section
+                  data-testid="claude-project-instructions-card"
+                  className={`p-4 rounded-2xl border space-y-3 ${
+                    isLight ? 'bg-white border-stone-200' : 'bg-stone-900/75 border-stone-800/90'
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <Sparkles className="w-4 h-4 text-sky-400 shrink-0" />
+                      <h3 className="text-xs font-semibold">Project instructions</h3>
+                    </div>
+                    <button
+                      type="button"
+                      data-testid="claude-edit-instructions-btn"
+                      onClick={() => setEditingInstructionsInline((v) => !v)}
+                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-stone-700/70 text-[11px] font-medium hover:bg-stone-800/60"
+                    >
+                      <Edit3 className="w-3 h-3 text-sky-400" />
+                      <span>{editingInstructionsInline ? 'Close' : 'Set instructions'}</span>
+                    </button>
+                  </div>
+
+                  {editingInstructionsInline ? (
+                    <div className="space-y-2.5">
+                      <textarea
+                        rows={4}
+                        data-testid="claude-inline-instructions-textarea"
+                        value={aboutDraft}
+                        onChange={(e) => setAboutDraft(e.target.value)}
+                        placeholder={`Give ${companionName} custom instructions or context for every chat in ${activeProject.name}...`}
+                        className={`w-full p-2.5 rounded-xl border text-xs outline-none ${
+                          isLight ? 'bg-stone-50 border-stone-200' : 'bg-stone-950 border-stone-800'
+                        }`}
+                      />
+                      <div className="flex items-center justify-end gap-2">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setAboutDraft(activeProject.aboutInstructions);
+                            setEditingInstructionsInline(false);
+                          }}
+                          className="px-2.5 py-1 rounded-lg border border-stone-700 text-[11px]"
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          type="button"
+                          data-testid="claude-save-instructions-btn"
+                          onClick={() => {
+                            onUpdateGeneralProject(activeProject.id, {
+                              aboutInstructions: aboutDraft,
+                              updatedAt: 'Just now',
+                            });
+                            setEditingInstructionsInline(false);
+                            setAboutSavedToast(true);
+                            window.setTimeout(() => setAboutSavedToast(false), 1800);
+                          }}
+                          className="px-3 py-1 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-semibold text-[11px]"
+                        >
+                          Save instructions
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div
+                      onClick={() => setEditingInstructionsInline(true)}
+                      className={`p-3 rounded-xl border text-xs leading-relaxed cursor-pointer transition-colors ${
+                        isLight
+                          ? 'bg-stone-50 border-stone-200 text-stone-700 hover:border-sky-400'
+                          : 'bg-stone-950/70 border-stone-800/80 text-stone-300 hover:border-stone-700'
+                      }`}
+                    >
+                      {activeProject.aboutInstructions || (
+                        <span className="text-stone-400">
+                          Add custom instructions to tailor {companionName}&apos;s responses across all chats in this project.
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </section>
+
+                {/* 2. PROJECT KNOWLEDGE CARD (Claude-style Knowledge Capacity + Attached Files) */}
+                <section
+                  data-testid="claude-project-knowledge-card"
+                  className={`p-4 rounded-2xl border space-y-3 ${
+                    isLight ? 'bg-white border-stone-200' : 'bg-stone-900/75 border-stone-800/90'
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <BookOpen className="w-4 h-4 text-sky-400 shrink-0" />
+                      <h3 className="text-xs font-semibold">Project knowledge</h3>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => fileInputRef.current?.click()}
+                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-stone-700/70 text-[11px] font-medium hover:bg-stone-800/60"
+                      >
+                        <Plus className="w-3 h-3 text-sky-400" />
+                        <span>Add content</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Knowledge Capacity Bar */}
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between text-[11px] text-stone-400">
+                      <span>{Math.min(95, Math.max(6, projectArtifacts.length * 9))}% of project knowledge used</span>
+                      <span>{projectArtifacts.length} {projectArtifacts.length === 1 ? 'file' : 'files'}</span>
+                    </div>
+                    <div className="w-full h-1.5 rounded-full bg-stone-800 overflow-hidden">
+                      <div
+                        className="h-full bg-sky-500 rounded-full transition-all"
+                        style={{
+                          width: `${Math.min(95, Math.max(6, projectArtifacts.length * 9))}%`,
+                        }}
+                      />
+                    </div>
+                  </div>
+
+                  {/* Compact Knowledge File List */}
+                  <div className="space-y-1.5 max-h-64 overflow-y-auto pr-0.5">
+                    {projectArtifacts.map((art) => {
+                      const CatIcon = CATEGORY_ICON_MAP[art.category] || FileText;
+                      return (
+                        <div
+                          key={art.id}
+                          onClick={() => handleOpenArtifactModal(art)}
+                          className={`p-2.5 rounded-xl border flex items-center justify-between gap-2 cursor-pointer transition-colors ${
+                            isLight
+                              ? 'bg-stone-50 border-stone-200 hover:border-sky-400'
+                              : 'bg-stone-950/70 border-stone-800/80 hover:border-sky-500/40'
+                          }`}
+                        >
+                          <div className="flex items-center gap-2 min-w-0">
+                            <CatIcon className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+                            <div className="min-w-0">
+                              <div className="font-medium text-xs truncate">{art.title}</div>
+                              <div className="text-[10px] text-stone-400 truncate">
+                                {ARTIFACT_CATEGORY_LABELS[art.category]} · {formatBytesHuman(art.sizeBytes)}
+                              </div>
+                            </div>
+                          </div>
+                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-stone-500/10 text-stone-400 shrink-0">
+                            v{art.currentVersion}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </section>
+              </aside>
+            </div>
           </div>
         )}
 
-        {/* TAB 2: CHATS IN THIS PROJECT */}
+        {/* TAB 2: PROJECT CHATS (Dedicated list & preview, plus 1-click Open in Full Chat) */}
         {activeTab === 'chats' && (
           <div className="flex-1 overflow-y-auto p-6 space-y-4" data-testid="project-chats-panel">
-            <div className="flex items-center justify-between">
+            <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
-                <h3 className="text-sm font-semibold">Conversations in {activeProject.name}</h3>
+                <h3 className="text-sm font-semibold">
+                  Project Chats in {activeProject.name}
+                </h3>
                 <p className="text-stone-400">
-                  Every chat here uses this project&apos;s instructions, files, and memory scope.
+                  Every chat in {activeProject.name} shares this project&apos;s instructions and knowledge files. Click any chat to open it in the full Chat view.
                 </p>
               </div>
               <button
                 type="button"
+                data-testid="project-chats-new-btn"
                 onClick={() => onStartNewProjectChat(activeProject.id)}
                 className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-sky-600 hover:bg-sky-500 text-white font-semibold"
               >
                 <Plus className="w-3.5 h-3.5" />
-                <span>New chat</span>
+                <span>New chat in project</span>
               </button>
             </div>
 
@@ -871,57 +1181,159 @@ export const ProjectsAndArtifactsView: React.FC<ProjectsAndArtifactsViewProps> =
                   isLight ? 'bg-white border-stone-200' : 'bg-stone-900/50 border-stone-800'
                 }`}
               >
-                <div className="font-semibold">No chats in {activeProject.name} yet</div>
+                <div className="font-semibold">No project threads in {activeProject.name} yet</div>
                 <p className="text-stone-400">
-                  Start a conversation to plan, research, write, or create files for this project.
+                  Start a project thread to plan, research, write, or create files scoped strictly to this project.
                 </p>
               </div>
             ) : (
-              <div className="space-y-2.5">
-                {projectChats.map((chat) => (
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+                {/* Project Thread List */}
+                <div className="space-y-2">
+                  {projectChats.map((chat) => {
+                    const isSelected = activeProjectChat?.id === chat.id;
+                    return (
+                      <div
+                        key={chat.id}
+                        data-testid={`project-thread-item-${chat.id}`}
+                        onClick={() => {
+                          setSelectedProjectChatId(chat.id);
+                          onOpenChatThread(chat.id);
+                        }}
+                        className={`p-3.5 rounded-2xl border cursor-pointer transition-colors space-y-2 ${
+                          isSelected
+                            ? isLight
+                              ? 'bg-sky-50 border-sky-500/50'
+                              : 'bg-sky-500/10 border-sky-500/40'
+                            : isLight
+                              ? 'bg-white border-stone-200 hover:border-stone-300'
+                              : 'bg-stone-900/70 border-stone-800 hover:border-stone-700'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="font-semibold text-xs truncate">{chat.title}</div>
+                          <span className="text-[10px] text-stone-400 shrink-0">
+                            {chat.updatedAt}
+                          </span>
+                        </div>
+                        <p className="text-stone-400 text-[11px] line-clamp-2">
+                          {chat.lastMessagePreview}
+                        </p>
+                        <div className="flex items-center justify-end">
+                          <button
+                            type="button"
+                            data-testid={`save-chat-as-artifact-${chat.id}`}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              const saved = artifactStore.create({
+                                projectId: activeProject.id,
+                                title: `Notes from ${chat.title}`,
+                                category: 'document',
+                                content: `# ${chat.title}\n\n${chat.lastMessagePreview}`,
+                                creator: 'agent',
+                                originChatOrMission: `Project Thread: ${chat.title}`,
+                                tags: ['project-note'],
+                              });
+                              onRefreshArtifacts();
+                              setActiveTab('files');
+                              handleOpenArtifactModal(saved);
+                            }}
+                            className="px-2.5 py-1 rounded-lg border border-stone-700/70 text-[11px] text-stone-300 hover:bg-stone-800"
+                          >
+                            Save as artifact
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* Self-Contained Project Thread Conversation & Composer */}
+                {activeProjectChat && (
                   <div
-                    key={chat.id}
-                    className={`p-4 rounded-2xl border flex flex-wrap items-center justify-between gap-3 ${
+                    data-testid="active-project-chat-view"
+                    className={`lg:col-span-2 rounded-2xl border flex flex-col justify-between p-4 min-h-[340px] ${
                       isLight ? 'bg-white border-stone-200' : 'bg-stone-900/70 border-stone-800'
                     }`}
                   >
-                    <div className="space-y-1 min-w-0">
-                      <div className="font-semibold text-sm">{chat.title}</div>
-                      <p className="text-stone-400 truncate max-w-xl">{chat.lastMessagePreview}</p>
-                      <div className="text-[11px] text-stone-500">{chat.updatedAt}</div>
+                    <div className="space-y-3 overflow-y-auto max-h-80 pr-1">
+                      <div className="pb-2 border-b border-stone-800/60 flex items-center justify-between">
+                        <div>
+                          <div className="font-semibold text-sm">{activeProjectChat.title}</div>
+                          <div className="text-[11px] text-stone-400">
+                            Scoped to {activeProject.name} · Memory isolated from normal chats
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="space-y-2.5">
+                        {(activeProjectChat.messages && activeProjectChat.messages.length > 0
+                          ? activeProjectChat.messages
+                          : [
+                              {
+                                id: 'pmsg-default',
+                                role: 'assistant' as const,
+                                content: activeProjectChat.lastMessagePreview,
+                                timestamp: activeProjectChat.updatedAt,
+                              },
+                            ]
+                        ).map((m) => (
+                          <div
+                            key={m.id}
+                            className={`flex flex-col ${
+                              m.role === 'user' ? 'items-end' : 'items-start'
+                            }`}
+                          >
+                            <div
+                              className={`max-w-[85%] rounded-2xl px-3.5 py-2.5 text-xs leading-relaxed ${
+                                m.role === 'user'
+                                  ? 'bg-sky-600 text-white'
+                                  : isLight
+                                    ? 'bg-stone-100 border border-stone-200 text-stone-800'
+                                    : 'bg-stone-950/80 border border-stone-800 text-stone-200'
+                              }`}
+                            >
+                              <div>{m.content}</div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
                     </div>
-                    <div className="flex items-center gap-2">
+
+                    <form
+                      onSubmit={(e) => {
+                        e.preventDefault();
+                        const trimmed = projectChatInput.trim();
+                        if (!trimmed) return;
+                        if (onSendProjectMessage) {
+                          onSendProjectMessage(activeProject.id, activeProjectChat.id, trimmed);
+                        }
+                        setProjectChatInput('');
+                      }}
+                      className="pt-3 mt-3 border-t border-stone-800/60 flex items-center gap-2"
+                    >
+                      <input
+                        type="text"
+                        data-testid="project-chat-input"
+                        value={projectChatInput}
+                        onChange={(e) => setProjectChatInput(e.target.value)}
+                        placeholder={`Discuss "${activeProject.name}" with ${companionName}...`}
+                        className={`flex-1 px-3 py-2 rounded-xl border text-xs outline-none ${
+                          isLight
+                            ? 'bg-stone-50 border-stone-200 text-stone-900'
+                            : 'bg-stone-950 border-stone-800 text-stone-100'
+                        }`}
+                      />
                       <button
-                        type="button"
-                        data-testid={`save-chat-as-artifact-${chat.id}`}
-                        onClick={() => {
-                          const saved = artifactStore.create({
-                            projectId: activeProject.id,
-                            title: `Notes from ${chat.title}`,
-                            category: 'document',
-                            content: `# ${chat.title}\n\n${chat.lastMessagePreview}`,
-                            creator: 'agent',
-                            originChatOrMission: `Chat: ${chat.title}`,
-                            tags: ['chat-note'],
-                          });
-                          onRefreshArtifacts();
-                          setActiveTab('files');
-                          handleOpenArtifactModal(saved);
-                        }}
-                        className="px-3 py-1.5 rounded-xl border border-stone-700 text-stone-300 hover:bg-stone-800"
+                        type="submit"
+                        data-testid="project-chat-send-btn"
+                        className="px-4 py-2 rounded-xl bg-sky-600 hover:bg-sky-500 text-white font-semibold text-xs"
                       >
-                        Save as artifact
+                        Send
                       </button>
-                      <button
-                        type="button"
-                        onClick={() => onOpenChatThread(chat.id)}
-                        className="px-3.5 py-1.5 rounded-xl bg-sky-600 text-white font-semibold"
-                      >
-                        Open chat
-                      </button>
-                    </div>
+                    </form>
                   </div>
-                ))}
+                )}
               </div>
             )}
           </div>
@@ -940,7 +1352,7 @@ export const ProjectsAndArtifactsView: React.FC<ProjectsAndArtifactsViewProps> =
                 <div>
                   <h3 className="text-sm font-semibold">About &amp; Plain-Language Instructions</h3>
                   <p className="text-stone-400">
-                    Tell Morrow what this project is about and how you want help here.
+                    Tell {companionName} what this project is about and how you want help here.
                   </p>
                 </div>
                 {aboutSavedToast && (
