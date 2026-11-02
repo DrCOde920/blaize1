@@ -543,6 +543,96 @@ describe('Prompt B: PC Operator (DesktopDriver, Action Ladder, Perception, Loop,
     assert.equal(yielded.status, 'paused_user_input');
     assert.match(yielded.handBackSummaryLine || '', /Paused because you touched the mouse\/keyboard/);
   });
+
+  it('12. PROMPT 1 Truthful Verifier Contract: missing file hash, missing DOM snapshot, missing UI observation, and unimplemented vision_verifier never pass', () => {
+    const driver = createDesktopDriver('macos');
+    const snap = driver.capturePerception();
+
+    // (a) Missing actual file hash returns passed: false, verificationState: 'UNCERTAIN' (never substitutes expected hash)
+    const missingHashOutcome = verifyDesktopStepOutcome(
+      snap,
+      {
+        kind: 'file_hash',
+        targetIdOrPath: '/workspace/reports/missing_hash_report.csv',
+        expectedValueOrHash: 'sha256:expected_real_hash_12345',
+      },
+      {}
+    );
+    assert.equal(missingHashOutcome.passed, false);
+    assert.equal(missingHashOutcome.deterministicCheckPassed, false);
+    assert.equal(missingHashOutcome.verificationState, 'UNCERTAIN');
+    assert.match(missingHashOutcome.evidenceSummary, /UNCERTAIN.*missing actual file hash/i);
+
+    // Matching actual file hash passes
+    const matchingHashOutcome = verifyDesktopStepOutcome(
+      snap,
+      {
+        kind: 'file_hash',
+        targetIdOrPath: '/workspace/reports/valid_report.csv',
+        expectedValueOrHash: 'sha256:expected_real_hash_12345',
+      },
+      { '/workspace/reports/valid_report.csv': 'sha256:expected_real_hash_12345' }
+    );
+    assert.equal(matchingHashOutcome.passed, true);
+    assert.equal(matchingHashOutcome.verificationState, 'VERIFIED');
+
+    // (b) Missing DOM snapshot returns passed: false, verificationState: 'UNCERTAIN'
+    const missingDomOutcome = verifyDesktopStepOutcome(
+      snap,
+      {
+        kind: 'dom_snapshot',
+        targetIdOrPath: 'table#statement-ledger',
+        expectedValueOrHash: 'october-2026',
+      },
+      {}
+    );
+    assert.equal(missingDomOutcome.passed, false);
+    assert.equal(missingDomOutcome.verificationState, 'UNCERTAIN');
+    assert.match(missingDomOutcome.evidenceSummary, /UNCERTAIN.*missing DOM snapshot/i);
+
+    // (c) Missing UI observation (empty elements array) returns passed: false, verificationState: 'UNCERTAIN'
+    const emptySnapOutcome = verifyDesktopStepOutcome(
+      { ...snap, elements: [] },
+      {
+        kind: 'element_exists',
+        targetIdOrPath: 'btn-export',
+        expectedValueOrHash: 'present',
+      }
+    );
+    assert.equal(emptySnapOutcome.passed, false);
+    assert.equal(emptySnapOutcome.verificationState, 'UNCERTAIN');
+    assert.match(emptySnapOutcome.evidenceSummary, /UNCERTAIN.*missing UI observation/i);
+
+    // (d) Unimplemented vision_verifier returns passed: false, verificationState: 'UNSUPPORTED'
+    const visionOutcome = verifyDesktopStepOutcome(snap, {
+      kind: 'vision_verifier',
+      targetIdOrPath: 'win-files-1',
+      expectedValueOrHash: 'Export Archive Complete',
+    });
+    assert.equal(visionOutcome.passed, false);
+    assert.equal(visionOutcome.verifierKindUsed, 'vision_verifier');
+    assert.equal(visionOutcome.visionVerifierPassed, false);
+    assert.equal(visionOutcome.verificationState, 'UNSUPPORTED');
+    assert.match(visionOutcome.evidenceSummary, /UNSUPPORTED.*not implemented/i);
+
+    // (e) Simulator isolation: desktop driver and benchmark suite explicitly mark results as SIMULATED
+    const t1Simulated = driver.executeTierAction(
+      {
+        appId: 'app-files',
+        windowId: 'win-files-1',
+        intent: 'List directory reports via CLI',
+        tier: 'T1_DIRECT_TOOLS',
+        toolCommand: 'ls -la /workspace/reports',
+      },
+      snap
+    );
+    assert.equal(t1Simulated.executionState, 'SIMULATED');
+    assert.equal(t1Simulated.isSimulated, true);
+
+    const benchReport = runEverydayPcBenchmarkSuite('macos');
+    assert.equal(benchReport.executionState, 'SIMULATED');
+    assert.equal(benchReport.isSimulated, true);
+  });
 });
 
 

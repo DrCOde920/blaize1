@@ -27,7 +27,9 @@
  * - Honest disclosure: Blaize must be open for schedules to run in this version.
  */
 
+import { ScopedApprovalToken } from '../contracts';
 import { ScopedRuleItem } from '../hub/index';
+import { globalApprovalTokenStore, globalPolicyEngine } from '../trust';
 
 // ============================================================================
 // 1. CONNECTOR SDK INTERFACES & MANIFEST TYPES
@@ -845,8 +847,9 @@ export function invokeConnectorToolWithSafety(input: {
   params: Record<string, unknown>;
   rules: ScopedRuleItem[];
   operatorApproved?: boolean;
+  approvalToken?: ScopedApprovalToken;
 }): ConnectorInvocationResult {
-  const { connector, toolName, rules, operatorApproved = false } = input;
+  const { connector, toolName, rules, operatorApproved = false, approvalToken } = input;
   const tool = connector.tools.find((t) => t.name === toolName);
 
   if (!tool) {
@@ -860,7 +863,67 @@ export function invokeConnectorToolWithSafety(input: {
     };
   }
 
-  // 1. Read tools run freely
+  // 1. Rule Book block overrides everything
+  const matchedRule = rules.find(
+    (r) =>
+      r.enabled &&
+      (r.scope === 'Everywhere' ||
+        (r.scope === 'Connector' &&
+          (!r.targetName || r.targetName.toLowerCase().includes(connector.name.toLowerCase())))) &&
+      (r.actionClass === 'write' || r.actionClass === 'destructive')
+  );
+
+  if (matchedRule?.enforcement === 'block') {
+    return {
+      ok: false,
+      toolName,
+      risk: tool.risk,
+      status: 'blocked_by_rule',
+      error: `Blocked for safety: Rule Book prohibits write action "${toolName}" on connector "${connector.name}".`,
+      recordedInLedger: true,
+    };
+  }
+
+  // 2. Prepare single-use approval token if operator approval was granted
+  let activeToken = approvalToken;
+  if (!activeToken && operatorApproved && tool.risk === 'write') {
+    activeToken = globalApprovalTokenStore.issueToken({
+      toolOrActionName: toolName,
+      target: connector.name,
+      payload: input.params,
+      profileId: 'personal',
+      issuedBy: 'operator',
+      scopeReason: `Operator approved write action '${toolName}' on connector '${connector.name}'`,
+    });
+  }
+
+  // 3. Central PolicyEngine Authorization Boundary (PROMPT 2.1 & 2.2)
+  const policyDecision = globalPolicyEngine.evaluateToolCall({
+    callerId: `connector:${connector.id}`,
+    toolName: `connector.${toolName}`,
+    target: connector.name,
+    args: input.params,
+    riskClass: tool.risk === 'write' ? 'scoped_write' : 'read',
+    approvalToken: activeToken,
+  });
+
+  if (!policyDecision.allowed) {
+    const isApproval =
+      policyDecision.decision === 'REQUIRE_APPROVAL' ||
+      policyDecision.decision === 'SUSPEND_TAKEOVER';
+    return {
+      ok: false,
+      toolName,
+      risk: tool.risk,
+      status: isApproval ? 'needs_approval' : 'blocked_by_rule',
+      error: isApproval
+        ? `Needs your approval: Write tool "${toolName}" on "${connector.name}" modifies external state.`
+        : `Blocked for safety: PolicyGuard denied "${toolName}" on connector "${connector.name}" (${policyDecision.reason}).`,
+      recordedInLedger: !isApproval,
+    };
+  }
+
+  // 4. Read tools run freely
   if (tool.risk === 'read') {
     return {
       ok: true,
@@ -876,30 +939,10 @@ export function invokeConnectorToolWithSafety(input: {
     };
   }
 
-  // 2. Write tools need approval per writeRequiresApproval or Rule Book
-  const matchedRule = rules.find(
-    (r) =>
-      r.enabled &&
-      (r.scope === 'Everywhere' ||
-        (r.scope === 'Connector' &&
-          (!r.targetName || r.targetName.toLowerCase().includes(connector.name.toLowerCase())))) &&
-      (r.actionClass === 'write' || r.actionClass === 'destructive')
-  );
-
+  // 5. Write tools need approval per writeRequiresApproval or Rule Book
   const ruleEnforcement = matchedRule?.enforcement || (connector.writeRequiresApproval ? 'ask_first' : 'allow');
 
-  if (ruleEnforcement === 'block') {
-    return {
-      ok: false,
-      toolName,
-      risk: 'write',
-      status: 'blocked_by_rule',
-      error: `Blocked for safety: Rule Book prohibits write action "${toolName}" on connector "${connector.name}".`,
-      recordedInLedger: true,
-    };
-  }
-
-  if (ruleEnforcement === 'ask_first' && !operatorApproved) {
+  if (ruleEnforcement === 'ask_first' && !operatorApproved && !activeToken) {
     return {
       ok: false,
       toolName,
@@ -919,6 +962,7 @@ export function invokeConnectorToolWithSafety(input: {
     output: {
       message: `Executed approved write action "${toolName}" on "${connector.name}".`,
       timestamp: new Date().toISOString(),
+      consumedApprovalToken: activeToken?.tokenId,
     },
     recordedInLedger: true,
     ledgerRef: `lead-${Date.now()}`,

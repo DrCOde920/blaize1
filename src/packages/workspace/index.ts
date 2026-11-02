@@ -680,6 +680,47 @@ triggers: [audit, security, policyguard, lint, ledger, hash]
       },
     ],
   },
+  {
+    id: 'skill-monthly-statement-reconciler',
+    name: 'Monthly Statement Reconciler',
+    slug: 'monthly-statement-reconciler',
+    category: 'financial',
+    description:
+      'Extracts monthly bank statement rows via accessibility tree, reconciles Opening + Credits - Debits = Closing in integer cents, and computes Safe-to-Spend.',
+    skillMarkdown: `---
+name: monthly-statement-reconciler
+version: 1
+guard: read_only_finance
+triggers: [reconcile, statement, october, monthly-statement-reconciler]
+---
+# Procedure
+1. Read statement rows for {{statement_month}} in read-only mode.
+2. Reconcile Opening + Credits - Debits == Closing in integer cents.
+3. Compute Safe-to-Spend above reserve floor and stage summary diff.`,
+    parameters: [
+      {
+        name: 'statement_month',
+        label: 'Statement Month',
+        defaultValue: '2026-10',
+        required: true,
+        description: 'Target YYYY-MM statement period',
+      },
+    ],
+    requiredConnectors: ['conn-mockbank-readonly'],
+    usageCount: 15,
+    guardVerified: true,
+    version: 1,
+    triggers: ['reconcile', 'statement', 'october', 'monthly-statement-reconciler'],
+    pitfalls: ['Never execute unattended payment submissions; always pause for operator approval.'],
+    patchHistory: [
+      {
+        version: 1,
+        timestamp: '2026-10-26',
+        action: 'create',
+        summary: 'Created monthly statement reconciliation procedure',
+      },
+    ],
+  },
 ];
 
 // ============================================================================
@@ -1170,10 +1211,13 @@ export function executeSkillManage(
 
   // delete
   const target = skills.find((s) => s.id === input.skillId) || null;
+  if (!target) {
+    throw new Error(`UNKNOWN_SKILL: Skill not found: ${input.skillId}`);
+  }
   return {
     skills: skills.filter((s) => s.id !== input.skillId),
     targetSkill: target,
-    operationSummary: `skill_manage(delete) -> removed ${target?.slug || input.skillId}`,
+    operationSummary: `skill_manage(delete) -> removed ${target.slug}`,
   };
 }
 
@@ -1594,6 +1638,15 @@ export function SafeToSpendCard({
   );
 }
 `,
+  },
+  {
+    id: 'file-safe-to-spend-widget-tsx',
+    projectId: 'proj-fintech-audit',
+    path: 'src/finance/SafeToSpendWidget.tsx',
+    name: 'SafeToSpendWidget.tsx',
+    language: 'tsx',
+    linkedArtifactId: 'art-safe-spend-widget',
+    content: `export const OCTOBER_CLOSING_GHS = 2457.50;\nexport const SAFE_TO_SPEND_GHS = 1037.50;\n`,
   },
   {
     id: 'file-reconcile-ts',

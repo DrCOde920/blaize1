@@ -262,7 +262,14 @@ function base64ToBytes(b64: string): Uint8Array {
   return new Uint8Array(Buffer.from(b64, 'base64'));
 }
 
-async function deriveAesGcmKey(passphrase: string, salt: Uint8Array): Promise<CryptoKey> {
+export const PBKDF2_ITERATIONS = 210000;
+export const LEGACY_PBKDF2_ITERATIONS = 60000;
+
+async function deriveAesGcmKey(
+  passphrase: string,
+  salt: Uint8Array,
+  iterations = PBKDF2_ITERATIONS
+): Promise<CryptoKey> {
   const subtle = getSubtleCrypto();
   const enc = new TextEncoder();
   const baseKey = await subtle.importKey(
@@ -276,7 +283,7 @@ async function deriveAesGcmKey(passphrase: string, salt: Uint8Array): Promise<Cr
     {
       name: 'PBKDF2',
       salt: salt as unknown as BufferSource,
-      iterations: 60000,
+      iterations,
       hash: 'SHA-256',
     },
     baseKey,
@@ -294,14 +301,15 @@ export interface EncryptedSecretEnvelope {
 
 export async function encryptWithPassphraseAesGcm(
   plainText: string,
-  passphrase: string
+  passphrase: string,
+  iterations = PBKDF2_ITERATIONS
 ): Promise<EncryptedSecretEnvelope> {
   const subtle = getSubtleCrypto();
   const salt = new Uint8Array(16);
   const iv = new Uint8Array(12);
   globalThis.crypto.getRandomValues(salt);
   globalThis.crypto.getRandomValues(iv);
-  const key = await deriveAesGcmKey(passphrase, salt);
+  const key = await deriveAesGcmKey(passphrase, salt, iterations);
   const encoded = new TextEncoder().encode(plainText);
   const encryptedBuf = await subtle.encrypt(
     { name: 'AES-GCM', iv: iv as unknown as BufferSource },
@@ -323,13 +331,30 @@ export async function decryptWithPassphraseAesGcm(
   const salt = base64ToBytes(envelope.saltB64);
   const iv = base64ToBytes(envelope.ivB64);
   const ciphertext = base64ToBytes(envelope.ciphertextB64);
-  const key = await deriveAesGcmKey(passphrase, salt);
-  const decryptedBuf = await subtle.decrypt(
-    { name: 'AES-GCM', iv: iv as unknown as BufferSource },
-    key,
-    ciphertext as unknown as BufferSource
-  );
-  return new TextDecoder().decode(decryptedBuf);
+
+  // Try standard 210,000 iterations first
+  try {
+    const key = await deriveAesGcmKey(passphrase, salt, PBKDF2_ITERATIONS);
+    const decryptedBuf = await subtle.decrypt(
+      { name: 'AES-GCM', iv: iv as unknown as BufferSource },
+      key,
+      ciphertext as unknown as BufferSource
+    );
+    return new TextDecoder().decode(decryptedBuf);
+  } catch (primaryErr) {
+    // Fall back to legacy 60,000 iterations for backwards compatibility
+    try {
+      const legacyKey = await deriveAesGcmKey(passphrase, salt, LEGACY_PBKDF2_ITERATIONS);
+      const decryptedBuf = await subtle.decrypt(
+        { name: 'AES-GCM', iv: iv as unknown as BufferSource },
+        legacyKey,
+        ciphertext as unknown as BufferSource
+      );
+      return new TextDecoder().decode(decryptedBuf);
+    } catch {
+      throw primaryErr;
+    }
+  }
 }
 
 // ============================================================================
@@ -416,17 +441,24 @@ export class PassphraseWrapVault implements SecretVault {
   private readonly backendKind: VaultBackendKind;
   private readonly linuxBridge?: ElectronSafeStorageBridge;
   private readonly allowBasicTextFallback: boolean;
+  private durableDb?: any;
 
   constructor(options?: {
     idleTimeoutMs?: number;
     backendKind?: VaultBackendKind;
     linuxBridge?: ElectronSafeStorageBridge;
     allowBasicTextFallback?: boolean;
+    durableDb?: any;
   }) {
     this.idleTimeoutMs = options?.idleTimeoutMs ?? 5 * 60 * 1000; // 5 minutes default
     this.backendKind = options?.backendKind ?? 'passphrase_aes_256_gcm';
     this.linuxBridge = options?.linuxBridge;
     this.allowBasicTextFallback = Boolean(options?.allowBasicTextFallback);
+    this.durableDb = options?.durableDb;
+  }
+
+  attachDurableDatabase(db: any): void {
+    this.durableDb = db;
   }
 
   isLocked(): boolean {
@@ -449,6 +481,31 @@ export class PassphraseWrapVault implements SecretVault {
     if (!secretCode || secretCode.trim().length < 4) {
       return false;
     }
+
+    // If records are empty in cache, attempt to populate from durable database
+    if (this.records.size === 0 && this.durableDb) {
+      try {
+        const masked = this.durableDb.listVaultMasked();
+        for (const m of masked) {
+          const item = this.durableDb.getVaultSecret(m.keyId);
+          if (item) {
+            const envelope: EncryptedSecretEnvelope = {
+              saltB64: Buffer.from(item.secret.saltHex, 'hex').toString('base64'),
+              ivB64: Buffer.from(item.secret.ivHex, 'hex').toString('base64'),
+              ciphertextB64: Buffer.from(item.secret.ciphertextHex, 'hex').toString('base64'),
+            };
+            this.records.set(m.keyId, {
+              meta: item.meta,
+              envelope,
+              windowStartedAtMs: Date.now(),
+            });
+          }
+        }
+      } catch {
+        // Fall back to memory records
+      }
+    }
+
     // If there are existing records, verify the secretCode can decrypt the first record
     const first = this.records.values().next().value as StoredVaultRecord | undefined;
     if (first) {
@@ -463,7 +520,7 @@ export class PassphraseWrapVault implements SecretVault {
     return true;
   }
 
-  async store(input: StoreSecretInput, secretCode = '2026'): Promise<MaskedVaultEntry> {
+  async store(input: StoreSecretInput, secretCode?: string): Promise<MaskedVaultEntry> {
     if (this.linuxBridge) {
       const check = await verifySafeStorageBackend(this.linuxBridge, {
         allowUnprotectedBasicTextFallback: this.allowBasicTextFallback,
@@ -506,6 +563,24 @@ export class PassphraseWrapVault implements SecretVault {
       envelope,
       windowStartedAtMs: Date.now(),
     });
+
+    if (this.durableDb) {
+      try {
+        this.durableDb.storeVaultSecret(
+          meta,
+          {
+            saltHex: Buffer.from(base64ToBytes(envelope.saltB64)).toString('hex'),
+            ivHex: Buffer.from(base64ToBytes(envelope.ivB64)).toString('hex'),
+            ciphertextHex: Buffer.from(base64ToBytes(envelope.ciphertextB64)).toString('hex'),
+            authTagHex: '00'.repeat(16),
+            algorithm: 'aes-256-gcm',
+          }
+        );
+      } catch {
+        // In-memory continues
+      }
+    }
+
     this.unlockedPassphrase = code;
     this.lastActivityMs = Date.now();
     return structuredClone(meta);
@@ -598,6 +673,24 @@ export class PassphraseWrapVault implements SecretVault {
     record.meta.maskedPreview = maskedPreview;
     record.meta.lastFour = lastFour;
     record.meta.rotatedAtIso = new Date().toISOString();
+
+    if (this.durableDb) {
+      try {
+        this.durableDb.storeVaultSecret(
+          record.meta,
+          {
+            saltHex: Buffer.from(base64ToBytes(newEnvelope.saltB64)).toString('hex'),
+            ivHex: Buffer.from(base64ToBytes(newEnvelope.ivB64)).toString('hex'),
+            ciphertextHex: Buffer.from(base64ToBytes(newEnvelope.ciphertextB64)).toString('hex'),
+            authTagHex: '00'.repeat(16),
+            algorithm: 'aes-256-gcm',
+          }
+        );
+      } catch {
+        // Ignore
+      }
+    }
+
     this.unlockedPassphrase = secretCode;
     this.lastActivityMs = Date.now();
     return structuredClone(record.meta);
@@ -611,7 +704,15 @@ export class PassphraseWrapVault implements SecretVault {
     } catch {
       throw new Error('Invalid secret code: cannot delete key without verifying current secret code.');
     }
-    return this.records.delete(keyId);
+    const existed = this.records.delete(keyId);
+    if (this.durableDb) {
+      try {
+        this.durableDb.deleteVaultSecret(keyId);
+      } catch {
+        // Ignore
+      }
+    }
+    return existed;
   }
 
   listMasked(): MaskedVaultEntry[] {

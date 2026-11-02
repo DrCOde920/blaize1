@@ -13,6 +13,13 @@ import type {
   PCOperatorActionRequest,
   PCOperatorActionResult,
 } from '../../../electron/ipc-contracts.js';
+import {
+  type ExecutionTruthState,
+  type VerificationTruthState,
+  canPromoteRecordToReal,
+  formatTruthfulUiStatusLabel,
+} from '../contracts/index.js';
+import { globalPolicyEngine } from '../trust/index.js';
 
 // ============================================================================
 // LEGACY M11 ENGINE (Preserved for 100% backward compatibility)
@@ -814,6 +821,8 @@ export interface DesktopActionCommand {
 
 export interface DesktopDriverActionOutcome {
   ok: boolean;
+  executionState: ExecutionTruthState;
+  isSimulated: boolean;
   tierUsed: ActionLadderTier;
   driverName: string;
   platform: DesktopOSPlatform;
@@ -839,6 +848,8 @@ export interface DesktopDriver {
   readonly platform: DesktopOSPlatform;
   readonly driverName: string;
   readonly nativeApisUsed: string[];
+  readonly isSimulated?: boolean;
+  readonly executionState?: ExecutionTruthState;
   capturePerception(options?: {
     useOcrFallback?: boolean;
     cropRegionOfInterest?: { x: number; y: number; width: number; height: number };
@@ -855,6 +866,8 @@ class BaseCrossPlatformDriver implements DesktopDriver {
   public readonly platform: DesktopOSPlatform;
   public readonly driverName: string;
   public readonly nativeApisUsed: string[];
+  public readonly isSimulated = true as const;
+  public readonly executionState: ExecutionTruthState = 'SIMULATED';
   private seq = 1;
 
   constructor(platform: DesktopOSPlatform, driverName: string, nativeApisUsed: string[]) {
@@ -892,6 +905,8 @@ class BaseCrossPlatformDriver implements DesktopDriver {
     if (tier === 'T4_PIXEL_INPUT' && options?.userInputDetectedDuringPixelTier) {
       return {
         ok: false,
+        executionState: 'BLOCKED',
+        isSimulated: true,
         tierUsed: 'T4_PIXEL_INPUT',
         driverName: this.driverName,
         platform: this.platform,
@@ -933,6 +948,8 @@ class BaseCrossPlatformDriver implements DesktopDriver {
 
     return {
       ok: true,
+      executionState: 'SIMULATED',
+      isSimulated: true,
       tierUsed: tier,
       driverName: this.driverName,
       platform: this.platform,
@@ -1360,32 +1377,125 @@ export function detectStuckExecution(history: Array<{
 }
 
 export interface DeterministicVerifierSpec {
-  kind: 'element_exists' | 'value_matches' | 'file_hash' | 'vision_verifier';
+  kind: 'element_exists' | 'value_matches' | 'file_hash' | 'dom_snapshot' | 'vision_verifier';
   targetIdOrPath: string;
   expectedValueOrHash: string;
 }
 
 export interface VerificationExecutionReport {
   passed: boolean;
+  verificationState: VerificationTruthState;
   deterministicCheckPassed: boolean;
   visionVerifierPassed: boolean;
   verifierKindUsed: DeterministicVerifierSpec['kind'];
   evidenceSummary: string;
 }
 
+/**
+ * Verifies desktop step outcome against actual target observations.
+ * - Unimplemented vision_verifier returns UNSUPPORTED (never pass).
+ * - Missing actual file hash, missing DOM snapshot, or missing UI observation returns UNCERTAIN (never pass).
+ * - Never substitutes expectedValueOrHash for an absent actual value.
+ */
 export function verifyDesktopStepOutcome(
-  snapshot: DesktopPerceptionSnapshot,
+  snapshot: DesktopPerceptionSnapshot | null | undefined,
   spec: DeterministicVerifierSpec,
-  simulatedFileHashes: Record<string, string> = {}
+  actualFileHashes: Record<string, string | undefined> = {},
+  options?: {
+    domSnapshot?: string;
+    isSimulated?: boolean;
+  }
 ): VerificationExecutionReport {
+  if (spec.kind === 'vision_verifier') {
+    return {
+      passed: false,
+      verificationState: 'UNSUPPORTED',
+      deterministicCheckPassed: false,
+      visionVerifierPassed: false,
+      verifierKindUsed: 'vision_verifier',
+      evidenceSummary: `Vision verifier is UNSUPPORTED (not implemented) for post-condition "${spec.expectedValueOrHash}".`,
+    };
+  }
+
+  if (spec.kind === 'dom_snapshot') {
+    const domSnapshot = options?.domSnapshot;
+    if (typeof domSnapshot !== 'string' || domSnapshot.trim().length === 0) {
+      return {
+        passed: false,
+        verificationState: 'UNCERTAIN',
+        deterministicCheckPassed: false,
+        visionVerifierPassed: false,
+        verifierKindUsed: 'dom_snapshot',
+        evidenceSummary: `Verification UNCERTAIN: missing DOM snapshot for "${spec.targetIdOrPath}".`,
+      };
+    }
+    const matched =
+      domSnapshot.toLowerCase().includes(spec.targetIdOrPath.toLowerCase()) &&
+      domSnapshot.toLowerCase().includes(spec.expectedValueOrHash.toLowerCase());
+    return {
+      passed: matched,
+      verificationState: matched ? (options?.isSimulated ? 'SIMULATED' : 'VERIFIED') : 'FAILED',
+      deterministicCheckPassed: matched,
+      visionVerifierPassed: false,
+      verifierKindUsed: 'dom_snapshot',
+      evidenceSummary: matched
+        ? `DOM snapshot check passed for "${spec.targetIdOrPath}".`
+        : `DOM snapshot check failed: "${spec.expectedValueOrHash}" not found in "${spec.targetIdOrPath}".`,
+    };
+  }
+
+  if (spec.kind === 'file_hash') {
+    const actualHash = actualFileHashes ? actualFileHashes[spec.targetIdOrPath] : undefined;
+    if (typeof actualHash !== 'string' || actualHash.trim().length === 0) {
+      return {
+        passed: false,
+        verificationState: 'UNCERTAIN',
+        deterministicCheckPassed: false,
+        visionVerifierPassed: false,
+        verifierKindUsed: 'file_hash',
+        evidenceSummary: `Verification UNCERTAIN: missing actual file hash for ${spec.targetIdOrPath} (never substituting expected value).`,
+      };
+    }
+    const matched = actualHash === spec.expectedValueOrHash;
+    return {
+      passed: matched,
+      verificationState: matched ? (options?.isSimulated ? 'SIMULATED' : 'VERIFIED') : 'FAILED',
+      deterministicCheckPassed: matched,
+      visionVerifierPassed: false,
+      verifierKindUsed: 'file_hash',
+      evidenceSummary: matched
+        ? `Deterministic SHA-256 file hash verified for ${spec.targetIdOrPath} (${actualHash.slice(0, 12)}...).`
+        : `File hash mismatch on ${spec.targetIdOrPath}: expected "${spec.expectedValueOrHash}", got "${actualHash}".`,
+    };
+  }
+
+  // Missing UI observation check for element_exists and value_matches
+  if (
+    !snapshot ||
+    !Array.isArray(snapshot.elements) ||
+    snapshot.elements.length === 0 ||
+    typeof snapshot.screenDigestText !== 'string' ||
+    snapshot.screenDigestText.trim().length === 0
+  ) {
+    return {
+      passed: false,
+      verificationState: 'UNCERTAIN',
+      deterministicCheckPassed: false,
+      visionVerifierPassed: false,
+      verifierKindUsed: spec.kind,
+      evidenceSummary: `Verification UNCERTAIN: missing UI observation snapshot for "${spec.targetIdOrPath}".`,
+    };
+  }
+
   if (spec.kind === 'element_exists') {
     const found = snapshot.elements.some(
       (e) => e.id === spec.targetIdOrPath || e.name.toLowerCase().includes(spec.targetIdOrPath.toLowerCase())
     );
     return {
       passed: found,
+      verificationState: found ? (options?.isSimulated ? 'SIMULATED' : 'VERIFIED') : 'FAILED',
       deterministicCheckPassed: found,
-      visionVerifierPassed: found,
+      visionVerifierPassed: false,
       verifierKindUsed: 'element_exists',
       evidenceSummary: found
         ? `Deterministic check passed: element "${spec.targetIdOrPath}" present in normalized tree.`
@@ -1395,38 +1505,36 @@ export function verifyDesktopStepOutcome(
 
   if (spec.kind === 'value_matches') {
     const el = snapshot.elements.find((e) => e.id === spec.targetIdOrPath);
-    const matched = Boolean(el && el.value === spec.expectedValueOrHash);
+    if (!el || el.value === undefined) {
+      return {
+        passed: false,
+        verificationState: el ? 'UNCERTAIN' : 'FAILED',
+        deterministicCheckPassed: false,
+        visionVerifierPassed: false,
+        verifierKindUsed: 'value_matches',
+        evidenceSummary: `Deterministic check failed/uncertain: target "${spec.targetIdOrPath}" value is ${el ? 'undefined' : 'missing from UI tree'}.`,
+      };
+    }
+    const matched = el.value === spec.expectedValueOrHash;
     return {
       passed: matched,
+      verificationState: matched ? (options?.isSimulated ? 'SIMULATED' : 'VERIFIED') : 'FAILED',
       deterministicCheckPassed: matched,
-      visionVerifierPassed: matched,
+      visionVerifierPassed: false,
       verifierKindUsed: 'value_matches',
       evidenceSummary: matched
         ? `Deterministic check passed: ${spec.targetIdOrPath} value === "${spec.expectedValueOrHash}".`
-        : `Deterministic check failed: expected "${spec.expectedValueOrHash}", got "${el?.value ?? 'undefined'}".`,
-    };
-  }
-
-  if (spec.kind === 'file_hash') {
-    const actualHash = simulatedFileHashes[spec.targetIdOrPath] ?? spec.expectedValueOrHash;
-    const matched = actualHash === spec.expectedValueOrHash;
-    return {
-      passed: matched,
-      deterministicCheckPassed: matched,
-      visionVerifierPassed: true,
-      verifierKindUsed: 'file_hash',
-      evidenceSummary: matched
-        ? `Deterministic SHA-256 file hash verified for ${spec.targetIdOrPath} (${actualHash.slice(0, 12)}...).`
-        : `File hash mismatch on ${spec.targetIdOrPath}.`,
+        : `Deterministic check failed: expected "${spec.expectedValueOrHash}", got "${el.value}".`,
     };
   }
 
   return {
-    passed: true,
-    deterministicCheckPassed: true,
-    visionVerifierPassed: true,
-    verifierKindUsed: 'vision_verifier',
-    evidenceSummary: `Independent Vision Verifier confirmed post-condition "${spec.expectedValueOrHash}".`,
+    passed: false,
+    verificationState: 'UNSUPPORTED',
+    deterministicCheckPassed: false,
+    visionVerifierPassed: false,
+    verifierKindUsed: spec.kind,
+    evidenceSummary: `Unsupported verifier kind "${String(spec.kind)}".`,
   };
 }
 
@@ -1438,6 +1546,9 @@ export interface UnattendedHardStops {
 
 export interface ExecutionLoopRunResult {
   ok: boolean;
+  executionState: ExecutionTruthState;
+  verificationState: VerificationTruthState;
+  isSimulated: boolean;
   stepsExecuted: number;
   batchedActionsCount: number;
   tierStartedAt: ActionLadderTier;
@@ -1463,11 +1574,14 @@ export function runDesktopExecutionLoop(params: {
   profileStore: AppCapabilityProfileStore;
   commands: DesktopActionCommand[];
   verifierSpec: DeterministicVerifierSpec;
+  actualFileHashes?: Record<string, string | undefined>;
+  domSnapshot?: string;
   simulateFailureOnFirstTier?: boolean;
   simulateUnexpectedDialogTitle?: string;
   simulateUserTouchDuringT4?: boolean;
   hardStops?: UnattendedHardStops;
 }): ExecutionLoopRunResult {
+  const isSimulated = Boolean(params.driver.isSimulated ?? true);
   const hardStops: UnattendedHardStops = params.hardStops ?? {
     maxSteps: 15,
     maxDurationMs: 30_000,
@@ -1514,6 +1628,9 @@ export function runDesktopExecutionLoop(params: {
     if (dlgRes.action === 'ask_human') {
       return {
         ok: false,
+        executionState: 'WAITING_FOR_APPROVAL',
+        verificationState: 'WAITING_FOR_APPROVAL',
+        isSimulated,
         stepsExecuted: 1,
         batchedActionsCount,
         tierStartedAt,
@@ -1522,6 +1639,7 @@ export function runDesktopExecutionLoop(params: {
         groundingUsed,
         verification: {
           passed: false,
+          verificationState: 'WAITING_FOR_APPROVAL',
           deterministicCheckPassed: false,
           visionVerifierPassed: false,
           verifierKindUsed: params.verifierSpec.kind,
@@ -1544,6 +1662,9 @@ export function runDesktopExecutionLoop(params: {
     if (stepsExecuted > hardStops.maxSteps) {
       return {
         ok: false,
+        executionState: 'BLOCKED',
+        verificationState: 'BLOCKED',
+        isSimulated,
         stepsExecuted,
         batchedActionsCount,
         tierStartedAt,
@@ -1552,6 +1673,7 @@ export function runDesktopExecutionLoop(params: {
         groundingUsed,
         verification: {
           passed: false,
+          verificationState: 'BLOCKED',
           deterministicCheckPassed: false,
           visionVerifierPassed: false,
           verifierKindUsed: params.verifierSpec.kind,
@@ -1563,6 +1685,63 @@ export function runDesktopExecutionLoop(params: {
         durationMs,
         stoppedByHardLimit: `maxSteps (${hardStops.maxSteps})`,
         humanInterventionRequired: false,
+        traceLog,
+      };
+    }
+
+    // Central PolicyEngine authorization boundary (PROMPT 2.1)
+    const pcRisk =
+      cmd.riskClass === 'write_in_scope' || !cmd.riskClass
+        ? 'scoped_write'
+        : cmd.riskClass === 'destructive_outside_scope'
+        ? 'destructive'
+        : cmd.riskClass === 'credentials'
+        ? 'credential'
+        : cmd.riskClass === 'money'
+        ? 'spend'
+        : cmd.riskClass === 'software_install'
+        ? 'software_installation'
+        : cmd.riskClass === 'system_settings'
+        ? 'system_privilege'
+        : cmd.riskClass;
+
+    const policyDecision = globalPolicyEngine.evaluateToolCall({
+      callerId: 'pc_operator',
+      toolName: `pc_operator.${cmd.tier || 'action'}`,
+      target: cmd.targetFilePath || cmd.appId,
+      args: { intent: cmd.intent, appId: cmd.appId, windowId: cmd.windowId },
+      riskClass: pcRisk,
+    });
+
+    if (!policyDecision.allowed && (pcRisk === 'destructive' || pcRisk === 'credential' || pcRisk === 'spend' || pcRisk === 'software_installation')) {
+      const isApproval =
+        policyDecision.decision === 'REQUIRE_APPROVAL' ||
+        policyDecision.decision === 'SUSPEND_TAKEOVER';
+      return {
+        ok: false,
+        executionState: isApproval ? 'WAITING_FOR_APPROVAL' : 'BLOCKED',
+        verificationState: isApproval ? 'WAITING_FOR_APPROVAL' : 'BLOCKED',
+        isSimulated,
+        stepsExecuted,
+        batchedActionsCount,
+        tierStartedAt,
+        tierSucceededAt: currentTier,
+        recoveryStepsTriggered,
+        groundingUsed,
+        verification: {
+          passed: false,
+          verificationState: isApproval ? 'WAITING_FOR_APPROVAL' : 'BLOCKED',
+          deterministicCheckPassed: false,
+          visionVerifierPassed: false,
+          verifierKindUsed: params.verifierSpec.kind,
+          evidenceSummary: policyDecision.reason,
+        },
+        diffSummary: `Execution halted by PolicyGuard: ${policyDecision.reason}`,
+        tokensUsed,
+        costUsd: Number((tokensUsed * 0.000002).toFixed(5)),
+        durationMs,
+        stoppedByHardLimit: policyDecision.matchedRule,
+        humanInterventionRequired: isApproval,
         traceLog,
       };
     }
@@ -1594,6 +1773,9 @@ export function runDesktopExecutionLoop(params: {
     if (outcome.pausedForUserInput) {
       return {
         ok: false,
+        executionState: 'BLOCKED',
+        verificationState: 'BLOCKED',
+        isSimulated,
         stepsExecuted,
         batchedActionsCount,
         tierStartedAt,
@@ -1602,6 +1784,7 @@ export function runDesktopExecutionLoop(params: {
         groundingUsed: 'vision_marks',
         verification: {
           passed: false,
+          verificationState: 'BLOCKED',
           deterministicCheckPassed: false,
           visionVerifierPassed: false,
           verifierKindUsed: params.verifierSpec.kind,
@@ -1624,14 +1807,22 @@ export function runDesktopExecutionLoop(params: {
   const diff = diffPerceptionSnapshots(initialSnapshot, currentSnapshot);
   traceLog.push(`[Re-observe & Diff] ${diff.summary}`);
 
-  // 5. VERIFY (Deterministic check first, then independent vision verifier)
-  const verification = verifyDesktopStepOutcome(currentSnapshot, params.verifierSpec);
+  // 5. VERIFY (Deterministic check first; never pass without actual evidence)
+  const verification = verifyDesktopStepOutcome(
+    currentSnapshot,
+    params.verifierSpec,
+    params.actualFileHashes ?? {},
+    { domSnapshot: params.domSnapshot, isSimulated }
+  );
   traceLog.push(`[Verify] ${verification.evidenceSummary}`);
 
   const costUsd = Number((tokensUsed * 0.000002).toFixed(5));
   if (costUsd > hardStops.maxCostUsd) {
     return {
       ok: false,
+      executionState: 'BLOCKED',
+      verificationState: 'BLOCKED',
+      isSimulated,
       stepsExecuted,
       batchedActionsCount,
       tierStartedAt,
@@ -1649,8 +1840,21 @@ export function runDesktopExecutionLoop(params: {
     };
   }
 
+  const finalExecState: ExecutionTruthState = !verification.passed
+    ? verification.verificationState === 'UNCERTAIN'
+      ? 'UNCERTAIN'
+      : verification.verificationState === 'UNSUPPORTED'
+        ? 'UNSUPPORTED'
+        : 'FAILED'
+    : isSimulated
+      ? 'SIMULATED'
+      : 'EXECUTED';
+
   return {
     ok: verification.passed,
+    executionState: finalExecState,
+    verificationState: verification.verificationState,
+    isSimulated,
     stepsExecuted,
     batchedActionsCount,
     tierStartedAt,
@@ -2790,6 +2994,9 @@ export interface FullBenchmarkSuiteReport {
   runId: string;
   executedAtIso: string;
   platform: DesktopOSPlatform;
+  executionState: ExecutionTruthState;
+  isSimulated: true;
+  canPromoteToRealEvidence: false;
   totalTasks: number;
   categoriesCount: Record<BenchmarkTaskCategory, number>;
   ladderOn: BenchmarkKpiComparison;
@@ -2803,6 +3010,8 @@ export interface FullBenchmarkSuiteReport {
     title: string;
     optimalTier: ActionLadderTier;
     verifierKind: DeterministicVerifierSpec['kind'];
+    executionState: ExecutionTruthState;
+    isSimulated: true;
     ladderPassed: boolean;
     visionOnlyPassed: boolean;
     ladderSteps: number;
@@ -2814,8 +3023,9 @@ export interface FullBenchmarkSuiteReport {
 }
 
 /**
- * Runs all 64 everyday tasks with their deterministic verifiers and compares
- * Ladder-On (T1->T4 remembered per app) against Vision-Only (T4 only).
+ * Runs all 64 everyday tasks with their deterministic verifiers in explicit SIMULATED mode
+ * and compares Ladder-On (T1->T4 remembered per app) against Vision-Only (T4 only).
+ * Marked as SIMULATED so fixture runs cannot be promoted to REAL benchmark evidence.
  */
 export function runEverydayPcBenchmarkSuite(
   platform: DesktopOSPlatform = 'linux'
@@ -2846,7 +3056,7 @@ export function runEverydayPcBenchmarkSuite(
 
   const taskResults = tasks.map((t) => {
     categoriesCount[t.category] += 1;
-    const ladderPassed = true; // All 64 tasks pass via deterministic T1->T4 ladder + recovery
+    const ladderPassed = true; // Simulated fixture pass in explicit SIMULATED benchmark mode
     const visionPassed = t.visionOnlySucceeds;
 
     if (ladderPassed) ladderPassedCount += 1;
@@ -2874,6 +3084,8 @@ export function runEverydayPcBenchmarkSuite(
       title: t.title,
       optimalTier: t.optimalTier,
       verifierKind: t.verifier.kind,
+      executionState: 'SIMULATED' as const,
+      isSimulated: true as const,
       ladderPassed,
       visionOnlyPassed: visionPassed,
       ladderSteps: t.ladderSteps,
@@ -2960,10 +3172,21 @@ export function runEverydayPcBenchmarkSuite(
     releaseHistory: RELEASE_BENCHMARK_HISTORY,
   });
 
+  const promotionCheck = canPromoteRecordToReal({
+    executionState: 'SIMULATED',
+    verificationState: 'SIMULATED',
+    isSimulated: true,
+  });
+  void formatTruthfulUiStatusLabel;
+  void promotionCheck;
+
   return {
     runId,
     executedAtIso,
     platform,
+    executionState: 'SIMULATED',
+    isSimulated: true,
+    canPromoteToRealEvidence: false,
     totalTasks,
     categoriesCount,
     ladderOn,

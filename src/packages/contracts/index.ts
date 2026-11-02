@@ -7,19 +7,46 @@
  * for IPC, Actions, PolicyGuard, MemoryLedger, Skills, Plugins, and L3xi records.
  */
 
+/**
+ * Canonical Action Risk Classes (PROMPT 2)
+ * Required across all executors: built-ins, PC actions, browser, filesystem, connectors,
+ * scheduled jobs, recorded skills, plugins, and figure generation.
+ * Any unknown risk class is denied by default.
+ */
+export type CanonicalActionRiskClass =
+  | 'read'
+  | 'scoped_write'
+  | 'external_send'
+  | 'destructive'
+  | 'spend'
+  | 'credential'
+  | 'system_privilege'
+  | 'software_installation';
+
 export type GenericRiskClass =
   | 'read'
   | 'write'
+  | 'scoped_write'
   | 'destructive'
   | 'external_send'
   | 'credential'
   | 'spend'
-  | 'system';
+  | 'system'
+  | 'system_privilege'
+  | 'software_installation';
 
 // RiskLevel aliases GenericRiskClass with backward-compatible legacy aliases ('sensitive' -> credential, 'money' -> spend)
-export type RiskLevel = GenericRiskClass | 'sensitive' | 'money';
+export type RiskLevel =
+  | GenericRiskClass
+  | 'sensitive'
+  | 'money'
+  | 'scoped write'
+  | 'external send'
+  | 'spend/money'
+  | 'system/privilege'
+  | 'software installation';
 
-export type ActionSource = 'user' | 'skill' | 'model' | 'plugin';
+export type ActionSource = 'user' | 'skill' | 'model' | 'plugin' | 'scheduler' | 'pc_operator' | 'system';
 export type BrowserProfileId = 'personal' | 'work' | 'testing';
 
 export type ComputerActionType =
@@ -136,6 +163,38 @@ export interface SafetyCheckItem {
   acknowledgedByUser: boolean;
 }
 
+export interface ScopedApprovalToken {
+  tokenId: string;
+  toolOrActionName: string;
+  target: string;
+  payloadHash: string;
+  amount?: number;
+  profileId: BrowserProfileId;
+  issuedAt: string;
+  expiresAt: string;
+  issuedBy: 'operator' | 'user';
+  scopeReason?: string;
+  consumed?: boolean;
+  consumedAt?: string;
+}
+
+export type UntrustedSourceType =
+  | 'web_page'
+  | 'pdf'
+  | 'plugin_output'
+  | 'tool_output'
+  | 'imported_skill'
+  | 'external_memo';
+
+export interface UntrustedContentWrapper<T = string> {
+  readonly isUntrusted: true;
+  readonly source: UntrustedSourceType;
+  readonly content: T;
+  readonly sanitizedContent?: string;
+  readonly injectionFindings?: string[];
+  readonly wrappedAt: string;
+}
+
 export interface ActionProposal {
   id: string;
   kind: ComputerActionType;
@@ -153,6 +212,9 @@ export interface ActionProposal {
   pluginId?: string;
   toolName?: string;
   untrustedContext?: string;
+  callerId?: string;
+  approvalToken?: ScopedApprovalToken;
+  isSimulated?: boolean;
 }
 
 export type PolicyDecisionStatus =
@@ -170,6 +232,8 @@ export interface PolicyDecision {
   redactedText?: string;
   flaggedInjections: string[];
   evaluatedAt: string;
+  errorCode?: string;
+  consumedApprovalTokenId?: string;
 }
 
 export type LedgerActor = 'user' | 'agent' | 'verifier' | 'guard' | 'sleep_cycle' | 'operator';
@@ -178,6 +242,171 @@ export type TrustLevel =
   | 'verified_by_evidence'
   | 'observed_untrusted'
   | 'model_inferred';
+
+/**
+ * Shared Typed Execution & Verification Truth States (PROMPT 1)
+ * Used canonically across PC Operator, mission runtime, browser, skills,
+ * plugins, connectors, and scheduler.
+ */
+export type ExecutionTruthState =
+  | 'EXECUTED'
+  | 'SIMULATED'
+  | 'UNSUPPORTED'
+  | 'FAILED'
+  | 'UNCERTAIN'
+  | 'BLOCKED'
+  | 'WAITING_FOR_APPROVAL'
+  | 'NOT_CONFIGURED';
+
+export type VerificationTruthState =
+  | 'VERIFIED'
+  | 'SIMULATED'
+  | 'UNSUPPORTED'
+  | 'FAILED'
+  | 'UNCERTAIN'
+  | 'BLOCKED'
+  | 'WAITING_FOR_APPROVAL'
+  | 'NOT_CONFIGURED';
+
+export type CanonicalSubsystem =
+  | 'pc_operator'
+  | 'mission_runtime'
+  | 'browser'
+  | 'skills'
+  | 'plugins'
+  | 'connectors'
+  | 'scheduler';
+
+export type TruthfulUiStatusLabel =
+  | 'Verified'
+  | 'Simulated (Preview)'
+  | 'Needs your approval'
+  | 'Blocked for safety'
+  | 'Uncertain (Unverified)'
+  | 'Unsupported'
+  | 'Not configured'
+  | 'Failed';
+
+export interface CanonicalVerificationEvidence {
+  verifierId: string;
+  independentTargetRead: boolean;
+  criteriaMet: boolean;
+  evidenceHash: string;
+  summary: string;
+  observedState?: Record<string, unknown>;
+}
+
+export interface CanonicalExecutionResult<TOutput = Record<string, unknown>> {
+  subsystem: CanonicalSubsystem;
+  toolOrActionName: string;
+  executionState: ExecutionTruthState;
+  verificationState: VerificationTruthState;
+  ok: boolean;
+  isRealExecution: boolean;
+  isSimulated: boolean;
+  uiStatusLabel: TruthfulUiStatusLabel;
+  output: TOutput;
+  verificationEvidence: CanonicalVerificationEvidence;
+  errorCode?:
+    | 'UNSUPPORTED_TOOL'
+    | 'UNKNOWN_SKILL'
+    | 'UNKNOWN_PLUGIN'
+    | 'MISSING_VERIFIER'
+    | 'MISSING_EVIDENCE'
+    | 'EXECUTION_WITHOUT_SIDE_EFFECT'
+    | 'BLOCKED_BY_GUARD'
+    | 'WAITING_FOR_APPROVAL'
+    | 'NOT_CONFIGURED'
+    | 'CANCELLED'
+    | 'SIMULATED_CANNOT_PROMOTE_TO_REAL'
+    | string;
+  errorMessage?: string;
+}
+
+/**
+ * Maps canonical execution/verification states to truthful UI labels.
+ * Never returns "Done", "Executed", "Connected", or "Verified" for simulated,
+ * uncertain, unsupported, unconfigured, failed, or blocked operations.
+ */
+export function formatTruthfulUiStatusLabel(params: {
+  executionState: ExecutionTruthState;
+  verificationState: VerificationTruthState;
+  isSimulated?: boolean;
+}): TruthfulUiStatusLabel {
+  if (
+    params.executionState === 'WAITING_FOR_APPROVAL' ||
+    params.verificationState === 'WAITING_FOR_APPROVAL'
+  ) {
+    return 'Needs your approval';
+  }
+  if (params.executionState === 'BLOCKED' || params.verificationState === 'BLOCKED') {
+    return 'Blocked for safety';
+  }
+  if (params.executionState === 'UNSUPPORTED' || params.verificationState === 'UNSUPPORTED') {
+    return 'Unsupported';
+  }
+  if (
+    params.executionState === 'NOT_CONFIGURED' ||
+    params.verificationState === 'NOT_CONFIGURED'
+  ) {
+    return 'Not configured';
+  }
+  if (params.executionState === 'FAILED' || params.verificationState === 'FAILED') {
+    return 'Failed';
+  }
+  if (params.executionState === 'UNCERTAIN' || params.verificationState === 'UNCERTAIN') {
+    return 'Uncertain (Unverified)';
+  }
+  if (
+    params.isSimulated ||
+    params.executionState === 'SIMULATED' ||
+    params.verificationState === 'SIMULATED'
+  ) {
+    return 'Simulated (Preview)';
+  }
+  if (
+    params.executionState === 'EXECUTED' &&
+    params.verificationState === 'VERIFIED' &&
+    !params.isSimulated
+  ) {
+    return 'Verified';
+  }
+  return 'Uncertain (Unverified)';
+}
+
+/**
+ * Prevents any SIMULATED or UNCERTAIN record from being promoted to REAL
+ * in UI badges, ledgers, standing rules, reports, or analytics.
+ */
+export function canPromoteRecordToReal(params: {
+  executionState?: ExecutionTruthState;
+  verificationState?: VerificationTruthState;
+  isSimulated?: boolean;
+}): { allowed: boolean; errorCode?: 'SIMULATED_CANNOT_PROMOTE_TO_REAL'; reason: string } {
+  if (
+    params.isSimulated ||
+    params.executionState === 'SIMULATED' ||
+    params.verificationState === 'SIMULATED'
+  ) {
+    return {
+      allowed: false,
+      errorCode: 'SIMULATED_CANNOT_PROMOTE_TO_REAL',
+      reason:
+        'Simulated/demo records are isolated for demos and tests only and cannot be promoted to REAL in UI badges, ledgers, reports, or analytics.',
+    };
+  }
+  if (params.executionState !== 'EXECUTED' || params.verificationState !== 'VERIFIED') {
+    return {
+      allowed: false,
+      errorCode: 'SIMULATED_CANNOT_PROMOTE_TO_REAL',
+      reason: `Cannot promote non-verified record (executionState=${params.executionState ?? 'UNKNOWN'}, verificationState=${params.verificationState ?? 'UNKNOWN'}) to REAL.`,
+    };
+  }
+  return {
+    allowed: true,
+    reason: 'Record has real execution and independent verification evidence.',
+  };
+}
 
 export interface LedgerEvent {
   id: string;
@@ -220,6 +449,9 @@ export interface LedgerEvent {
   contentDeleted?: boolean;
   payload?: string;
   trustLevel: TrustLevel;
+  executionState?: ExecutionTruthState;
+  verificationState?: VerificationTruthState;
+  isSimulated?: boolean;
   missionId: string;
   orgId: string;
   workspaceId: string;
@@ -229,6 +461,10 @@ export interface LedgerEvent {
 export interface EncryptedContentSlot {
   contentRef: string;
   cipherText: string;
+  ivHex?: string;
+  authTagHex?: string;
+  ciphertextHex?: string;
+  algorithm?: 'aes-256-gcm';
   byteLength: number;
   deleted: boolean;
   deletedAt?: string;
@@ -471,15 +707,31 @@ export function validateActionProposal(input: unknown): {
   const validRisks: RiskLevel[] = [
     'read',
     'write',
+    'scoped_write',
+    'scoped write',
     'destructive',
     'external_send',
+    'external send',
     'credential',
     'spend',
-    'system',
-    'sensitive',
     'money',
+    'spend/money',
+    'system',
+    'system_privilege',
+    'system/privilege',
+    'software_installation',
+    'software installation',
+    'sensitive',
   ];
-  const validSources: ActionSource[] = ['user', 'skill', 'model', 'plugin'];
+  const validSources: ActionSource[] = [
+    'user',
+    'skill',
+    'model',
+    'plugin',
+    'scheduler',
+    'pc_operator',
+    'system',
+  ];
 
   if (typeof obj.id !== 'string' || obj.id.length === 0) {
     return { success: false, error: 'Invalid or missing ActionProposal.id' };

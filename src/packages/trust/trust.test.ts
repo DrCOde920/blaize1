@@ -15,6 +15,7 @@ import {
   redactSensitiveText,
   runGuardPropertyTests,
   runIndependentVerifier,
+  runVerifier,
 } from './index';
 import {
   BoundedRingBuffer,
@@ -273,3 +274,57 @@ test('Independent Verifier and Full Evaluation Harness pass all 10 benchmark met
     assert.equal(row.passed, true, `Eval metric failed: ${row.metric}`);
   }
 });
+
+test('PROMPT 1 Trust Kernel: CORE_VERIFIER_STRATEGIES returns uncertain on missing evidence and MemoryLedger prevents promoting simulated records to standing rules', () => {
+  // 1. dom_assertion with missing domSnapshot returns uncertain, never pass
+  const domMissing = runVerifier('dom_assertion', {
+    toolName: 'browser.extract',
+    target: '#account-balance',
+    expectedState: '2,457.50',
+  });
+  assert.equal(domMissing.status, 'uncertain');
+
+  // 2. file_exists_hash with missing payload and missing actualFileHash returns uncertain, never pass
+  const hashMissing = runVerifier('file_exists_hash', {
+    toolName: 'workspace.write',
+    target: '/workspace/reports/missing.csv',
+    expectedState: 'expected_sha_999',
+    customParams: {
+      expectedFileHash: 'expected_sha_999',
+    },
+  });
+  assert.equal(hashMissing.status, 'uncertain');
+
+  // 3. url_check with empty currentUrl returns uncertain
+  const urlMissing = runVerifier('url_check', {
+    toolName: 'browser.open',
+    target: 'portal.mockbank.local',
+    expectedState: 'portal.mockbank.local',
+    currentUrl: '',
+  });
+  assert.equal(urlMissing.status, 'uncertain');
+
+  // 4. MemoryLedger simulator isolation: simulated events cannot become standing rules or be promoted to REAL
+  const ledger = new MemoryLedger(true);
+  const simEvent = ledger.appendEvent({
+    actor: 'agent',
+    type: 'tool_executed',
+    summary: 'Simulated browser extract',
+    payload: '{}',
+    trustLevel: 'verified_by_evidence',
+    missionId: 'm-sim-1',
+    executionState: 'SIMULATED',
+    verificationState: 'SIMULATED',
+    isSimulated: true,
+  });
+
+  const explanation = ledger.explain(simEvent.id);
+  assert.ok(explanation);
+  assert.equal(explanation.canBecomeStandingRule, false);
+  assert.equal(explanation.event?.isSimulated, true);
+
+  const promoAttempt = ledger.promoteEventToStandingRule(simEvent.id);
+  assert.equal(promoAttempt.ok, false);
+  assert.equal(promoAttempt.errorCode, 'SIMULATED_CANNOT_PROMOTE_TO_REAL');
+});
+

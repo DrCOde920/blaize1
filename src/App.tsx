@@ -328,6 +328,8 @@ interface ChatTurnMessage {
   verifiedProof?: {
     hash: string;
     summary: string;
+    statusLabel?: string;
+    isSimulated?: boolean;
   };
   runtimeSteps?: RuntimeStepRecord[];
   proposedIdeDiff?: IdePatchProposal;
@@ -392,7 +394,9 @@ const INITIAL_THREADS: ConversationThread[] = [
         toolsUsed: ['Research & AI Browser'],
         verifiedProof: {
           hash: 'sha256:4d19b8e21a09',
-          summary: 'Verified · 2 primary academic sources verified with dom_assertion',
+          summary: 'Simulated (Preview) · 2 primary academic sources checked in simulated browser fixture',
+          statusLabel: 'Simulated (Preview)',
+          isSimulated: true,
         },
       },
     ],
@@ -593,9 +597,9 @@ const WhatIDidCard: React.FC<{
           {open ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
           <span>What I did</span>
           {msg.verifiedProof && (
-            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/25">
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] bg-sky-500/10 text-sky-400 border border-sky-500/25">
               <CheckCircle2 className="w-3 h-3" />
-              <span>Verified</span>
+              <span>{msg.verifiedProof.statusLabel || (msg.verifiedProof.isSimulated !== false ? 'Simulated (Preview)' : 'Verified')}</span>
             </span>
           )}
         </button>
@@ -688,14 +692,16 @@ const WhatIDidCard: React.FC<{
                   </div>
                   <span
                     className={`px-2 py-0.5 rounded-full text-[10px] font-medium ${
-                      st.guardDecision.status === 'Verified'
+                      (st.uiStatusLabel || st.guardDecision.status) === 'Verified'
                         ? 'bg-emerald-500/15 text-emerald-400'
-                        : st.guardDecision.status === 'Needs your approval'
-                          ? 'bg-amber-500/15 text-amber-400'
-                          : 'bg-rose-500/15 text-rose-400'
+                        : (st.uiStatusLabel || st.guardDecision.status) === 'Simulated (Preview)'
+                          ? 'bg-sky-500/15 text-sky-400'
+                          : st.guardDecision.status === 'Needs your approval'
+                            ? 'bg-amber-500/15 text-amber-400'
+                            : 'bg-rose-500/15 text-rose-400'
                     }`}
                   >
-                    {st.guardDecision.status}
+                    {st.uiStatusLabel || st.guardDecision.status}
                   </span>
                 </div>
               ))}
@@ -734,8 +740,8 @@ const WhatIDidCard: React.FC<{
                         {nr.executionMode} · Verifier: {nr.verifier}
                       </div>
                     </div>
-                    <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-500/15 text-emerald-400">
-                      ✓ {nr.status.toUpperCase()}
+                    <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-sky-500/15 text-sky-400">
+                      {nr.status === 'verified' ? 'Simulated (Preview)' : nr.status.toUpperCase()}
                     </span>
                   </div>
                 ))}
@@ -970,8 +976,8 @@ export default function App() {
   const [ruleBook, setRuleBook] = useState<RuleBookItem[]>(
     persistedInit.rules || INITIAL_RULE_BOOK
   );
-  const [secretCodeDigest, setSecretCodeDigest] = useState<SecretCodeDigest>(
-    persistedInit.secretCodeDigest || deriveSecretCodePBKDF2('2026')
+  const [secretCodeDigest, setSecretCodeDigest] = useState<SecretCodeDigest | undefined>(
+    persistedInit.secretCodeDigest
   );
   const [secretCodeInput, setSecretCodeInput] = useState<string>('');
   const [ruleMutationFeedback, setRuleMutationFeedback] = useState<string | null>(null);
@@ -1128,9 +1134,11 @@ export default function App() {
     useState<MeasuredEvaluationReport | null>(null);
   const [isRunningEval, setIsRunningEval] = useState<boolean>(false);
 
-  // Onboarding, Suggestions Inbox, Help Search & Desktop Apps Stage
-  const [onboardingModalOpen, setOnboardingModalOpen] = useState<boolean>(false);
-  const [onboardingPinInput, setOnboardingPinInput] = useState<string>('2026');
+  // Onboarding starts open if fresh install (onboardingCompleted: false)
+  const [onboardingModalOpen, setOnboardingModalOpen] = useState<boolean>(
+    !persistedInit.onboardingCompleted
+  );
+  const [onboardingPinInput, setOnboardingPinInput] = useState<string>('');
   const [biometricSimulated, setBiometricSimulated] = useState<boolean>(
     persistedInit.biometricSimulatedEnabled
   );
@@ -2058,9 +2066,9 @@ export default function App() {
               actionPrompt: text,
               enabled: true,
               nextFiveRuns: sched.nextFiveRunTimesIso || ['Monday 09:00 UTC'],
-              lastRunAt: 'Scheduled via AgentRuntime',
+              lastRunAt: 'Scheduled via AgentRuntime (Simulated)',
               lastRunStatus: 'verified_ok',
-              guardNote: 'Verified by PolicyGuard',
+              guardNote: 'Simulated (Preview) · Checked by PolicyGuard',
             },
             ...prev,
           ]);
@@ -2094,11 +2102,13 @@ export default function App() {
             hash:
               missionRes.steps[missionRes.steps.length - 1]?.verification.evidenceHash ||
               computeDeterministicHash(text).slice(0, 16),
-            summary: `${missionRes.steps.length} runtime steps verified · ${
+            summary: `${missionRes.steps.length} runtime steps (${missionRes.uiStatusLabel}) · ${
               missionRes.status === 'waiting_for_approval'
                 ? 'Needs your approval before proceeding'
-                : 'Verified'
+                : missionRes.uiStatusLabel
             }`,
+            statusLabel: missionRes.uiStatusLabel,
+            isSimulated: missionRes.isSimulated,
           },
           runtimeSteps: missionRes.steps,
           proposedIdeDiff: missionRes.proposedIdeDiffs[0],
@@ -2213,7 +2223,7 @@ export default function App() {
           ? enabledPluginNames.join(' and ')
           : 'your workspace tools'
       }. Want me to save this as an artifact or turn it into a reusable skill?`;
-      let proofSummary = 'Verified · Deterministic post-condition check passed';
+      let proofSummary = 'Simulated (Preview) · Deterministic post-condition check passed';
 
       let linkedArtifactId: string | undefined;
       let placesCard: ChatTurnMessage['placesCard'] | undefined;
@@ -2230,7 +2240,7 @@ export default function App() {
             places: userPlaces,
           });
           replyContent = `${guardDecision.blockedMessage || 'That folder is off limits'}. I never read, list, or index Never-Go places. Want to open **Library > Places** to inspect or change this rule?`;
-          proofSummary = 'Blocked by PlacesGuard · Never-Go zone protected';
+          proofSummary = 'Blocked for safety · Never-Go zone protected by PlacesGuard';
           placesCard = {
             kind: 'off_limits',
             title: guardDecision.blockedMessage || 'That folder is off limits',
@@ -2244,7 +2254,7 @@ export default function App() {
           const top = findResult.candidates[0];
           if (top) {
             replyContent = `I found **${top.file.name}** in **${top.place.label}** (${Math.round(top.confidence * 100)}% confidence — ${top.reason}). Want me to open **Library > Places**?`;
-            proofSummary = `Verified · Matched in File Map (${top.place.label})`;
+            proofSummary = `Simulated (Preview) · Matched in File Map (${top.place.label})`;
             placesCard = {
               kind: 'where_is',
               title: top.file.name,
@@ -2257,7 +2267,7 @@ export default function App() {
           } else {
             const fallbackPlace = userPlaces.find((p) => p.status !== 'never') || userPlaces[0];
             replyContent = `I checked your File Map and the closest place is **${fallbackPlace.label}** (${fallbackPlace.purpose}). Want me to open **Library > Places** so you can browse or rescan?`;
-            proofSummary = 'Verified · File Map searched without reading Never zones';
+            proofSummary = 'Simulated (Preview) · File Map searched without reading Never zones';
             placesCard = {
               kind: 'where_is',
               title: fallbackPlace.label,
@@ -2280,7 +2290,7 @@ export default function App() {
               ? 'Since this place is Allowed, I can move it for you with one-click Undo whenever you hand it over.'
               : 'This place is set to Ask first, so I will wait for your confirmation before moving anything.'
           }`;
-          proofSummary = `Verified · Destination suggested by PlaceRules (${targetPlace.label})`;
+          proofSummary = `Simulated (Preview) · Destination suggested by PlaceRules (${targetPlace.label})`;
           placesCard = {
             kind: 'where_should_go',
             title: `Suggested: ${targetPlace.label}`,
@@ -2293,12 +2303,12 @@ export default function App() {
         }
       } else if (isBrowserOrDocsTask) {
         replyContent =
-          'I checked **docs.workspace.local** in the AI Browser and verified the page state. Want me to open **Workbench > AI Browser** so you can inspect the session?';
-        proofSummary = 'Verified · Isolated browser session ready';
+          'I checked **docs.workspace.local** in the AI Browser preview and checked the page state. Want me to open **Workbench > AI Browser** so you can inspect the session?';
+        proofSummary = 'Simulated (Preview) · Isolated browser preview session ready';
       } else if (isArtifactOrSummaryTask) {
         replyContent =
-          'I prepared the workspace summary report, verified the file checksums, and opened the interactive artifact preview in the right drawer. I can export or refine it whenever you like.';
-        proofSummary = 'Verified · Artifact checksums match workspace state';
+          'I prepared the workspace summary report, checked the file checksums, and opened the interactive artifact preview in the right drawer. I can export or refine it whenever you like.';
+        proofSummary = 'Simulated (Preview) · Artifact checksums match workspace preview state';
         linkedArtifactId = artifacts[0]?.id;
         if (artifacts[0]?.id) {
           setActiveArtifactId(artifacts[0].id);
@@ -2322,6 +2332,8 @@ export default function App() {
         verifiedProof: {
           hash: computeDeterministicHash(`${text}|${Date.now()}`).slice(0, 16),
           summary: proofSummary,
+          statusLabel: proofSummary.startsWith('Blocked') ? 'Blocked for safety' : 'Simulated (Preview)',
+          isSimulated: true,
         },
       };
 
@@ -3888,7 +3900,7 @@ export default function App() {
                   const res = await fetch('/api/vault/store', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ keyId, label, plainKey: token, secretCode: '2026' }),
+                    body: JSON.stringify({ keyId, label, plainKey: token, secretCode: secretCodeInput || undefined }),
                   });
                   return res.ok;
                 } catch {
@@ -3932,8 +3944,8 @@ export default function App() {
                     s.id === sched.id
                       ? {
                           ...s,
-                          lastRunAt: 'Just now',
-                          lastRunStatus: 'done',
+                          lastRunAt: 'Just now (Simulated)',
+                          lastRunStatus: 'idle',
                         }
                       : s
                   )
@@ -3941,10 +3953,13 @@ export default function App() {
                 ledger.appendEvent({
                   actor: 'agent',
                   type: 'scheduled_run_executed',
-                  summary: `Executed scheduled routine "${sched.title}": ${sched.prompt}`,
+                  summary: `Simulated scheduled routine "${sched.title}": ${sched.prompt}`,
                   payload: JSON.stringify(sched),
                   trustLevel: 'verified_by_evidence',
                   missionId: sched.id,
+                  executionState: 'SIMULATED',
+                  verificationState: 'SIMULATED',
+                  isSimulated: true,
                 });
                 bumpLedger();
                 setActiveView('chat');
@@ -4045,10 +4060,10 @@ export default function App() {
 
               {lastReplayResult && (
                 <div className="w-full pt-2 border-t border-stone-800/60 flex flex-wrap items-center justify-between gap-2 text-[11px]">
-                  <span className="text-emerald-400 font-medium">
-                    {lastReplayResult.dryRun ? 'Dry Run' : 'Intent Replay'} Verified:{' '}
-                    {lastReplayResult.stepsCompleted}/{lastReplayResult.totalSteps} steps passed
-                    post-condition check
+                  <span className="text-sky-400 font-medium">
+                    {lastReplayResult.dryRun ? 'Dry Run' : 'Intent Replay'} Simulated (Preview):{' '}
+                    {lastReplayResult.stepsCompleted}/{lastReplayResult.totalSteps} steps checked
+                    in simulation
                   </span>
                   <div className="flex flex-wrap gap-2">
                     {lastReplayResult.stepReceipts.map((r) => (
@@ -4273,17 +4288,23 @@ export default function App() {
                 {filteredLedgerEvents.map((ev) => {
                   const isExpanded = expandedLedgerEventIds.includes(ev.id);
                   const statusLabel =
-                    ev.type.includes('blocked') || ev.type.includes('denied')
+                    ev.type.includes('blocked') || ev.type.includes('denied') || ev.executionState === 'BLOCKED'
                       ? 'Blocked for safety'
-                      : ev.type.includes('approval')
+                      : ev.type.includes('approval') || ev.executionState === 'WAITING_FOR_APPROVAL'
                         ? 'Needs your approval'
-                        : 'Verified';
+                        : ev.isSimulated || ev.executionState === 'SIMULATED' || ev.verificationState === 'SIMULATED'
+                          ? 'Simulated (Preview)'
+                          : ev.verificationState === 'UNCERTAIN'
+                            ? 'Uncertain (Unverified)'
+                            : 'Verified';
                   const statusTone =
                     statusLabel === 'Blocked for safety'
                       ? 'text-rose-400 bg-rose-500/10 border-rose-500/25'
                       : statusLabel === 'Needs your approval'
                         ? 'text-amber-400 bg-amber-500/10 border-amber-500/25'
-                        : 'text-emerald-400 bg-emerald-500/10 border-emerald-500/25';
+                        : statusLabel === 'Simulated (Preview)'
+                          ? 'text-sky-400 bg-sky-500/10 border-sky-500/25'
+                          : 'text-emerald-400 bg-emerald-500/10 border-emerald-500/25';
 
                   return (
                     <div
@@ -5369,7 +5390,10 @@ export default function App() {
               soulDocument.version + 1
             )
           );
-          const nextDigest = deriveSecretCodePBKDF2(onboardingPinInput || '2026');
+          const nextDigest =
+            onboardingPinInput && onboardingPinInput.trim().length >= 4
+              ? deriveSecretCodePBKDF2(onboardingPinInput.trim())
+              : undefined;
           setSecretCodeDigest(nextDigest);
           ledger.appendEvent({
             actor: 'operator',

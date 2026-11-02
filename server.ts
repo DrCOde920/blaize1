@@ -16,6 +16,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { PassphraseWrapVault, redactSecretsFromText } from './src/packages/vault/index';
+import { getGlobalDurableDb } from './src/packages/storage/index';
 import {
   validateBrowserUrlSecurity,
   scanContentForPromptInjection,
@@ -108,6 +109,7 @@ const PER_LAUNCH_AUTH_TOKEN = `blaize_launch_${crypto.randomBytes(16).toString('
 const serverVault = new PassphraseWrapVault({
   idleTimeoutMs: 5 * 60 * 1000,
   backendKind: 'passphrase_aes_256_gcm',
+  durableDb: getGlobalDurableDb(),
 });
 
 function hasConfiguredApiKey(): boolean {
@@ -140,22 +142,6 @@ export async function createBlaizeServer() {
     next();
   });
 
-  // Seed default masked vault entry if empty so UI shows server vault state immediately
-  if (serverVault.listMasked().length === 0) {
-    await serverVault.store(
-      {
-        keyId: 'meta-primary',
-        label: 'Meta Model API (muse-spark-1.3)',
-        provider: 'Meta AI',
-        plainKey: process.env.MODEL_API_KEY?.trim() || 'meta-preview-placeholder-7f9a',
-        spendCapUsd: 15.0,
-        rateLimitPerMinute: 30,
-        alertThresholdPct: 80,
-      },
-      '2026'
-    );
-  }
-
   // Vault Status & Masked List Endpoint (Never returns raw keys)
   app.get('/api/vault/status', (_req, res) => {
     res.status(200).json({
@@ -170,6 +156,14 @@ export async function createBlaizeServer() {
     try {
       const { keyId, label, provider, plainKey, spendCapUsd, rateLimitPerMinute, secretCode } =
         req.body || {};
+      const code = secretCode ? String(secretCode).trim() : undefined;
+      if (!code && serverVault.isLocked()) {
+        res.status(400).json({
+          ok: false,
+          error: 'A secret code (at least 4 characters) is required to encrypt and store a key in the vault.',
+        });
+        return;
+      }
       const entry = await serverVault.store(
         {
           keyId: keyId || `key-${Date.now()}`,
@@ -179,7 +173,7 @@ export async function createBlaizeServer() {
           spendCapUsd: Number(spendCapUsd) || 10,
           rateLimitPerMinute: Number(rateLimitPerMinute) || 30,
         },
-        String(secretCode || '2026')
+        code
       );
       res.status(200).json({ ok: true, entry, locked: serverVault.isLocked() });
     } catch (err: any) {

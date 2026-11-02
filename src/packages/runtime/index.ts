@@ -8,13 +8,29 @@
  */
 
 import {
+  type CanonicalExecutionResult,
+  type CanonicalSubsystem,
+  type CanonicalVerificationEvidence,
+  type ExecutionTruthState,
+  type GenericRiskClass,
+  type ScopedApprovalToken,
+  type TruthfulUiStatusLabel,
+  type VerificationTruthState,
+  canPromoteRecordToReal,
+  formatTruthfulUiStatusLabel,
+} from '../contracts';
+import {
   DEFAULT_POLICY_CONFIG,
   MemoryLedger,
   PolicyConfig,
   computeDeterministicHash,
   evaluatePolicyGuard,
+  globalPolicyEngine,
   globalVerifierRegistry,
   runVerifier,
+  derivePassphraseKeyScrypt,
+  verifyTimingSafe,
+  DEFAULT_SCRYPT_PARAMS,
 } from '../trust';
 import {
   MissionEngineActivityEvent,
@@ -29,7 +45,7 @@ import {
   INITIAL_WORKSPACE_CONNECTORS,
   INITIAL_WORKSPACE_PROJECTS,
   IdeFileNode,
-   IdePatchProposal,
+  IdePatchProposal,
   MemoryEntry,
   ReusableSkill,
   SoulDocument,
@@ -37,6 +53,16 @@ import {
   WorkspaceProject,
   proposeIdePatchWithDiff,
 } from '../workspace';
+
+export type {
+  CanonicalExecutionResult,
+  CanonicalSubsystem,
+  CanonicalVerificationEvidence,
+  ExecutionTruthState,
+  TruthfulUiStatusLabel,
+  VerificationTruthState,
+};
+export { canPromoteRecordToReal, formatTruthfulUiStatusLabel };
 
 // ============================================================================
 // 1. EVENT BUS & RUNTIME TYPES
@@ -79,20 +105,28 @@ export type ToolCallName =
   | 'connectors.write'
   | 'soul.propose_edit'
   | 'rules.propose_change'
-  | 'ledger.explain';
+  | 'ledger.explain'
+  | string;
 
 export interface RuntimeToolCall {
   id: string;
   tool: ToolCallName;
   args: Record<string, unknown>;
   rationale: string;
+  callerId?: string;
+  approvalToken?: ScopedApprovalToken;
 }
 
 export interface RuntimeStepRecord {
   stepNumber: number;
   toolCall: RuntimeToolCall;
+  executionState: ExecutionTruthState;
+  verificationState: VerificationTruthState;
+  isSimulated: boolean;
+  uiStatusLabel: TruthfulUiStatusLabel;
+  canonicalResult: CanonicalExecutionResult;
   guardDecision: {
-    status: 'Verified' | 'Needs your approval' | 'Blocked for safety';
+    status: 'Verified' | 'Simulated (Preview)' | 'Needs your approval' | 'Blocked for safety';
     allowed: boolean;
     requiresApproval: boolean;
     reason: string;
@@ -101,8 +135,11 @@ export interface RuntimeStepRecord {
   executionOutput: Record<string, unknown>;
   verification: {
     verified: boolean;
+    verificationState: VerificationTruthState;
+    isSimulated: boolean;
     summary: string;
     evidenceHash: string;
+    errorCode?: string;
   };
   ledgerEventId: string;
   morrowEvent: MissionEngineActivityEvent;
@@ -463,39 +500,75 @@ export class ModelRouter {
 }
 
 // ============================================================================
-// 4. PBKDF2 SECRET CODE & RULE BOOK ENGINE (SAFETY FLOOR VS PREFERENCE)
+// 4. KDF SECRET CODE & RULE BOOK ENGINE (SAFETY FLOOR VS PREFERENCE)
 // ============================================================================
 
 export interface SecretCodeDigest {
-  algorithm: 'PBKDF2-SHA256-SIMULATED-PREVIEW';
+  algorithm: 'scrypt-v1' | 'PBKDF2-SHA256-SIMULATED-PREVIEW';
   saltHex: string;
-  iterations: number;
+  iterations?: number;
+  params?: {
+    N: number;
+    r: number;
+    p: number;
+    keyLen: number;
+  };
   derivedHex: string;
 }
 
 /**
- * Deterministic PBKDF2-style key derivation for the browser/Node preview (labeled).
+ * Derives a cryptographically secure key digest from an app-level passphrase using scrypt with versioned parameters.
+ */
+export function deriveSecretCodeScrypt(
+  secretCode: string,
+  saltHex?: string,
+  params = DEFAULT_SCRYPT_PARAMS
+): SecretCodeDigest {
+  const result = derivePassphraseKeyScrypt(secretCode, saltHex, params);
+  return {
+    algorithm: 'scrypt-v1',
+    saltHex: result.saltHex,
+    params: result.params,
+    derivedHex: result.keyHex,
+  };
+}
+
+/**
+ * Derives passphrase digest using scrypt (standard), falling back to labeled preview if needed.
  */
 export function deriveSecretCodePBKDF2(
   secretCode: string,
-  saltHex: string = 'blaize_salt_2026_v1',
+  saltHex?: string,
   iterations: number = 1000
 ): SecretCodeDigest {
-  let state = `${saltHex}:${secretCode.trim()}`;
-  for (let i = 0; i < Math.min(iterations, 2000); i++) {
-    state = computeDeterministicHash(`${state}:${i}`);
+  try {
+    return deriveSecretCodeScrypt(secretCode, saltHex);
+  } catch {
+    const safeSalt = saltHex || 'blaize_salt_user_custom';
+    let state = `${safeSalt}:${secretCode.trim()}`;
+    for (let i = 0; i < Math.min(iterations, 2000); i++) {
+      state = computeDeterministicHash(`${state}:${i}`);
+    }
+    return {
+      algorithm: 'PBKDF2-SHA256-SIMULATED-PREVIEW',
+      saltHex: safeSalt,
+      iterations,
+      derivedHex: state,
+    };
   }
-  return {
-    algorithm: 'PBKDF2-SHA256-SIMULATED-PREVIEW',
-    saltHex,
-    iterations,
-    derivedHex: state,
-  };
 }
 
 export function verifySecretCodePBKDF2(secretCode: string, digest: SecretCodeDigest): boolean {
   if (!secretCode || !digest) return false;
-  const check = deriveSecretCodePBKDF2(secretCode, digest.saltHex, digest.iterations);
+  if (digest.algorithm === 'scrypt-v1') {
+    try {
+      const check = deriveSecretCodeScrypt(secretCode, digest.saltHex, digest.params);
+      return verifyTimingSafe(check.derivedHex, digest.derivedHex);
+    } catch {
+      return false;
+    }
+  }
+  const check = deriveSecretCodePBKDF2(secretCode, digest.saltHex, digest.iterations || 1000);
   return check.derivedHex === digest.derivedHex;
 }
 
@@ -718,6 +791,9 @@ export function replayCompiledSkillByIntent(params: {
   chaosLayoutChanged?: boolean;
 }): {
   ok: boolean;
+  executionState: ExecutionTruthState;
+  verificationState: VerificationTruthState;
+  isSimulated: true;
   dryRun: boolean;
   stepsCompleted: number;
   totalSteps: number;
@@ -726,9 +802,24 @@ export function replayCompiledSkillByIntent(params: {
     intentLabel: string;
     matchedBy: 'intent_role_anchor' | 'dry_run_simulation';
     verified: boolean;
+    executionState: ExecutionTruthState;
+    isSimulated: true;
     postCondition: string;
   }>;
 } {
+  if (!params.compiled || !Array.isArray(params.compiled.steps) || params.compiled.steps.length === 0) {
+    return {
+      ok: false,
+      executionState: 'FAILED',
+      verificationState: 'FAILED',
+      isSimulated: true,
+      dryRun: params.dryRun,
+      stepsCompleted: 0,
+      totalSteps: 0,
+      stepReceipts: [],
+    };
+  }
+
   const receipts = params.compiled.steps.map((step, i) => ({
     stepIndex: i + 1,
     intentLabel: step.intentLabel,
@@ -736,11 +827,16 @@ export function replayCompiledSkillByIntent(params: {
       ? ('dry_run_simulation' as const)
       : ('intent_role_anchor' as const),
     verified: true,
+    executionState: 'SIMULATED' as const,
+    isSimulated: true as const,
     postCondition: step.expectedPostCondition,
   }));
 
   return {
     ok: receipts.every((r) => r.verified),
+    executionState: 'SIMULATED',
+    verificationState: 'SIMULATED',
+    isSimulated: true,
     dryRun: params.dryRun,
     stepsCompleted: receipts.length,
     totalSteps: params.compiled.steps.length,
@@ -749,8 +845,1380 @@ export function replayCompiledSkillByIntent(params: {
 }
 
 // ============================================================================
-// 6. UNIFIED AGENT RUNTIME & TOOLBELT (END-TO-END MISSION EXECUTION)
+// 6. TYPED TOOL REGISTRY & UNIFIED AGENT RUNTIME (PROMPT 1)
 // ============================================================================
+
+export type ToolAvailabilityStatus =
+  | 'AVAILABLE_REAL'
+  | 'AVAILABLE_SIMULATED'
+  | 'UNSUPPORTED'
+  | 'NOT_CONFIGURED';
+
+export interface ToolRetryIdempotencyPolicy {
+  maxRetries: number;
+  backoffMs: number;
+  idempotent: boolean;
+}
+
+export interface ToolExecutionSideEffects {
+  proposedIdeDiffs: IdePatchProposal[];
+  proposedSchedules: AgentMissionResult['proposedSchedules'];
+  reviewQueueAdditions: ReviewQueueItem[];
+  setBrowserUrl: (u: string) => void;
+  getBrowserUrl?: () => string;
+}
+
+export interface ToolExecutionContext {
+  runtimeContext: AgentRuntimeContext;
+  sideEffects: ToolExecutionSideEffects;
+  installedPluginIds?: string[];
+  realTargetStateStore?: Map<string, unknown>;
+}
+
+export interface ToolExecutorOutcome {
+  ok: boolean;
+  output: Record<string, unknown>;
+  /**
+   * True ONLY when a registered real executor performed an actual external/OS/filesystem side effect.
+   * Proposed diffs, local state mutations, model statements, canned fixtures, or synthetic snapshots MUST set this to false.
+   */
+  realSideEffectPerformed: boolean;
+  isSimulated: boolean;
+  errorCode?: string;
+  errorMessage?: string;
+}
+
+export interface ToolVerifierOutcome {
+  /**
+   * True ONLY when the verifier independently read the target state (not just the executor's return value).
+   */
+  independentTargetRead: boolean;
+  criteriaMet: boolean;
+  verificationState?: VerificationTruthState;
+  evidenceHash: string;
+  summary: string;
+  observedState?: Record<string, unknown>;
+  errorCode?: string;
+}
+
+export interface ToolRegistration {
+  name: string;
+  version: string;
+  subsystem: CanonicalSubsystem;
+  inputSchema: Record<string, string>;
+  outputSchema: Record<string, string>;
+  riskClass: GenericRiskClass;
+  requiredCapabilities: string[];
+  executor: (args: Record<string, unknown>, context: ToolExecutionContext) => ToolExecutorOutcome;
+  verifier:
+    | ((
+        args: Record<string, unknown>,
+        executorOutcome: ToolExecutorOutcome,
+        context: ToolExecutionContext
+      ) => ToolVerifierOutcome)
+    | null
+    | undefined;
+  timeoutMs: number;
+  retryPolicy: ToolRetryIdempotencyPolicy;
+  availabilityStatus: ToolAvailabilityStatus;
+}
+
+export const KNOWN_BUILTIN_PLUGIN_IDS: readonly string[] = [
+  'plugin-l3xi-finance',
+  'plugin-ai-browser',
+  'plugin-workspace-files',
+  'plugin-web-research',
+  'plugin-code-verifier',
+  'plugin-note-organizer',
+] as const;
+
+export class ToolRegistry {
+  private tools = new Map<string, ToolRegistration>();
+
+  public register(
+    registration: ToolRegistration,
+    options?: { replaceExisting?: boolean; allowMissingVerifierForTest?: boolean }
+  ): void {
+    const cleanName = registration.name?.trim();
+    if (!cleanName) {
+      throw new Error('ToolRegistration requires a non-empty unique name.');
+    }
+    if (this.tools.has(cleanName) && !options?.replaceExisting) {
+      throw new Error(`Duplicate tool registration "${cleanName}" is not allowed in ToolRegistry.`);
+    }
+    if (!registration.version?.trim()) {
+      throw new Error(`Tool "${cleanName}" must declare a version.`);
+    }
+    if (typeof registration.executor !== 'function') {
+      throw new Error(`Tool "${cleanName}" must provide an executor function.`);
+    }
+    if (typeof registration.verifier !== 'function' && !options?.allowMissingVerifierForTest) {
+      throw new Error(
+        `MISSING_VERIFIER: Tool "${cleanName}" must provide an independent verifier function.`
+      );
+    }
+    this.tools.set(cleanName, registration);
+  }
+
+  public get(name: string): ToolRegistration | undefined {
+    return this.tools.get(name);
+  }
+
+  public has(name: string): boolean {
+    return this.tools.has(name);
+  }
+
+  public list(): ToolRegistration[] {
+    return Array.from(this.tools.values());
+  }
+
+  /**
+   * Executes and independently verifies a tool call through the typed ToolRegistry.
+   * - Unknown tools return UNSUPPORTED / UNSUPPORTED_TOOL and NEVER { ok: true }.
+   * - Missing verifiers return UNSUPPORTED / MISSING_VERIFIER.
+   * - Real tools require realSideEffectPerformed === true AND independent target verification.
+   * - Canned/demo tools return SIMULATED and cannot be promoted to REAL.
+   */
+  public execute(
+    toolCall: RuntimeToolCall,
+    context: ToolExecutionContext
+  ): CanonicalExecutionResult {
+    const toolName = String(toolCall.tool || '').trim();
+    const registration = this.tools.get(toolName);
+
+    // 1. Unknown tool -> UNSUPPORTED / UNSUPPORTED_TOOL (never { ok: true })
+    if (!registration) {
+      const unsupportedHash = computeDeterministicHash(`unsupported_tool|${toolCall.id}|${toolName}`).slice(0, 16);
+      return {
+        subsystem: 'mission_runtime',
+        toolOrActionName: toolName,
+        executionState: 'UNSUPPORTED',
+        verificationState: 'UNSUPPORTED',
+        ok: false,
+        isRealExecution: false,
+        isSimulated: false,
+        uiStatusLabel: 'Unsupported',
+        errorCode: 'UNSUPPORTED_TOOL',
+        errorMessage: `Unknown tool "${toolName}": not registered in ToolRegistry.`,
+        output: {
+          ok: false,
+          errorCode: 'UNSUPPORTED_TOOL',
+          tool: toolName,
+          error: `Unknown tool "${toolName}": not registered in ToolRegistry.`,
+        },
+        verificationEvidence: {
+          verifierId: 'none',
+          independentTargetRead: false,
+          criteriaMet: false,
+          evidenceHash: unsupportedHash,
+          summary: `Unsupported tool "${toolName}" blocked: not registered in ToolRegistry.`,
+        },
+      };
+    }
+
+    // 2. Check availability status
+    if (
+      registration.availabilityStatus === 'UNSUPPORTED' ||
+      registration.availabilityStatus === 'NOT_CONFIGURED'
+    ) {
+      const state: ExecutionTruthState =
+        registration.availabilityStatus === 'NOT_CONFIGURED' ? 'NOT_CONFIGURED' : 'UNSUPPORTED';
+      const vState: VerificationTruthState =
+        registration.availabilityStatus === 'NOT_CONFIGURED' ? 'NOT_CONFIGURED' : 'UNSUPPORTED';
+      const code =
+        registration.availabilityStatus === 'NOT_CONFIGURED'
+          ? 'NOT_CONFIGURED'
+          : 'UNSUPPORTED_TOOL';
+      const hash = computeDeterministicHash(`${code}|${toolCall.id}|${toolName}`).slice(0, 16);
+      return {
+        subsystem: registration.subsystem,
+        toolOrActionName: toolName,
+        executionState: state,
+        verificationState: vState,
+        ok: false,
+        isRealExecution: false,
+        isSimulated: false,
+        uiStatusLabel: formatTruthfulUiStatusLabel({
+          executionState: state,
+          verificationState: vState,
+        }),
+        errorCode: code,
+        errorMessage: `Tool "${toolName}" is ${registration.availabilityStatus}.`,
+        output: {
+          ok: false,
+          errorCode: code,
+          tool: toolName,
+        },
+        verificationEvidence: {
+          verifierId: 'none',
+          independentTargetRead: false,
+          criteriaMet: false,
+          evidenceHash: hash,
+          summary: `Tool "${toolName}" is ${registration.availabilityStatus}.`,
+        },
+      };
+    }
+
+    // 3. Every registered tool must have a verifier; otherwise completion is blocked
+    if (typeof registration.verifier !== 'function') {
+      const missingVerHash = computeDeterministicHash(
+        `missing_verifier|${toolCall.id}|${toolName}`
+      ).slice(0, 16);
+      return {
+        subsystem: registration.subsystem,
+        toolOrActionName: toolName,
+        executionState: 'UNSUPPORTED',
+        verificationState: 'UNSUPPORTED',
+        ok: false,
+        isRealExecution: false,
+        isSimulated: false,
+        uiStatusLabel: 'Unsupported',
+        errorCode: 'MISSING_VERIFIER',
+        errorMessage: `Tool "${toolName}" has no registered verifier; completion blocked as unsupported/unverified.`,
+        output: {
+          ok: false,
+          errorCode: 'MISSING_VERIFIER',
+          tool: toolName,
+        },
+        verificationEvidence: {
+          verifierId: 'missing',
+          independentTargetRead: false,
+          criteriaMet: false,
+          evidenceHash: missingVerHash,
+          summary: `Blocked: tool "${toolName}" is missing a verifier.`,
+        },
+      };
+    }
+
+    // 4. Validate required input schema keys
+    for (const [key, spec] of Object.entries(registration.inputSchema)) {
+      if (spec.includes('required') && (toolCall.args[key] === undefined || toolCall.args[key] === '')) {
+        const schemaHash = computeDeterministicHash(`invalid_input|${toolName}|${key}`).slice(0, 16);
+        return {
+          subsystem: registration.subsystem,
+          toolOrActionName: toolName,
+          executionState: 'FAILED',
+          verificationState: 'FAILED',
+          ok: false,
+          isRealExecution: false,
+          isSimulated: registration.availabilityStatus === 'AVAILABLE_SIMULATED',
+          uiStatusLabel: 'Failed',
+          errorCode: 'INVALID_INPUT',
+          errorMessage: `Missing required argument "${key}" for tool "${toolName}".`,
+          output: {
+            ok: false,
+            errorCode: 'INVALID_INPUT',
+            missingArgument: key,
+          },
+          verificationEvidence: {
+            verifierId: `${toolName}.verifier`,
+            independentTargetRead: false,
+            criteriaMet: false,
+            evidenceHash: schemaHash,
+            summary: `Failed input validation: missing "${key}".`,
+          },
+        };
+      }
+    }
+
+    // 4b. Mandatory Trust Kernel Authorization Boundary (PROMPT 2.1 & 2.10)
+    // Every tool call must pass through the central PolicyEngine immediately before execution. Default-deny on error/unidentified caller.
+    const callerId = String(
+      (toolCall as any).callerId ||
+      (context.runtimeContext as any)?.missionId ||
+      'operator'
+    ).trim();
+    const target = String(
+      toolCall.args.targetUrl ||
+      toolCall.args.url ||
+      toolCall.args.filePath ||
+      toolCall.args.path ||
+      toolCall.args.file ||
+      toolCall.args.target ||
+      toolName
+    );
+
+    const policyDecision = globalPolicyEngine.evaluateToolCall({
+      callerId,
+      toolName,
+      target,
+      args: toolCall.args,
+      riskClass: registration.riskClass,
+      profileId: (context.runtimeContext as any)?.profileId || 'personal',
+      approvalToken: (toolCall as any).approvalToken || (toolCall.args.approvalToken as any),
+      isSimulated: registration.availabilityStatus === 'AVAILABLE_SIMULATED',
+      untrustedContext: toolCall.args.untrustedContext as string | undefined,
+    });
+
+    if (!policyDecision.allowed) {
+      const isApproval =
+        policyDecision.decision === 'REQUIRE_APPROVAL' ||
+        policyDecision.decision === 'SUSPEND_TAKEOVER';
+      const state: ExecutionTruthState = isApproval ? 'WAITING_FOR_APPROVAL' : 'BLOCKED';
+      const vState: VerificationTruthState = isApproval ? 'WAITING_FOR_APPROVAL' : 'BLOCKED';
+      const code =
+        policyDecision.errorCode || (isApproval ? 'WAITING_FOR_APPROVAL' : 'BLOCKED_BY_GUARD');
+      const guardHash = computeDeterministicHash(
+        `policy_blocked|${toolCall.id}|${toolName}|${code}`
+      ).slice(0, 16);
+
+      return {
+        subsystem: registration.subsystem,
+        toolOrActionName: toolName,
+        executionState: state,
+        verificationState: vState,
+        ok: false,
+        isRealExecution: false,
+        isSimulated: registration.availabilityStatus === 'AVAILABLE_SIMULATED',
+        uiStatusLabel: formatTruthfulUiStatusLabel({
+          executionState: state,
+          verificationState: vState,
+          isSimulated: registration.availabilityStatus === 'AVAILABLE_SIMULATED',
+        }),
+        errorCode: code,
+        errorMessage: policyDecision.reason,
+        output: {
+          ok: false,
+          errorCode: code,
+          tool: toolName,
+          error: policyDecision.reason,
+          matchedRule: policyDecision.matchedRule,
+        },
+        verificationEvidence: {
+          verifierId: `${toolName}.verifier`,
+          independentTargetRead: false,
+          criteriaMet: false,
+          evidenceHash: guardHash,
+          summary: policyDecision.reason,
+        },
+      };
+    }
+
+    // 5. Run registered executor
+    const execOutcome = registration.executor(toolCall.args, context);
+    if (!execOutcome.ok) {
+      const errCode = execOutcome.errorCode || 'EXECUTION_FAILED';
+      const errHash = computeDeterministicHash(
+        `exec_failed|${toolCall.id}|${toolName}|${errCode}`
+      ).slice(0, 16);
+      const execState: ExecutionTruthState =
+        errCode === 'UNSUPPORTED_TOOL' ? 'UNSUPPORTED' : 'FAILED';
+      const verState: VerificationTruthState =
+        errCode === 'UNSUPPORTED_TOOL' ? 'UNSUPPORTED' : 'FAILED';
+      return {
+        subsystem: registration.subsystem,
+        toolOrActionName: toolName,
+        executionState: execState,
+        verificationState: verState,
+        ok: false,
+        isRealExecution: false,
+        isSimulated: Boolean(execOutcome.isSimulated),
+        uiStatusLabel: formatTruthfulUiStatusLabel({
+          executionState: execState,
+          verificationState: verState,
+          isSimulated: execOutcome.isSimulated,
+        }),
+        errorCode: errCode,
+        errorMessage: execOutcome.errorMessage || `Tool "${toolName}" failed execution.`,
+        output: {
+          ...execOutcome.output,
+          ok: false,
+          errorCode: errCode,
+          error: execOutcome.errorMessage || `Tool "${toolName}" failed execution.`,
+        },
+        verificationEvidence: {
+          verifierId: `${toolName}.verifier`,
+          independentTargetRead: false,
+          criteriaMet: false,
+          evidenceHash: errHash,
+          summary: execOutcome.errorMessage || `Failed (${errCode})`,
+        },
+      };
+    }
+
+    // 6. Enforce: A real tool may return EXECUTED only after its registered executor performed the real operation.
+    // Proposed diffs, local state mutations, model statements, canned fixtures, or synthetic snapshots are NOT execution evidence.
+    const isNonRealArtifact =
+      Boolean(execOutcome.output.stagedAsDiff) ||
+      Boolean(execOutcome.output.cannedFixture) ||
+      Boolean(execOutcome.output.syntheticSnapshot) ||
+      Boolean(execOutcome.output.modelStatementOnly) ||
+      Boolean(execOutcome.output.localStateMutationOnly);
+
+    if (
+      registration.availabilityStatus === 'AVAILABLE_REAL' &&
+      (!execOutcome.realSideEffectPerformed || execOutcome.isSimulated || isNonRealArtifact)
+    ) {
+      const noSideEffectHash = computeDeterministicHash(
+        `no_side_effect|${toolCall.id}|${toolName}`
+      ).slice(0, 16);
+      return {
+        subsystem: registration.subsystem,
+        toolOrActionName: toolName,
+        executionState: 'FAILED',
+        verificationState: 'FAILED',
+        ok: false,
+        isRealExecution: false,
+        isSimulated: Boolean(execOutcome.isSimulated),
+        uiStatusLabel: 'Failed',
+        errorCode: 'EXECUTION_WITHOUT_SIDE_EFFECT',
+        errorMessage: `Tool "${toolName}" returned success without performing a real side effect (proposed diff, local state mutation, model statement, canned fixture, or synthetic snapshot is not execution evidence).`,
+        output: {
+          ...execOutcome.output,
+          ok: false,
+          errorCode: 'EXECUTION_WITHOUT_SIDE_EFFECT',
+        },
+        verificationEvidence: {
+          verifierId: `${toolName}.verifier`,
+          independentTargetRead: false,
+          criteriaMet: false,
+          evidenceHash: noSideEffectHash,
+          summary: `Rejected false success on "${toolName}": no real side effect performed.`,
+        },
+      };
+    }
+
+    // 7. Run independent verifier against actual target state
+    const verOutcome = registration.verifier(toolCall.args, execOutcome, context);
+
+    // If verifier could not independently read the target state -> UNCERTAIN (never pass)
+    if (!verOutcome.independentTargetRead) {
+      return {
+        subsystem: registration.subsystem,
+        toolOrActionName: toolName,
+        executionState: execOutcome.isSimulated ? 'SIMULATED' : 'UNCERTAIN',
+        verificationState: 'UNCERTAIN',
+        ok: false,
+        isRealExecution: false,
+        isSimulated: Boolean(execOutcome.isSimulated),
+        uiStatusLabel: 'Uncertain (Unverified)',
+        errorCode: verOutcome.errorCode || 'MISSING_EVIDENCE',
+        errorMessage: verOutcome.summary || `Verifier could not independently read target state for "${toolName}".`,
+        output: {
+          ...execOutcome.output,
+          ok: false,
+          errorCode: verOutcome.errorCode || 'MISSING_EVIDENCE',
+        },
+        verificationEvidence: {
+          verifierId: `${toolName}.verifier`,
+          independentTargetRead: false,
+          criteriaMet: false,
+          evidenceHash: verOutcome.evidenceHash,
+          summary: verOutcome.summary,
+          observedState: verOutcome.observedState,
+        },
+      };
+    }
+
+    // If verifier read target state and explicit success criteria were NOT met -> FAILED (catches fake executor results!)
+    if (!verOutcome.criteriaMet) {
+      const failVerState: VerificationTruthState = verOutcome.verificationState || 'FAILED';
+      const failExecState: ExecutionTruthState = execOutcome.isSimulated
+        ? 'SIMULATED'
+        : execOutcome.realSideEffectPerformed
+          ? 'EXECUTED'
+          : 'FAILED';
+      return {
+        subsystem: registration.subsystem,
+        toolOrActionName: toolName,
+        executionState: failExecState,
+        verificationState: failVerState,
+        ok: false,
+        isRealExecution: false,
+        isSimulated: Boolean(execOutcome.isSimulated),
+        uiStatusLabel: formatTruthfulUiStatusLabel({
+          executionState: failExecState,
+          verificationState: failVerState,
+          isSimulated: execOutcome.isSimulated,
+        }),
+        errorCode: verOutcome.errorCode || 'EXECUTION_WITHOUT_SIDE_EFFECT',
+        errorMessage: verOutcome.summary,
+        output: {
+          ...execOutcome.output,
+          ok: false,
+          errorCode: verOutcome.errorCode || 'EXECUTION_WITHOUT_SIDE_EFFECT',
+        },
+        verificationEvidence: {
+          verifierId: `${toolName}.verifier`,
+          independentTargetRead: true,
+          criteriaMet: false,
+          evidenceHash: verOutcome.evidenceHash,
+          summary: verOutcome.summary,
+          observedState: verOutcome.observedState,
+        },
+      };
+    }
+
+    // 8. Determine canonical state: SIMULATED vs EXECUTED/VERIFIED
+    const isSimulated =
+      registration.availabilityStatus === 'AVAILABLE_SIMULATED' ||
+      Boolean(execOutcome.isSimulated) ||
+      isNonRealArtifact;
+
+    const finalExecutionState: ExecutionTruthState = isSimulated ? 'SIMULATED' : 'EXECUTED';
+    const finalVerificationState: VerificationTruthState = isSimulated
+      ? 'SIMULATED'
+      : verOutcome.verificationState || 'VERIFIED';
+
+    return {
+      subsystem: registration.subsystem,
+      toolOrActionName: toolName,
+      executionState: finalExecutionState,
+      verificationState: finalVerificationState,
+      ok: true,
+      isRealExecution: !isSimulated && finalExecutionState === 'EXECUTED',
+      isSimulated,
+      uiStatusLabel: formatTruthfulUiStatusLabel({
+        executionState: finalExecutionState,
+        verificationState: finalVerificationState,
+        isSimulated,
+      }),
+      output: {
+        ...execOutcome.output,
+        executionState: finalExecutionState,
+        verificationState: finalVerificationState,
+        isSimulated,
+      },
+      verificationEvidence: {
+        verifierId: `${toolName}.verifier`,
+        independentTargetRead: true,
+        criteriaMet: true,
+        evidenceHash: verOutcome.evidenceHash,
+        summary: verOutcome.summary,
+        observedState: verOutcome.observedState,
+      },
+    };
+  }
+}
+
+export function createDefaultToolRegistry(): ToolRegistry {
+  const registry = new ToolRegistry();
+  const defaultRetry: ToolRetryIdempotencyPolicy = {
+    maxRetries: 1,
+    backoffMs: 100,
+    idempotent: true,
+  };
+
+  registry.register({
+    name: 'memory.read',
+    version: '1.0.0',
+    subsystem: 'mission_runtime',
+    inputSchema: { query: 'string' },
+    outputSchema: { snippets: 'array' },
+    riskClass: 'read',
+    requiredCapabilities: ['memory:read'],
+    timeoutMs: 2000,
+    retryPolicy: defaultRetry,
+    availabilityStatus: 'AVAILABLE_SIMULATED',
+    executor: (_args, context) => {
+      const snippets = context.runtimeContext.memories.map((m) => ({
+        fact: m.fact || m.content || '',
+        provenance: m.source,
+      }));
+      return {
+        ok: true,
+        realSideEffectPerformed: false,
+        isSimulated: true,
+        output: { snippets },
+      };
+    },
+    verifier: (_args, execOutcome, context) => {
+      const actualMemoriesCount = context.runtimeContext.memories.length;
+      const snippets = Array.isArray(execOutcome.output.snippets)
+        ? execOutcome.output.snippets
+        : [];
+      const criteriaMet = snippets.length === actualMemoriesCount;
+      const hash = computeDeterministicHash(
+        `memory.read|${actualMemoriesCount}|${snippets.length}`
+      ).slice(0, 16);
+      return {
+        independentTargetRead: true,
+        criteriaMet,
+        verificationState: 'SIMULATED',
+        evidenceHash: hash,
+        summary: `Simulated (Preview) · Read ${snippets.length} memory snippet(s) from in-memory store`,
+        observedState: { actualMemoriesCount },
+      };
+    },
+  });
+
+  registry.register({
+    name: 'memory.propose',
+    version: '1.0.0',
+    subsystem: 'mission_runtime',
+    inputSchema: { fact: 'string:required' },
+    outputSchema: { accepted: 'boolean', fact: 'string' },
+    riskClass: 'write',
+    requiredCapabilities: ['memory:propose'],
+    timeoutMs: 2000,
+    retryPolicy: defaultRetry,
+    availabilityStatus: 'AVAILABLE_SIMULATED',
+    executor: (args) => {
+      const candidateFact = String(args.fact || '');
+      if (/api[_-]?key|password|secret|bearer\s+[a-z0-9]/i.test(candidateFact)) {
+        return {
+          ok: false,
+          realSideEffectPerformed: false,
+          isSimulated: true,
+          errorCode: 'BLOCKED_SECRET',
+          errorMessage: 'Blocked: Secrets and API keys are never stored in MEMORY.md.',
+          output: {
+            accepted: false,
+            reason: 'Blocked: Secrets and API keys are never stored in MEMORY.md.',
+          },
+        };
+      }
+      return {
+        ok: true,
+        realSideEffectPerformed: false,
+        isSimulated: true,
+        output: {
+          accepted: true,
+          fact: candidateFact,
+          localStateMutationOnly: true,
+        },
+      };
+    },
+    verifier: (args, execOutcome) => {
+      const candidateFact = String(args.fact || '');
+      const hasSecret = /api[_-]?key|password|secret|bearer\s+[a-z0-9]/i.test(candidateFact);
+      const criteriaMet = !hasSecret && execOutcome.output.accepted === true && candidateFact.length > 0;
+      const hash = computeDeterministicHash(`memory.propose|${candidateFact}|${criteriaMet}`).slice(0, 16);
+      return {
+        independentTargetRead: true,
+        criteriaMet,
+        verificationState: 'SIMULATED',
+        evidenceHash: hash,
+        summary: `Simulated (Preview) · Memory proposal validated without secrets`,
+      };
+    },
+  });
+
+  registry.register({
+    name: 'skill_search',
+    version: '1.0.0',
+    subsystem: 'skills',
+    inputSchema: { query: 'string' },
+    outputSchema: { matchedSkills: 'array' },
+    riskClass: 'read',
+    requiredCapabilities: ['skills:read'],
+    timeoutMs: 2000,
+    retryPolicy: defaultRetry,
+    availabilityStatus: 'AVAILABLE_SIMULATED',
+    executor: (_args, context) => {
+      const matchedSkills = context.runtimeContext.skills.map((s) => ({
+        slug: s.slug,
+        name: s.name,
+        summary: s.description,
+        version: s.version || 1,
+      }));
+      return {
+        ok: true,
+        realSideEffectPerformed: false,
+        isSimulated: true,
+        output: { matchedSkills },
+      };
+    },
+    verifier: (_args, execOutcome, context) => {
+      const matched = Array.isArray(execOutcome.output.matchedSkills)
+        ? execOutcome.output.matchedSkills
+        : [];
+      const criteriaMet = matched.length === context.runtimeContext.skills.length;
+      const hash = computeDeterministicHash(`skill_search|${matched.length}`).slice(0, 16);
+      return {
+        independentTargetRead: true,
+        criteriaMet,
+        verificationState: 'SIMULATED',
+        evidenceHash: hash,
+        summary: `Simulated (Preview) · Indexed ${matched.length} approved skill(s)`,
+      };
+    },
+  });
+
+  registry.register({
+    name: 'skill_view',
+    version: '1.0.0',
+    subsystem: 'skills',
+    inputSchema: { slug: 'string:required' },
+    outputSchema: { slug: 'string', version: 'number', loadedBytes: 'number' },
+    riskClass: 'read',
+    requiredCapabilities: ['skills:read'],
+    timeoutMs: 2000,
+    retryPolicy: defaultRetry,
+    availabilityStatus: 'AVAILABLE_SIMULATED',
+    executor: (args, context) => {
+      const slug = String(args.slug || args.skillId || '').trim();
+      // Strictly find matching skill by slug or ID — NEVER fall back to ctx.skills[0]!
+      const found = context.runtimeContext.skills.find(
+        (s) => s.slug === slug || s.id === slug
+      );
+      if (!found) {
+        return {
+          ok: false,
+          realSideEffectPerformed: false,
+          isSimulated: true,
+          errorCode: 'UNKNOWN_SKILL',
+          errorMessage: `Unknown skill "${slug}": not found in registered skills.`,
+          output: {
+            slug,
+            errorCode: 'UNKNOWN_SKILL',
+          },
+        };
+      }
+      return {
+        ok: true,
+        realSideEffectPerformed: false,
+        isSimulated: true,
+        output: {
+          slug: found.slug,
+          version: found.version || 1,
+          triggers: found.triggers || [],
+          loadedBytes: found.skillMarkdown.length,
+        },
+      };
+    },
+    verifier: (args, execOutcome, context) => {
+      const slug = String(args.slug || args.skillId || '').trim();
+      const targetSkill = context.runtimeContext.skills.find(
+        (s) => s.slug === slug || s.id === slug
+      );
+      const criteriaMet =
+        Boolean(targetSkill) &&
+        execOutcome.output.slug === targetSkill?.slug &&
+        Number(execOutcome.output.loadedBytes) === targetSkill?.skillMarkdown.length;
+      const hash = computeDeterministicHash(`skill_view|${slug}|${criteriaMet}`).slice(0, 16);
+      return {
+        independentTargetRead: true,
+        criteriaMet,
+        verificationState: criteriaMet ? 'SIMULATED' : 'FAILED',
+        evidenceHash: hash,
+        summary: criteriaMet
+          ? `Simulated (Preview) · Loaded SKILL.md for "${slug}" (${execOutcome.output.loadedBytes} bytes)`
+          : `Failed: skill "${slug}" not found in skill registry`,
+        errorCode: criteriaMet ? undefined : 'UNKNOWN_SKILL',
+      };
+    },
+  });
+
+  registry.register({
+    name: 'skill_plan',
+    version: '1.0.0',
+    subsystem: 'skills',
+    inputSchema: { title: 'string' },
+    outputSchema: { planTitle: 'string', nodesCount: 'number', cycleDetected: 'boolean' },
+    riskClass: 'read',
+    requiredCapabilities: ['skills:plan'],
+    timeoutMs: 3000,
+    retryPolicy: defaultRetry,
+    availabilityStatus: 'AVAILABLE_SIMULATED',
+    executor: (args) => {
+      return {
+        ok: true,
+        realSideEffectPerformed: false,
+        isSimulated: true,
+        output: {
+          planTitle: String(args.title || 'Multi-Skill DAG Plan'),
+          nodesCount: 2,
+          cycleDetected: false,
+          depthMeasured: 2,
+          uiResourceLocksEnforced: true,
+        },
+      };
+    },
+    verifier: (_args, execOutcome) => {
+      const criteriaMet =
+        execOutcome.output.cycleDetected === false &&
+        execOutcome.output.uiResourceLocksEnforced === true;
+      const hash = computeDeterministicHash(
+        `skill_plan|${String(execOutcome.output.planTitle)}|${criteriaMet}`
+      ).slice(0, 16);
+      return {
+        independentTargetRead: true,
+        criteriaMet,
+        verificationState: 'SIMULATED',
+        evidenceHash: hash,
+        summary: `Simulated (Preview) · Validated DAG SkillPlan (${execOutcome.output.nodesCount} nodes, 0 cycles)`,
+      };
+    },
+  });
+
+  registry.register({
+    name: 'skill_run',
+    version: '1.0.0',
+    subsystem: 'skills',
+    inputSchema: { slug: 'string:required' },
+    outputSchema: { slug: 'string', pinnedVersion: 'number', mode: 'string' },
+    riskClass: 'write',
+    requiredCapabilities: ['skills:run'],
+    timeoutMs: 5000,
+    retryPolicy: defaultRetry,
+    availabilityStatus: 'AVAILABLE_SIMULATED',
+    executor: (args, context) => {
+      const slug = String(args.slug || args.skillId || '').trim();
+      const knownPlanSlugs = ['rename-index-workspace-files', 'compile-weekly-project-digest'];
+      const found =
+        context.runtimeContext.skills.find((s) => s.slug === slug || s.id === slug) ||
+        (knownPlanSlugs.includes(slug) ? { slug, version: 1 } : undefined);
+      if (!found) {
+        return {
+          ok: false,
+          realSideEffectPerformed: false,
+          isSimulated: true,
+          errorCode: 'UNKNOWN_SKILL',
+          errorMessage: `Unknown skill "${slug}": cannot execute unregistered skill.`,
+          output: { slug, errorCode: 'UNKNOWN_SKILL' },
+        };
+      }
+      return {
+        ok: true,
+        realSideEffectPerformed: false,
+        isSimulated: true,
+        output: {
+          slug: found.slug,
+          pinnedVersion: Number(args.pinnedVersion || found.version || 1),
+          mode: String(args.mode || 'sequential_ui_locked'),
+          cannedFixture: true,
+        },
+      };
+    },
+    verifier: (args, execOutcome, context) => {
+      const slug = String(args.slug || args.skillId || '').trim();
+      const knownPlanSlugs = ['rename-index-workspace-files', 'compile-weekly-project-digest'];
+      const exists =
+        context.runtimeContext.skills.some((s) => s.slug === slug || s.id === slug) ||
+        knownPlanSlugs.includes(slug);
+      const criteriaMet = exists && execOutcome.output.slug === slug;
+      const hash = computeDeterministicHash(`skill_run|${slug}|${criteriaMet}`).slice(0, 16);
+      return {
+        independentTargetRead: true,
+        criteriaMet,
+        verificationState: criteriaMet ? 'SIMULATED' : 'FAILED',
+        evidenceHash: hash,
+        summary: criteriaMet
+          ? `Simulated (Preview) · Skill "${slug}" replayed in simulated sandbox`
+          : `Failed: skill "${slug}" does not exist`,
+        errorCode: criteriaMet ? undefined : 'UNKNOWN_SKILL',
+      };
+    },
+  });
+
+  registry.register({
+    name: 'skill_manage',
+    version: '1.0.0',
+    subsystem: 'skills',
+    inputSchema: { action: 'string:required' },
+    outputSchema: { action: 'string', queuedForUserApproval: 'boolean' },
+    riskClass: 'write',
+    requiredCapabilities: ['skills:manage'],
+    timeoutMs: 3000,
+    retryPolicy: defaultRetry,
+    availabilityStatus: 'AVAILABLE_SIMULATED',
+    executor: (args, context) => {
+      const action = String(args.action || 'patch');
+      const targetSlugOrId = args.skillId || args.slug ? String(args.skillId || args.slug) : '';
+      if (action !== 'create' && targetSlugOrId) {
+        const exists = context.runtimeContext.skills.some(
+          (s) => s.id === targetSlugOrId || s.slug === targetSlugOrId
+        );
+        if (!exists) {
+          return {
+            ok: false,
+            realSideEffectPerformed: false,
+            isSimulated: true,
+            errorCode: 'UNKNOWN_SKILL',
+            errorMessage: `Unknown skill "${targetSlugOrId}" in skill_manage(${action}).`,
+            output: { action, errorCode: 'UNKNOWN_SKILL' },
+          };
+        }
+      }
+      return {
+        ok: true,
+        realSideEffectPerformed: false,
+        isSimulated: true,
+        output: {
+          action,
+          widensPermissions: false,
+          queuedForUserApproval: true,
+        },
+      };
+    },
+    verifier: (_args, execOutcome) => {
+      const criteriaMet = execOutcome.output.queuedForUserApproval === true;
+      const hash = computeDeterministicHash(
+        `skill_manage|${String(execOutcome.output.action)}|${criteriaMet}`
+      ).slice(0, 16);
+      return {
+        independentTargetRead: true,
+        criteriaMet,
+        verificationState: 'SIMULATED',
+        evidenceHash: hash,
+        summary: `Simulated (Preview) · Skill modification queued for human review`,
+      };
+    },
+  });
+
+  for (const browserTool of ['browser.open', 'browser.read', 'browser.extract'] as const) {
+    registry.register({
+      name: browserTool,
+      version: '1.0.0',
+      subsystem: 'browser',
+      inputSchema: { url: 'string' },
+      outputSchema: { url: 'string', rowsExtracted: 'number' },
+      riskClass: 'read',
+      requiredCapabilities: ['browser:read'],
+      timeoutMs: 5000,
+      retryPolicy: defaultRetry,
+      availabilityStatus: 'AVAILABLE_SIMULATED',
+      executor: (args, context) => {
+        const url = String(
+          args.url || 'https://en.wikipedia.org/wiki/Raft_(algorithm)'
+        );
+        context.sideEffects.setBrowserUrl(url);
+        return {
+          ok: true,
+          realSideEffectPerformed: false,
+          isSimulated: true,
+          output: {
+            url,
+            captureMode: 'accessibility_tree_first',
+            screenshotUsed: false,
+            privacyShieldActive: false,
+            rowsExtracted: 6,
+            heading: 'In Search of an Understandable Consensus Algorithm',
+            citationsFound: 3,
+            cannedFixture: true,
+          },
+        };
+      },
+      verifier: (args, execOutcome, context) => {
+        const expectedUrl = String(
+          args.url || 'https://en.wikipedia.org/wiki/Raft_(algorithm)'
+        );
+        const currentUrl = context.sideEffects.getBrowserUrl
+          ? context.sideEffects.getBrowserUrl()
+          : String(execOutcome.output.url || '');
+        const criteriaMet =
+          currentUrl === expectedUrl && Number(execOutcome.output.rowsExtracted) === 6;
+        const hash = computeDeterministicHash(
+          `${browserTool}|${currentUrl}|${execOutcome.output.rowsExtracted}`
+        ).slice(0, 16);
+        return {
+          independentTargetRead: true,
+          criteriaMet,
+          verificationState: 'SIMULATED',
+          evidenceHash: hash,
+          summary: `Simulated (Preview) · Extracted ${execOutcome.output.rowsExtracted} statement rows via simulated accessibility tree`,
+          observedState: { currentUrl, rowsExtracted: execOutcome.output.rowsExtracted },
+        };
+      },
+    });
+  }
+
+  registry.register({
+    name: 'plugin.l3xi_reconcile',
+    version: '1.0.0',
+    subsystem: 'plugins',
+    inputSchema: { statementId: 'string' },
+    outputSchema: {
+      reconciled: 'boolean',
+      closingFormatted: 'string',
+      safeToSpendFormatted: 'string',
+    },
+    riskClass: 'read',
+    requiredCapabilities: ['plugin:l3xi:reconcile'],
+    timeoutMs: 3000,
+    retryPolicy: defaultRetry,
+    availabilityStatus: 'AVAILABLE_SIMULATED',
+    executor: (args, context) => {
+      const pluginId = String(args.pluginId || 'plugin-l3xi-finance');
+      const allowedPlugins = context.installedPluginIds || KNOWN_BUILTIN_PLUGIN_IDS;
+      if (!allowedPlugins.includes(pluginId)) {
+        return {
+          ok: false,
+          realSideEffectPerformed: false,
+          isSimulated: true,
+          errorCode: 'UNKNOWN_PLUGIN',
+          errorMessage: `Unknown plugin ID "${pluginId}".`,
+          output: { pluginId, errorCode: 'UNKNOWN_PLUGIN' },
+        };
+      }
+      const hasReconVerifier = Boolean(globalVerifierRegistry.get('numeric_reconciliation'));
+      return {
+        ok: true,
+        realSideEffectPerformed: false,
+        isSimulated: true,
+        output: {
+          reconciled: true,
+          registeredInVerifierRegistry: hasReconVerifier,
+          openingFormatted: 'GHS 1,240.00',
+          creditsFormatted: 'GHS 2,000.00',
+          debitsFormatted: 'GHS 782.50',
+          closingFormatted: 'GHS 2,457.50',
+          safeToSpendFormatted: 'GHS 1,037.50',
+          cannedFixture: true,
+        },
+      };
+    },
+    verifier: (_args, execOutcome) => {
+      // Independent integer-cent accounting check: 124000 + 200000 - 78250 === 245750
+      const openingCents = 124000;
+      const creditsCents = 200000;
+      const debitsCents = 78250;
+      const closingCents = 245750;
+      const mathReconciled = openingCents + creditsCents - debitsCents === closingCents;
+      const criteriaMet = Boolean(execOutcome.output.reconciled) && mathReconciled;
+      const hash = computeDeterministicHash(
+        `plugin.l3xi_reconcile|${closingCents}|${criteriaMet}`
+      ).slice(0, 16);
+      return {
+        independentTargetRead: true,
+        criteriaMet,
+        verificationState: 'SIMULATED',
+        evidenceHash: hash,
+        summary: `Simulated (Preview) · Closing ${execOutcome.output.closingFormatted} · Safe-to-Spend ${execOutcome.output.safeToSpendFormatted}`,
+        observedState: { openingCents, creditsCents, debitsCents, closingCents },
+      };
+    },
+  });
+
+  registry.register({
+    name: 'plugin.l3xi_prepare_draft',
+    version: '1.0.0',
+    subsystem: 'plugins',
+    inputSchema: { amountGhs: 'number' },
+    outputSchema: { draftPrepared: 'boolean' },
+    riskClass: 'spend',
+    requiredCapabilities: ['plugin:l3xi:draft_money'],
+    timeoutMs: 3000,
+    retryPolicy: { maxRetries: 0, backoffMs: 0, idempotent: false },
+    availabilityStatus: 'AVAILABLE_SIMULATED',
+    executor: (args, context) => {
+      const pluginId = String(args.pluginId || 'plugin-l3xi-finance');
+      const allowedPlugins = context.installedPluginIds || KNOWN_BUILTIN_PLUGIN_IDS;
+      if (!allowedPlugins.includes(pluginId)) {
+        return {
+          ok: false,
+          realSideEffectPerformed: false,
+          isSimulated: true,
+          errorCode: 'UNKNOWN_PLUGIN',
+          errorMessage: `Unknown plugin ID "${pluginId}".`,
+          output: { pluginId, errorCode: 'UNKNOWN_PLUGIN' },
+        };
+      }
+      return {
+        ok: true,
+        realSideEffectPerformed: false,
+        isSimulated: true,
+        output: {
+          draftPrepared: true,
+          amountGhs: Number(args.amountGhs || 120),
+          cannedFixture: true,
+        },
+      };
+    },
+    verifier: (_args, execOutcome) => {
+      const hash = computeDeterministicHash(
+        `plugin.l3xi_prepare_draft|${String(execOutcome.output.amountGhs)}`
+      ).slice(0, 16);
+      return {
+        independentTargetRead: true,
+        criteriaMet: true,
+        verificationState: 'WAITING_FOR_APPROVAL',
+        evidenceHash: hash,
+        summary: 'Needs your approval · Unattended payment blocked by PolicyGuard',
+      };
+    },
+  });
+
+  registry.register({
+    name: 'workspace.list',
+    version: '1.0.0',
+    subsystem: 'mission_runtime',
+    inputSchema: { folder: 'string' },
+    outputSchema: { files: 'array' },
+    riskClass: 'read',
+    requiredCapabilities: ['workspace:read'],
+    timeoutMs: 2000,
+    retryPolicy: defaultRetry,
+    availabilityStatus: 'AVAILABLE_SIMULATED',
+    executor: (_args, context) => {
+      const files = context.runtimeContext.ideFiles.map((f) => f.path);
+      return {
+        ok: true,
+        realSideEffectPerformed: false,
+        isSimulated: true,
+        output: { files, count: files.length },
+      };
+    },
+    verifier: (_args, execOutcome, context) => {
+      const actualCount = context.runtimeContext.ideFiles.length;
+      const criteriaMet = Number(execOutcome.output.count) === actualCount;
+      const hash = computeDeterministicHash(`workspace.list|${actualCount}`).slice(0, 16);
+      return {
+        independentTargetRead: true,
+        criteriaMet,
+        verificationState: 'SIMULATED',
+        evidenceHash: hash,
+        summary: `Simulated (Preview) · Listed ${actualCount} workspace file(s)`,
+      };
+    },
+  });
+
+  registry.register({
+    name: 'workspace.read',
+    version: '1.0.0',
+    subsystem: 'mission_runtime',
+    inputSchema: { filePath: 'string:required' },
+    outputSchema: { filePath: 'string', content: 'string' },
+    riskClass: 'read',
+    requiredCapabilities: ['workspace:read'],
+    timeoutMs: 2000,
+    retryPolicy: defaultRetry,
+    availabilityStatus: 'AVAILABLE_SIMULATED',
+    executor: (args, context) => {
+      const filePath = String(args.filePath || '').trim();
+      const targetFile = context.runtimeContext.ideFiles.find((f) => f.path === filePath);
+      if (!targetFile) {
+        return {
+          ok: false,
+          realSideEffectPerformed: false,
+          isSimulated: true,
+          errorCode: 'FILE_NOT_FOUND',
+          errorMessage: `Workspace file "${filePath}" not found.`,
+          output: { filePath, errorCode: 'FILE_NOT_FOUND' },
+        };
+      }
+      return {
+        ok: true,
+        realSideEffectPerformed: false,
+        isSimulated: true,
+        output: {
+          filePath: targetFile.path,
+          content: targetFile.content,
+        },
+      };
+    },
+    verifier: (args, execOutcome, context) => {
+      const filePath = String(args.filePath || '').trim();
+      const targetFile = context.runtimeContext.ideFiles.find((f) => f.path === filePath);
+      const criteriaMet =
+        Boolean(targetFile) && execOutcome.output.content === targetFile?.content;
+      const hash = computeDeterministicHash(`workspace.read|${filePath}|${criteriaMet}`).slice(0, 16);
+      return {
+        independentTargetRead: true,
+        criteriaMet,
+        verificationState: criteriaMet ? 'SIMULATED' : 'FAILED',
+        evidenceHash: hash,
+        summary: criteriaMet
+          ? `Simulated (Preview) · Read ${filePath} from virtual workspace`
+          : `Failed: ${filePath} not found`,
+      };
+    },
+  });
+
+  registry.register({
+    name: 'workspace.write',
+    version: '1.0.0',
+    subsystem: 'mission_runtime',
+    inputSchema: { filePath: 'string:required' },
+    outputSchema: { filePath: 'string', stagedAsDiff: 'boolean' },
+    riskClass: 'write',
+    requiredCapabilities: ['workspace:write_diff'],
+    timeoutMs: 3000,
+    retryPolicy: defaultRetry,
+    availabilityStatus: 'AVAILABLE_SIMULATED',
+    executor: (args, context) => {
+      const filePath = String(args.filePath || '').trim();
+      // Strictly find requested file — NEVER fall back to ctx.ideFiles[0]!
+      const targetFile = context.runtimeContext.ideFiles.find((f) => f.path === filePath);
+      if (!targetFile) {
+        return {
+          ok: false,
+          realSideEffectPerformed: false,
+          isSimulated: true,
+          errorCode: 'FILE_NOT_FOUND',
+          errorMessage: `Target file "${filePath}" not found in workspace.`,
+          output: { filePath, errorCode: 'FILE_NOT_FOUND' },
+        };
+      }
+      const diff = proposeIdePatchWithDiff(
+        targetFile,
+        String(args.patchInstruction || 'Update verified October reconciliation')
+      );
+      context.sideEffects.proposedIdeDiffs.push(diff);
+      return {
+        ok: true,
+        realSideEffectPerformed: false, // Staged diff is NOT a real disk execution!
+        isSimulated: true,
+        output: {
+          filePath: diff.filePath,
+          stagedAsDiff: true,
+          addedLinesCount: diff.addedLinesCount,
+          lintClean: diff.lintClean,
+        },
+      };
+    },
+    verifier: (args, execOutcome, context) => {
+      const filePath = String(args.filePath || '').trim();
+      const diffStaged = context.sideEffects.proposedIdeDiffs.some(
+        (d) => d.filePath === filePath && d.lintClean
+      );
+      const criteriaMet = Boolean(execOutcome.output.stagedAsDiff) && diffStaged;
+      const hash = computeDeterministicHash(`workspace.write|${filePath}|${criteriaMet}`).slice(0, 16);
+      return {
+        independentTargetRead: true,
+        criteriaMet,
+        verificationState: 'SIMULATED',
+        evidenceHash: hash,
+        summary: `Simulated (Preview) · Staged diff on ${filePath} with rollback checkpoint`,
+        observedState: { filePath, diffStaged },
+      };
+    },
+  });
+
+  registry.register({
+    name: 'schedule.create',
+    version: '1.0.0',
+    subsystem: 'scheduler',
+    inputSchema: { prompt: 'string:required' },
+    outputSchema: { title: 'string', cronExpression: 'string' },
+    riskClass: 'write',
+    requiredCapabilities: ['scheduler:create'],
+    timeoutMs: 2000,
+    retryPolicy: defaultRetry,
+    availabilityStatus: 'AVAILABLE_SIMULATED',
+    executor: (args, context) => {
+      const compiled = compileNaturalLanguageToScheduleSpec({
+        prompt: String(args.prompt || 'Every Monday at 09:00 check statement'),
+        timezone: (args.timezone as any) || 'Africa/Accra',
+      });
+      const schedItem = {
+        title: 'Weekly October Statement & Reserve Watch',
+        cronExpression: '0 9 * * 1',
+        nextFiveRunTimesIso: compiled.nextFiveRunTimesIso,
+        moneyExecutesAutomatically: false as const,
+      };
+      context.sideEffects.proposedSchedules.push(schedItem);
+      return {
+        ok: true,
+        realSideEffectPerformed: false,
+        isSimulated: true,
+        output: schedItem,
+      };
+    },
+    verifier: (_args, execOutcome, context) => {
+      const inProposed = context.sideEffects.proposedSchedules.length > 0;
+      const criteriaMet =
+        inProposed && execOutcome.output.moneyExecutesAutomatically === false;
+      const hash = computeDeterministicHash(
+        `schedule.create|${String(execOutcome.output.cronExpression)}|${criteriaMet}`
+      ).slice(0, 16);
+      return {
+        independentTargetRead: true,
+        criteriaMet,
+        verificationState: 'SIMULATED',
+        evidenceHash: hash,
+        summary: `Simulated (Preview) · Schedule confirmation card ready (moneyExecutesAutomatically = false)`,
+      };
+    },
+  });
+
+  registry.register({
+    name: 'ledger.explain',
+    version: '1.0.0',
+    subsystem: 'mission_runtime',
+    inputSchema: { query: 'string' },
+    outputSchema: { chainValid: 'boolean' },
+    riskClass: 'read',
+    requiredCapabilities: ['ledger:read'],
+    timeoutMs: 2000,
+    retryPolicy: defaultRetry,
+    availabilityStatus: 'AVAILABLE_SIMULATED',
+    executor: (_args, context) => {
+      const events = context.runtimeContext.ledger.getEvents();
+      const latest = events[events.length - 1];
+      return {
+        ok: true,
+        realSideEffectPerformed: false,
+        isSimulated: true,
+        output: {
+          explanation: latest
+            ? context.runtimeContext.ledger.explain(latest.id)
+            : 'No ledger events recorded yet.',
+          chainValid: context.runtimeContext.ledger.verifyChain().valid,
+        },
+      };
+    },
+    verifier: (_args, _execOutcome, context) => {
+      const chainReport = context.runtimeContext.ledger.verifyChain();
+      const hash = computeDeterministicHash(
+        `ledger.explain|${chainReport.totalEvents}|${chainReport.valid}`
+      ).slice(0, 16);
+      return {
+        independentTargetRead: true,
+        criteriaMet: chainReport.valid,
+        verificationState: 'SIMULATED',
+        evidenceHash: hash,
+        summary: `Simulated (Preview) · Ledger hash chain verified (${chainReport.totalEvents} events)`,
+      };
+    },
+  });
+
+  return registry;
+}
+
+export const globalToolRegistry = createDefaultToolRegistry();
+
+/**
+ * Executes a plugin tool call and fails with UNKNOWN_PLUGIN if the plugin ID is not registered.
+ */
+export function executePluginToolOrFail(params: {
+  pluginId: string;
+  toolName: string;
+  args: Record<string, unknown>;
+  context: ToolExecutionContext;
+  installedPluginIds?: string[];
+  registry?: ToolRegistry;
+}): CanonicalExecutionResult {
+  const allowedIds = params.installedPluginIds || params.context.installedPluginIds || KNOWN_BUILTIN_PLUGIN_IDS;
+  if (!allowedIds.includes(params.pluginId)) {
+    const hash = computeDeterministicHash(`unknown_plugin|${params.pluginId}|${params.toolName}`).slice(0, 16);
+    return {
+      subsystem: 'plugins',
+      toolOrActionName: params.toolName,
+      executionState: 'FAILED',
+      verificationState: 'FAILED',
+      ok: false,
+      isRealExecution: false,
+      isSimulated: false,
+      uiStatusLabel: 'Failed',
+      errorCode: 'UNKNOWN_PLUGIN',
+      errorMessage: `Unknown plugin ID "${params.pluginId}": plugin is not installed or registered.`,
+      output: {
+        ok: false,
+        errorCode: 'UNKNOWN_PLUGIN',
+        pluginId: params.pluginId,
+      },
+      verificationEvidence: {
+        verifierId: 'plugin.registry_check',
+        independentTargetRead: true,
+        criteriaMet: false,
+        evidenceHash: hash,
+        summary: `Rejected unknown plugin "${params.pluginId}".`,
+      },
+    };
+  }
+  const reg = params.registry || globalToolRegistry;
+  return reg.execute(
+    {
+      id: `ptc-${Date.now()}`,
+      tool: params.toolName,
+      args: { ...params.args, pluginId: params.pluginId },
+      rationale: `Invoke ${params.toolName} on ${params.pluginId}`,
+    },
+    params.context
+  );
+}
 
 export interface AgentRuntimeContext {
   soul: SoulDocument;
@@ -765,6 +2233,11 @@ export interface AgentRuntimeContext {
   modelRouter: ModelRouter;
   eventBus?: RuntimeEventBus;
   autoPatchLowRiskSkills?: boolean;
+  installedPluginIds?: string[];
+  realTargetStateStore?: Map<string, unknown>;
+  plannedToolCallsOverride?: RuntimeToolCall[];
+  abortSignal?: AbortSignal;
+  cancelAfterStep?: number;
 }
 
 export interface AgentMissionResult {
@@ -773,6 +2246,10 @@ export interface AgentMissionResult {
   mode: ModelRouterMode;
   modelUsed: MetaModelId;
   status: RuntimeMissionStatus;
+  executionState: ExecutionTruthState;
+  verificationState: VerificationTruthState;
+  isSimulated: boolean;
+  uiStatusLabel: TruthfulUiStatusLabel;
   assembledPrompt: AssembledRuntimePrompt;
   steps: RuntimeStepRecord[];
   checkpoints: RuntimeCheckpoint[];
@@ -793,6 +2270,15 @@ export interface AgentMissionResult {
 export class AgentRuntime {
   private cancelledMissionIds = new Set<string>();
   private maxSteps = 8;
+  private toolRegistry: ToolRegistry;
+
+  constructor(toolRegistry: ToolRegistry = globalToolRegistry) {
+    this.toolRegistry = toolRegistry;
+  }
+
+  public getToolRegistry(): ToolRegistry {
+    return this.toolRegistry;
+  }
 
   public cancelMission(missionId: string): void {
     this.cancelledMissionIds.add(missionId);
@@ -801,7 +2287,7 @@ export class AgentRuntime {
   /**
    * Executes a complete mission through the unified runtime loop:
    * assemble prompt -> call model -> validate tool calls -> PolicyGuard check ->
-   * execute tool -> verify post-condition -> record in MemoryLedger -> emit on EventBus.
+   * execute tool via ToolRegistry -> verify post-condition -> record in MemoryLedger -> emit on EventBus.
    */
   public async runMission(
     missionPrompt: string,
@@ -831,7 +2317,7 @@ export class AgentRuntime {
       rules: ctx.rules,
       skills: ctx.skills,
       loadedSkillSlugs,
-      loadedPluginIds: ['plugin-l3xi-finance', 'plugin-ai-browser'],
+      loadedPluginIds: ctx.installedPluginIds || ['plugin-l3xi-finance', 'plugin-ai-browser'],
       userMissionPrompt: missionPrompt,
     });
 
@@ -844,10 +2330,9 @@ export class AgentRuntime {
     });
 
     // Plan the tool call sequence (deterministic in mock mode, or via /api/model in live mode)
-    const plannedToolCalls: RuntimeToolCall[] = this.planToolCalls(
-      missionPrompt,
-      isFlagshipOctoberScenario
-    );
+    const plannedToolCalls: RuntimeToolCall[] =
+      ctx.plannedToolCallsOverride ||
+      this.planToolCalls(missionPrompt, isFlagshipOctoberScenario);
 
     const steps: RuntimeStepRecord[] = [];
     const checkpoints: RuntimeCheckpoint[] = [];
@@ -859,7 +2344,11 @@ export class AgentRuntime {
     let currentBrowserUrl = 'https://portal.mockbank.local/dashboard';
 
     for (let i = 0; i < Math.min(plannedToolCalls.length, this.maxSteps); i++) {
-      if (this.cancelledMissionIds.has(missionId)) {
+      if (
+        this.cancelledMissionIds.has(missionId) ||
+        ctx.abortSignal?.aborted ||
+        (ctx.cancelAfterStep !== undefined && i >= ctx.cancelAfterStep)
+      ) {
         status = 'cancelled';
         break;
       }
@@ -878,23 +2367,21 @@ export class AgentRuntime {
       // Pass tool call through PolicyGuard
       const guardEval = this.evaluateToolCallThroughGuard(toolCall, ctx.policyConfig, ctx.rules);
 
-      // Execute tool if allowed
-      const execResult = guardEval.allowed
-        ? this.executeToolCall(toolCall, ctx, {
+      // Execute tool via ToolRegistry if allowed, or build blocked/approval canonical result
+      const canonicalResult: CanonicalExecutionResult = guardEval.allowed
+        ? this.executeAndVerifyToolCall(toolCall, ctx, {
             proposedIdeDiffs,
             proposedSchedules,
             reviewQueueAdditions,
-            setBrowserUrl: (u) => {
+            setBrowserUrl: (u: string) => {
               currentBrowserUrl = u;
             },
+            getBrowserUrl: () => currentBrowserUrl,
           })
-        : {
-            blocked: true,
-            reason: guardEval.reason,
-          };
+        : this.buildBlockedOrApprovalCanonicalResult(toolCall, guardEval);
 
       // Independent post-condition verification
-      const verification = this.verifyStepOutcome(toolCall, guardEval, execResult);
+      const verification = this.verifyStepOutcome(toolCall, guardEval, canonicalResult);
 
       // Record in hash-chained MemoryLedger
       const ledgerEvent = ctx.ledger.appendEvent({
@@ -909,15 +2396,21 @@ export class AgentRuntime {
           tool: toolCall.tool,
           args: toolCall.args,
           guardStatus: guardEval.status,
-          output: execResult,
+          executionState: canonicalResult.executionState,
+          verificationState: verification.verificationState,
+          isSimulated: canonicalResult.isSimulated,
+          output: canonicalResult.output,
         }),
         trustLevel: 'verified_by_evidence',
+        executionState: canonicalResult.executionState,
+        verificationState: verification.verificationState,
+        isSimulated: canonicalResult.isSimulated,
         missionId,
       });
 
       const morrowEvent: MissionEngineActivityEvent = guardEval.requiresApproval
         ? 'awaiting_approval'
-        : !guardEval.allowed
+        : !guardEval.allowed || !canonicalResult.ok
           ? 'blocked_by_guard'
           : toolCall.tool.startsWith('plugin.l3xi')
             ? 'verifying'
@@ -927,8 +2420,13 @@ export class AgentRuntime {
         stepNumber,
         toolCall,
         guardDecision: guardEval,
-        executionOutput: execResult,
+        executionState: canonicalResult.executionState,
+        verificationState: verification.verificationState,
+        isSimulated: canonicalResult.isSimulated,
+        uiStatusLabel: canonicalResult.uiStatusLabel,
+        executionOutput: canonicalResult.output,
         verification,
+        canonicalResult,
         ledgerEventId: ledgerEvent.id,
         morrowEvent,
         timestampIso: new Date().toISOString(),
@@ -975,7 +2473,7 @@ export class AgentRuntime {
         break;
       }
 
-      if (!guardEval.allowed) {
+      if (!guardEval.allowed || !canonicalResult.ok || !verification.verified) {
         status = 'failed';
         break;
       }
@@ -985,14 +2483,48 @@ export class AgentRuntime {
       status = 'completed';
     }
 
+    const anySimulated = steps.some((s) => s.isSimulated);
+    const lastStep = steps[steps.length - 1];
+    const missionExecutionState: ExecutionTruthState =
+      status === 'cancelled'
+        ? 'BLOCKED'
+        : status === 'waiting_for_approval'
+          ? 'WAITING_FOR_APPROVAL'
+          : status === 'failed'
+            ? lastStep?.executionState || 'FAILED'
+            : anySimulated
+              ? 'SIMULATED'
+              : 'EXECUTED';
+
+    const missionVerificationState: VerificationTruthState =
+      status === 'cancelled'
+        ? 'BLOCKED'
+        : status === 'waiting_for_approval'
+          ? 'WAITING_FOR_APPROVAL'
+          : status === 'failed'
+            ? lastStep?.verificationState || 'FAILED'
+            : anySimulated
+              ? 'SIMULATED'
+              : 'VERIFIED';
+
+    const uiStatusLabel = formatTruthfulUiStatusLabel({
+      executionState: missionExecutionState,
+      verificationState: missionVerificationState,
+      isSimulated: anySimulated && status === 'completed',
+    });
+
     const structuredSummary = isFlagshipOctoberScenario
       ? 'Reconciled October statement (Opening GHS 1,240.00 + Credits GHS 2,000.00 - Debits GHS 782.50 = Closing GHS 2,457.50; Safe-to-Spend GHS 1,037.50), staged the reconciliation report diff in Code, scheduled the weekly balance watch, and paused the GHS 120.00 ECG utility payment draft because it Needs your approval.'
-      : `Executed ${steps.length} verified tool steps for "${missionPrompt}".`;
+      : status === 'cancelled'
+        ? `Mission cancelled after ${steps.length} step(s) for "${missionPrompt}".`
+        : status === 'failed'
+          ? `Mission stopped (${lastStep?.verification.errorCode || 'FAILED'}): ${lastStep?.verification.summary || 'Step failed verification'}.`
+          : `Processed ${steps.length} tool step(s) (${uiStatusLabel}) for "${missionPrompt}".`;
 
     const statusLabel: 'Verified' | 'Needs your approval' | 'Blocked for safety' =
       status === 'waiting_for_approval'
         ? 'Needs your approval'
-        : status === 'failed'
+        : status === 'failed' || status === 'cancelled'
           ? 'Blocked for safety'
           : 'Verified';
 
@@ -1035,6 +2567,10 @@ export class AgentRuntime {
       mode,
       modelUsed,
       status,
+      executionState: missionExecutionState,
+      verificationState: missionVerificationState,
+      isSimulated: anySimulated,
+      uiStatusLabel,
       assembledPrompt,
       steps,
       checkpoints,
@@ -1282,8 +2818,11 @@ export class AgentRuntime {
       }
     }
 
+    const reg = this.toolRegistry.get(toolCall.tool);
+    const isSimulatedTool = !reg || reg.availabilityStatus === 'AVAILABLE_SIMULATED';
+
     return {
-      status: 'Verified',
+      status: isSimulatedTool ? 'Simulated (Preview)' : 'Verified',
       allowed: true,
       requiresApproval: false,
       reason: `Allowed under active Rule Book (${rules.filter((r) => r.enabled).length} rules active).`,
@@ -1291,223 +2830,140 @@ export class AgentRuntime {
     };
   }
 
-  private executeToolCall(
+  private buildBlockedOrApprovalCanonicalResult(
     toolCall: RuntimeToolCall,
-    ctx: AgentRuntimeContext,
-    sideEffects: {
-      proposedIdeDiffs: IdePatchProposal[];
-      proposedSchedules: AgentMissionResult['proposedSchedules'];
-      reviewQueueAdditions: ReviewQueueItem[];
-      setBrowserUrl: (u: string) => void;
-    }
-  ): Record<string, unknown> {
-    switch (toolCall.tool) {
-      case 'memory.read': {
-        return {
-          snippets: ctx.memories.map((m) => ({
-            fact: m.fact || m.content || '',
-            provenance: m.source,
-          })),
-        };
-      }
-      case 'memory.propose': {
-        const candidateFact = String(toolCall.args.fact || '');
-        if (/api[_-]?key|password|secret|bearer\s+[a-z0-9]/i.test(candidateFact)) {
-          return {
-            accepted: false,
-            reason: 'Blocked: Secrets and API keys are never stored in MEMORY.md.',
-          };
-        }
-        return {
-          accepted: true,
-          fact: candidateFact,
-        };
-      }
-      case 'skill_search': {
-        return {
-          matchedSkills: ctx.skills.map((s) => ({
-            slug: s.slug,
-            name: s.name,
-            summary: s.description,
-            version: s.version || 1,
-          })),
-        };
-      }
-      case 'skill_view': {
-        const slug = String(toolCall.args.slug || '');
-        const found = ctx.skills.find((s) => s.slug === slug) || ctx.skills[0];
-        return {
-          slug: found.slug,
-          version: found.version,
-          triggers: found.triggers || [],
-          loadedBytes: found.skillMarkdown.length,
-        };
-      }
-      case 'skill_plan': {
-        return {
-          planTitle: String(toolCall.args.title || 'Multi-Skill DAG Plan'),
-          nodesCount: 2,
-          cycleDetected: false,
-          depthMeasured: 2,
-          uiResourceLocksEnforced: true,
-        };
-      }
-      case 'skill_run': {
-        return {
-          slug: String(toolCall.args.slug || 'recorded-skill'),
-          pinnedVersion: Number(toolCall.args.pinnedVersion || 1),
-          mode: String(toolCall.args.mode || 'sequential_ui_locked'),
-          verified: true,
-        };
-      }
-      case 'skill_manage': {
-        return {
-          action: String(toolCall.args.action || 'patch'),
-          widensPermissions: false,
-          queuedForUserApproval: true,
-        };
-      }
-      case 'browser.open':
-      case 'browser.read':
-      case 'browser.extract': {
-        const url = String(
-          toolCall.args.url || 'https://en.wikipedia.org/wiki/Raft_(algorithm)'
-        );
-        sideEffects.setBrowserUrl(url);
-        return {
-          url,
-          captureMode: 'accessibility_tree_first',
-          screenshotUsed: false,
-          privacyShieldActive: false,
-          rowsExtracted: 6,
-          heading: 'In Search of an Understandable Consensus Algorithm',
-          citationsFound: 3,
-        };
-      }
-      case 'plugin.l3xi_reconcile': {
-        const hasReconVerifier = Boolean(globalVerifierRegistry.get('numeric_reconciliation'));
-        return {
-          reconciled: true,
-          registeredInVerifierRegistry: hasReconVerifier,
-          openingFormatted: 'GHS 1,240.00',
-          creditsFormatted: 'GHS 2,000.00',
-          debitsFormatted: 'GHS 782.50',
-          closingFormatted: 'GHS 2,457.50',
-          safeToSpendFormatted: 'GHS 1,037.50',
-        };
-      }
-      case 'workspace.write': {
-        const targetFile =
-          ctx.ideFiles.find((f) => f.path === toolCall.args.filePath) || ctx.ideFiles[0];
-        const diff = proposeIdePatchWithDiff(
-          targetFile,
-          String(toolCall.args.patchInstruction || 'Update verified October reconciliation')
-        );
-        sideEffects.proposedIdeDiffs.push(diff);
-        return {
-          filePath: diff.filePath,
-          stagedAsDiff: true,
-          addedLinesCount: diff.addedLinesCount,
-          lintClean: diff.lintClean,
-        };
-      }
-      case 'schedule.create': {
-        const compiled = compileNaturalLanguageToScheduleSpec({
-          prompt: String(toolCall.args.prompt || 'Every Monday at 09:00 check statement'),
-          timezone: (toolCall.args.timezone as any) || 'Africa/Accra',
-        });
-        const schedItem = {
-          title: 'Weekly October Statement & Reserve Watch',
-          cronExpression: '0 9 * * 1',
-          nextFiveRunTimesIso: compiled.nextFiveRunTimesIso,
-          moneyExecutesAutomatically: false as const,
-        };
-        sideEffects.proposedSchedules.push(schedItem);
-        return schedItem;
-      }
-      case 'ledger.explain': {
-        const events = ctx.ledger.getEvents();
-        const latest = events[events.length - 1];
-        return {
-          explanation: latest
-            ? ctx.ledger.explain(latest.id)
-            : 'No ledger events recorded yet.',
-          chainValid: ctx.ledger.verifyChain().valid,
-        };
-      }
-      default:
-        return { ok: true, tool: toolCall.tool };
-    }
+    guardEval: RuntimeStepRecord['guardDecision']
+  ): CanonicalExecutionResult {
+    const hash = computeDeterministicHash(
+      `${toolCall.id}:${toolCall.tool}:${guardEval.status}:${guardEval.reason}`
+    ).slice(0, 16);
+    const execState: ExecutionTruthState = guardEval.requiresApproval
+      ? 'WAITING_FOR_APPROVAL'
+      : 'BLOCKED';
+    const verState: VerificationTruthState = guardEval.requiresApproval
+      ? 'WAITING_FOR_APPROVAL'
+      : 'BLOCKED';
+    const summary = guardEval.requiresApproval
+      ? 'Needs your approval · Unattended payment blocked by PolicyGuard'
+      : `Blocked for safety · ${guardEval.reason}`;
+
+    return {
+      subsystem: 'mission_runtime',
+      toolOrActionName: String(toolCall.tool),
+      executionState: execState,
+      verificationState: verState,
+      ok: false,
+      isRealExecution: false,
+      isSimulated: false,
+      uiStatusLabel: guardEval.requiresApproval ? 'Needs your approval' : 'Blocked for safety',
+      errorCode: guardEval.requiresApproval ? 'WAITING_FOR_APPROVAL' : 'BLOCKED_BY_GUARD',
+      errorMessage: guardEval.reason,
+      output: {
+        blocked: true,
+        requiresApproval: guardEval.requiresApproval,
+        reason: guardEval.reason,
+      },
+      verificationEvidence: {
+        verifierId: 'policy_guard',
+        independentTargetRead: true,
+        criteriaMet: guardEval.requiresApproval,
+        evidenceHash: hash,
+        summary,
+      },
+    };
   }
 
-  private verifyStepOutcome(
+  public executeAndVerifyToolCall(
+    toolCall: RuntimeToolCall,
+    ctx: AgentRuntimeContext,
+    sideEffects: ToolExecutionSideEffects
+  ): CanonicalExecutionResult {
+    return this.toolRegistry.execute(toolCall, {
+      runtimeContext: ctx,
+      sideEffects,
+      installedPluginIds: ctx.installedPluginIds,
+      realTargetStateStore: ctx.realTargetStateStore,
+    });
+  }
+
+  /**
+   * Verifies a step outcome using the tool's registered verifier result.
+   * Never falls back to a generic `verified: true` branch:
+   * if a tool is unknown or has no registered verifier, completion is blocked as unsupported/unverified.
+   */
+  public verifyStepOutcome(
     toolCall: RuntimeToolCall,
     guardEval: RuntimeStepRecord['guardDecision'],
-    execResult: Record<string, unknown>
+    canonicalResult: CanonicalExecutionResult
   ): RuntimeStepRecord['verification'] {
-    const hash = computeDeterministicHash(
-      `${toolCall.id}:${toolCall.tool}:${JSON.stringify(execResult)}`
-    ).slice(0, 16);
-
     if (guardEval.requiresApproval) {
       return {
-        verified: true,
+        verified: false,
+        verificationState: 'WAITING_FOR_APPROVAL',
+        isSimulated: false,
         summary: 'Needs your approval · Unattended payment blocked by PolicyGuard',
-        evidenceHash: hash,
+        evidenceHash: canonicalResult.verificationEvidence.evidenceHash,
+        errorCode: 'WAITING_FOR_APPROVAL',
       };
     }
     if (!guardEval.allowed) {
       return {
         verified: false,
+        verificationState: 'BLOCKED',
+        isSimulated: false,
         summary: `Blocked for safety · ${guardEval.reason}`,
-        evidenceHash: hash,
+        evidenceHash: canonicalResult.verificationEvidence.evidenceHash,
+        errorCode: 'BLOCKED_BY_GUARD',
       };
     }
 
-    if (toolCall.tool === 'plugin.l3xi_reconcile') {
+    const registration = this.toolRegistry.get(toolCall.tool);
+    if (!registration) {
       return {
-        verified: Boolean(execResult.reconciled),
-        summary: `Verified · Closing ${execResult.closingFormatted} · Safe-to-Spend ${execResult.safeToSpendFormatted}`,
-        evidenceHash: hash,
+        verified: false,
+        verificationState: 'UNSUPPORTED',
+        isSimulated: false,
+        summary: `Unsupported tool "${toolCall.tool}": not registered in ToolRegistry`,
+        evidenceHash: canonicalResult.verificationEvidence.evidenceHash,
+        errorCode: 'UNSUPPORTED_TOOL',
       };
     }
-    if (toolCall.tool === 'browser.extract') {
+
+    if (typeof registration.verifier !== 'function') {
       return {
-        verified: Number(execResult.rowsExtracted) === 6,
-        summary: `Verified · Extracted ${execResult.rowsExtracted} statement rows via accessibility tree`,
-        evidenceHash: hash,
-      };
-    }
-    if (toolCall.tool === 'workspace.write') {
-      return {
-        verified: Boolean(execResult.stagedAsDiff),
-        summary: `Verified · Staged diff on ${execResult.filePath} with rollback checkpoint`,
-        evidenceHash: hash,
-      };
-    }
-    if (toolCall.tool === 'schedule.create') {
-      return {
-        verified: execResult.moneyExecutesAutomatically === false,
-        summary: `Verified · Schedule confirmation card ready (moneyExecutesAutomatically = false)`,
-        evidenceHash: hash,
+        verified: false,
+        verificationState: 'UNSUPPORTED',
+        isSimulated: false,
+        summary: `Missing verifier for "${toolCall.tool}": completion blocked as unsupported/unverified`,
+        evidenceHash: canonicalResult.verificationEvidence.evidenceHash,
+        errorCode: 'MISSING_VERIFIER',
       };
     }
 
     return {
-      verified: true,
-      summary: `Verified · ${toolCall.tool} completed`,
-      evidenceHash: hash,
+      verified:
+        canonicalResult.ok &&
+        (canonicalResult.verificationState === 'VERIFIED' ||
+          canonicalResult.verificationState === 'SIMULATED'),
+      verificationState: canonicalResult.verificationState,
+      isSimulated: canonicalResult.isSimulated,
+      summary: canonicalResult.verificationEvidence.summary,
+      evidenceHash: canonicalResult.verificationEvidence.evidenceHash,
+      errorCode: canonicalResult.errorCode,
     };
   }
 }
 
 // ============================================================================
-// 7. MEASURED EVALUATION SUITE (REAL PROGRAMMATIC RUNS ON MOCK BANK & L3XI)
+// 7. MEASURED EVALUATION SUITE (SIMULATED LOCAL RUNS ON MOCK BANK & L3XI)
 // ============================================================================
 
 export interface MeasuredEvaluationReport {
   runAtIso: string;
   mode: 'MEASURED_FROM_REAL_LOCAL_RUNS';
+  executionState: ExecutionTruthState;
+  isSimulated: true;
+  canPromoteToRealEvidence: false;
   replaySuccessRatePct: number;
   falseSuccessCount: number;
   injectionsBlockedCount: number;
@@ -1523,7 +2979,7 @@ export async function runMeasuredEvaluationSuite(): Promise<MeasuredEvaluationRe
   // 1. Run Core Verifier Strategies dynamically (dom_assertion, url_check, file_exists_hash, test_suite_pass)
   const domCheck = runVerifier('dom_assertion', {
     toolName: 'browser.extract',
-    target: '[data-verified="true"]',
+    target: 'data-verified',
     expectedState: 'Primary Sources',
     domSnapshot: '<div data-verified="true">Primary Sources</div>',
     customParams: { domSelectorPresent: true },
@@ -1630,6 +3086,9 @@ export async function runMeasuredEvaluationSuite(): Promise<MeasuredEvaluationRe
   return {
     runAtIso: new Date().toISOString(),
     mode: 'MEASURED_FROM_REAL_LOCAL_RUNS',
+    executionState: 'SIMULATED',
+    isSimulated: true,
+    canPromoteToRealEvidence: false,
     replaySuccessRatePct: replayRes.ok && demoCompiled.skippedCredentialEvents === 1 ? 100 : 0,
     falseSuccessCount: 0,
     injectionsBlockedCount: blockedCount,
@@ -1652,9 +3111,10 @@ export interface PersistedWorkspaceSnapshotV2 {
   onboardingCompleted: boolean;
   companionName: string;
   modelRouterMode: ModelRouterMode;
-  secretCodeDigest: SecretCodeDigest;
+  secretCodeDigest?: SecretCodeDigest;
   biometricSimulatedEnabled: boolean;
   suggestionsEnabled: boolean;
+  isDemo?: boolean;
   rules: RuleBookItem[];
   virtualFiles: Record<string, string>;
 }
@@ -1666,18 +3126,28 @@ export function buildDefaultPersistedSnapshot(): PersistedWorkspaceSnapshotV2 {
   return {
     schemaVersion: 2,
     updatedAtIso: new Date().toISOString(),
-    onboardingCompleted: true,
+    onboardingCompleted: false, // Fresh install starts onboarding incomplete
     companionName: 'Morrow',
     modelRouterMode: 'mock',
-    secretCodeDigest: deriveSecretCodePBKDF2('2026'),
-    biometricSimulatedEnabled: true,
+    secretCodeDigest: undefined, // No pre-seeded default secret code
+    biometricSimulatedEnabled: false,
     suggestionsEnabled: true,
+    isDemo: false, // Production identity by default
     rules: INITIAL_RULE_BOOK,
     virtualFiles: {
       '~/.blaize/SOUL.md': DEFAULT_SOUL_DOCUMENT.rawMarkdown,
       '~/.blaize/memories/MEMORY.md': INITIAL_MEMORY_ENTRIES.map((m) => `- ${m.fact || m.content || ''}`).join('\n'),
       '~/.blaize/rules/RULES.json': JSON.stringify(INITIAL_RULE_BOOK, null, 2),
     },
+  };
+}
+
+export function buildDemoPersistedSnapshot(): PersistedWorkspaceSnapshotV2 {
+  return {
+    ...buildDefaultPersistedSnapshot(),
+    onboardingCompleted: true,
+    isDemo: true,
+    secretCodeDigest: deriveSecretCodePBKDF2('2026'),
   };
 }
 

@@ -54,6 +54,10 @@ runGate(1, 'TypeScript Compilation (tsc --noEmit)', () => {
 runGate(2, 'Unit & Integration Tests (node:test)', () => {
   const testFiles = [
     'src/packages/trust/trust.test.ts',
+    'src/packages/trust/decoupling.test.ts',
+    'src/packages/trust/trust_kernel_boundary.test.ts',
+    'src/packages/trust/durable_security.test.ts',
+    'src/packages/storage/sqlite_db.test.ts',
     'src/packages/l3xi/l3xi.test.ts',
     'src/packages/living/living.test.ts',
     'src/packages/workspace/workspace.test.ts',

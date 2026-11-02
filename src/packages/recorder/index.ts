@@ -990,11 +990,14 @@ export interface DraftRecordedSkill {
 const RISK_ORDER: Record<GenericRiskClass, number> = {
   read: 1,
   write: 2,
+  scoped_write: 2,
   external_send: 3,
   destructive: 4,
   spend: 5,
   credential: 6,
   system: 7,
+  system_privilege: 7,
+  software_installation: 8,
 };
 
 export function computeMaxRiskClass(risks: GenericRiskClass[]): GenericRiskClass {
@@ -1807,6 +1810,25 @@ export function validateSkillPlanDag(
     };
   }
 
+  const unknownSkillIds: string[] = [];
+  for (const node of plan.nodes) {
+    if (!skillsById.has(node.skillId)) {
+      unknownSkillIds.push(node.skillId);
+    }
+  }
+  if (unknownSkillIds.length > 0) {
+    return {
+      valid: false,
+      hasCycle: false,
+      exceedsDepthLimit: false,
+      exceedsStepCap: false,
+      unapprovedSkillIds: unknownSkillIds,
+      topologicalLayers: [],
+      maxDepthMeasured: 0,
+      error: `UNKNOWN_SKILL: Skill ID(s) not found in skill registry: ${unknownSkillIds.join(', ')}.`,
+    };
+  }
+
   const unapprovedSkillIds: string[] = [];
   if (requireApprovedSkills) {
     for (const node of plan.nodes) {
@@ -2082,6 +2104,9 @@ export async function executeMultiSkillPlan(params: {
         outputData,
       }),
       trustLevel: 'verified_by_evidence',
+      executionState: finalStatus === 'failed_stopped' ? 'FAILED' : 'SIMULATED',
+      verificationState: finalStatus === 'failed_stopped' ? 'FAILED' : 'SIMULATED',
+      isSimulated: true,
       missionId: plan.planId,
     });
 
@@ -2318,8 +2343,11 @@ export function buildDefaultDomainNeutralRecordedSkills(): DraftRecordedSkill[] 
 }
 
 export function buildDemoMultiSkillPlan(skills: DraftRecordedSkill[]): SkillPlan {
+  if (!Array.isArray(skills) || skills.length < 2 || !skills[0] || !skills[1]) {
+    throw new Error('UNKNOWN_SKILL: buildDemoMultiSkillPlan requires at least 2 registered skills.');
+  }
   const s1 = skills[0];
-  const s2 = skills[1] || skills[0];
+  const s2 = skills[1];
 
   const nodes: SkillPlanNode[] = [
     {

@@ -23,6 +23,7 @@ import type {
   PCOperatorActionRequest,
   PCOperatorActionResult
 } from './ipc-contracts.js';
+import { getGlobalDurableDb } from '../src/packages/storage/sqlite_db.js';
 
 let mainWindow: BrowserWindow | null = null;
 const isDev = process.env.NODE_ENV !== 'production';
@@ -192,12 +193,20 @@ export function registerIpcHandlers(): void {
     if (!status.isEncrypted) {
       return {
         success: false,
-        error: status.warning || 'Secure native safeStorage is unencrypted or unavailable.'
+        error: status.warning || 'Secure native safeStorage is unencrypted or unavailable. Plaintext fallback refused.'
       };
     }
     try {
       const buffer = safeStorage.encryptString(plaintext);
       encryptedSecrets.set(keyId, buffer);
+      try {
+        getGlobalDurableDb().setRecord('electron_safe_secrets', keyId, {
+          keyId,
+          bufferB64: buffer.toString('base64'),
+        });
+      } catch {
+        // In-memory cache continues
+      }
       return { success: true };
     } catch (err) {
       return { success: false, error: (err as Error).message };
@@ -205,7 +214,18 @@ export function registerIpcHandlers(): void {
   });
 
   ipcMain.handle('vault:decrypt-secret', (_event, { keyId }: { keyId: string }) => {
-    const buf = encryptedSecrets.get(keyId);
+    let buf = encryptedSecrets.get(keyId);
+    if (!buf) {
+      try {
+        const stored = getGlobalDurableDb().getRecord('electron_safe_secrets:' + keyId);
+        if (stored?.data?.bufferB64) {
+          buf = Buffer.from(stored.data.bufferB64, 'base64');
+          encryptedSecrets.set(keyId, buf);
+        }
+      } catch {
+        // Ignore
+      }
+    }
     if (!buf) {
       return { error: 'Secret not found in vault' };
     }
@@ -219,18 +239,46 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle('vault:delete-secret', (_event, { keyId }: { keyId: string }) => {
     const deleted = encryptedSecrets.delete(keyId);
+    try {
+      getGlobalDurableDb().deleteRecord('electron_safe_secrets:' + keyId);
+    } catch {
+      // Ignore
+    }
     return { success: deleted };
   });
 
-  // Storage & FTS5
+  // Storage & Real SQLite FTS5
   ipcMain.handle('storage:put-record', (_event, { collection, record }: { collection: string; record: StorageRecord }) => {
     dbRecords.set(`${collection}:${record.id}`, record);
     indexRecord(record);
+    try {
+      getGlobalDurableDb().setRecord(collection, record.id, record.data);
+    } catch {
+      // In-memory cache continues
+    }
     return { success: true };
   });
 
   ipcMain.handle('storage:get-record', (_event, { collection, id }: { collection: string; id: string }) => {
-    return dbRecords.get(`${collection}:${id}`) || null;
+    const mem = dbRecords.get(`${collection}:${id}`);
+    if (mem) return mem;
+    try {
+      const row = getGlobalDurableDb().getRecord(id);
+      if (row && row.collection === collection) {
+        const rec: StorageRecord = {
+          id: row.id,
+          collection: row.collection,
+          data: row.data,
+          createdAt: Date.parse(row.createdAt),
+          updatedAt: Date.parse(row.updatedAt),
+        };
+        dbRecords.set(`${collection}:${id}`, rec);
+        return rec;
+      }
+    } catch {
+      // Ignore
+    }
+    return null;
   });
 
   ipcMain.handle('storage:delete-record', (_event, { collection, id }: { collection: string; id: string }) => {
@@ -238,10 +286,29 @@ export function registerIpcHandlers(): void {
     const existed = dbRecords.delete(key);
     const idx = ftsIndex.findIndex(e => e.id === id);
     if (idx >= 0) ftsIndex.splice(idx, 1);
+    try {
+      getGlobalDurableDb().deleteRecord(id);
+    } catch {
+      // Ignore
+    }
     return { success: existed };
   });
 
   ipcMain.handle('storage:query-fts', (_event, { query, limit = 20 }: { query: string; limit?: number }): FtsSearchResult[] => {
+    try {
+      const results = getGlobalDurableDb().searchFts(query, undefined, limit);
+      if (results.length > 0) {
+        return results.map(r => ({
+          id: r.id,
+          collection: r.collection,
+          snippet: r.snippet || `Matched '${query}' in ${r.collection}`,
+          rank: r.rank,
+        }));
+      }
+    } catch {
+      // Fall back to in-memory tokenizer
+    }
+
     const queryTokens = Array.from(tokenize(query));
     if (queryTokens.length === 0) return [];
 
@@ -252,7 +319,6 @@ export function registerIpcHandlers(): void {
         if (entry.tokens.has(qt)) {
           score += 10;
         } else {
-          // partial match
           for (const tok of entry.tokens) {
             if (tok.includes(qt)) {
               score += 3;
@@ -263,7 +329,6 @@ export function registerIpcHandlers(): void {
       }
 
       if (score > 0) {
-        // extract snippet
         const idx = entry.content.toLowerCase().indexOf(queryTokens[0]);
         const start = Math.max(0, idx - 40);
         const snippet = entry.content.slice(start, start + 120);
@@ -287,13 +352,27 @@ export function registerIpcHandlers(): void {
       throw new Error(`Blob hash mismatch: expected ${hash}, computed ${computedHash}`);
     }
     blobStore.set(hash, { dataBase64, mimeType, size: buffer.length });
+    try {
+      getGlobalDurableDb().setBlob(hash, mimeType, dataBase64);
+    } catch {
+      // Ignore
+    }
     return { path: `blob://${hash}`, size: buffer.length };
   });
 
   ipcMain.handle('storage:read-blob', (_event, { hash }: { hash: string }) => {
     const entry = blobStore.get(hash);
-    if (!entry) return null;
-    return { dataBase64: entry.dataBase64, mimeType: entry.mimeType };
+    if (entry) return { dataBase64: entry.dataBase64, mimeType: entry.mimeType };
+    try {
+      const blob = getGlobalDurableDb().getBlob(hash);
+      if (blob) {
+        blobStore.set(hash, { dataBase64: blob.dataBase64, mimeType: blob.mimeType, size: blob.sizeBytes });
+        return { dataBase64: blob.dataBase64, mimeType: blob.mimeType };
+      }
+    } catch {
+      // Ignore
+    }
+    return null;
   });
 
   // PC Operator (Desktop control ladder)
