@@ -2410,3 +2410,6 @@ export function buildDemoMultiSkillPlan(skills: DraftRecordedSkill[]): SkillPlan
     totalEstimatedCostUsd: 0.00064,
   };
 }
+
+// Re-export real consented skill recorder with OS desktop driver integration
+export * from './consented_recorder';

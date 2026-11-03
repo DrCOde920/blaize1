@@ -31,6 +31,7 @@ import {
   derivePassphraseKeyScrypt,
   verifyTimingSafe,
   DEFAULT_SCRYPT_PARAMS,
+  wrapUntrustedData,
 } from '../trust';
 import {
   MissionEngineActivityEvent,
@@ -70,13 +71,37 @@ export { canPromoteRecordToReal, formatTruthfulUiStatusLabel };
 
 export type ModelRouterMode = 'mock' | 'live';
 export type MetaModelId = 'muse-spark-1.3' | 'muse-wonder-1.0';
+export type ModelTaskRole = 'loop_extraction' | 'planning_recovery';
+export type ModelRequestOutcome =
+  | 'succeeded'
+  | 'failed'
+  | 'timeout'
+  | 'rate_limited'
+  | 'cancelled'
+  | 'aborted'
+  | 'auth_error'
+  | 'upstream_error'
+  | 'invalid_request'
+  | 'malformed_tool_call'
+  | 'budget_exceeded'
+  | 'mock_simulated';
 
 export interface TokenUsageRecord {
+  requestId?: string;
+  provider?: 'Meta AI' | 'mock';
   model: string;
+  taskRole?: ModelTaskRole;
   inputTokens: number;
   outputTokens: number;
-  source: 'reported' | 'estimated' | 'mock_zero_cost';
+  reportedInputTokens?: number | null;
+  reportedOutputTokens?: number | null;
+  estimatedInputTokens?: number;
+  estimatedOutputTokens?: number;
+  source: 'reported' | 'provider_reported' | 'estimated' | 'mock_zero_cost';
   estimatedCostUsd: number;
+  latencyMs?: number;
+  outcome?: ModelRequestOutcome;
+  timestampIso?: string;
 }
 
 export type ToolCallName =
@@ -374,22 +399,198 @@ export function verifyAndRestyleWithPersona(params: {
 // 3. MODEL ROUTER (MOCK BY DEFAULT + LIVE META MODEL API VIA /api/model)
 // ============================================================================
 
+export type ModelErrorCode =
+  | 'AUTH_MISSING'
+  | 'AUTH_INVALID'
+  | 'RATE_LIMITED'
+  | 'TIMEOUT'
+  | 'ABORTED'
+  | 'UPSTREAM_ERROR'
+  | 'INVALID_REQUEST'
+  | 'PAYLOAD_TOO_LARGE'
+  | 'MALFORMED_TOOL_CALL'
+  | 'BUDGET_EXCEEDED';
+
+export interface ModelToolSchemaDeclaration {
+  type: 'function';
+  name: string;
+  description: string;
+  parameters: {
+    type: 'object';
+    properties: Record<string, { type: string; description: string }>;
+    required: string[];
+    additionalProperties?: boolean;
+  };
+}
+
+export interface ModelGenerateRequest {
+  requestId?: string;
+  role?: 'loop_extraction' | 'planning_recovery';
+  modelOverride?: MetaModelId;
+  input: string | Array<{ role: 'system' | 'user' | 'assistant' | 'tool'; content: string; name?: string; call_id?: string }>;
+  tools?: ModelToolSchemaDeclaration[];
+  maxOutputTokens?: number;
+  temperature?: number;
+  timeoutMs?: number;
+  abortSignal?: AbortSignal;
+}
+
+export interface ModelGenerateResponse {
+  ok: boolean;
+  requestId: string;
+  mode: ModelRouterMode;
+  provider: 'Meta AI' | 'mock';
+  model: MetaModelId;
+  taskRole: 'loop_extraction' | 'planning_recovery';
+  outputText: string;
+  proposedToolCalls: RuntimeToolCall[];
+  malformedToolCalls: Array<{ raw: unknown; reason: string }>;
+  usage: TokenUsageRecord;
+  latencyMs: number;
+  errorCode?: ModelErrorCode;
+  errorMessage?: string;
+  rawResponse?: unknown;
+}
+
 export interface ModelConnectionTestResult {
   ok: boolean;
   mode: ModelRouterMode;
   model: MetaModelId;
   endpoint: string;
   keyConfigured: boolean;
+  apiKeyConfigured: boolean;
+  catalogueReachable: boolean;
+  inferenceSucceeded: boolean;
+  toolCallingSupported: boolean;
+  modelAvailable: boolean;
+  modelUnavailable: boolean;
+  latencyMs?: number;
   message: string;
   testedAtIso: string;
+}
+
+/**
+ * Validates an untrusted tool call proposal emitted by a model before it is
+ * ever passed to PolicyEngine or ToolRegistry.
+ * - Model output is an untrusted proposal, NEVER authority.
+ * - Rejects malformed structures, missing tool names, or non-object args.
+ * - Blocks any attempt by the model to forge or supply an `approvalToken`.
+ * - Blocks raw code/shell/SQL/prohibited URL execution proposals.
+ */
+export function validateUntrustedModelToolProposal(rawCall: unknown): {
+  valid: boolean;
+  toolCall?: RuntimeToolCall;
+  reason?: string;
+  errorCode?: 'MALFORMED_TOOL_CALL' | 'MODEL_FORGED_APPROVAL_TOKEN' | 'UNSAFE_MODEL_CODE_OR_COMMAND_PROPOSAL';
+} {
+  if (!rawCall || typeof rawCall !== 'object' || Array.isArray(rawCall)) {
+    return {
+      valid: false,
+      errorCode: 'MALFORMED_TOOL_CALL',
+      reason: 'Tool call proposal must be a non-null JSON object.',
+    };
+  }
+
+  const obj = rawCall as Record<string, unknown>;
+  const toolName = String(obj.tool ?? obj.name ?? '').trim();
+  if (!toolName || toolName.length > 128 || !/^[a-zA-Z0-9_.-]+$/.test(toolName)) {
+    return {
+      valid: false,
+      errorCode: 'MALFORMED_TOOL_CALL',
+      reason: `Invalid or missing tool name "${toolName}".`,
+    };
+  }
+
+  let parsedArgs: Record<string, unknown> = {};
+  const rawArgs = obj.args ?? obj.arguments ?? {};
+  if (typeof rawArgs === 'string') {
+    try {
+      const decoded = JSON.parse(rawArgs);
+      if (!decoded || typeof decoded !== 'object' || Array.isArray(decoded)) {
+        return {
+          valid: false,
+          errorCode: 'MALFORMED_TOOL_CALL',
+          reason: `Tool "${toolName}" arguments JSON must decode to an object.`,
+        };
+      }
+      parsedArgs = decoded as Record<string, unknown>;
+    } catch {
+      return {
+        valid: false,
+        errorCode: 'MALFORMED_TOOL_CALL',
+        reason: `Tool "${toolName}" arguments string is not valid JSON.`,
+      };
+    }
+  } else if (rawArgs && typeof rawArgs === 'object' && !Array.isArray(rawArgs)) {
+    parsedArgs = { ...(rawArgs as Record<string, unknown>) };
+  } else {
+    return {
+      valid: false,
+      errorCode: 'MALFORMED_TOOL_CALL',
+      reason: `Tool "${toolName}" arguments must be a JSON object.`,
+    };
+  }
+
+  // Model output must NEVER supply or forge an approvalToken
+  if ('approvalToken' in obj || 'approvalToken' in parsedArgs) {
+    return {
+      valid: false,
+      errorCode: 'MODEL_FORGED_APPROVAL_TOKEN',
+      reason: `Blocked: Model proposal for "${toolName}" attempted to supply an approvalToken. Only human UI confirmation can mint approval tokens.`,
+    };
+  }
+
+  // Block direct shell/SQL/arbitrary code execution proposals in model output
+  const serializedArgs = JSON.stringify(parsedArgs);
+  const dangerousPatterns: Array<{ pattern: RegExp; label: string }> = [
+    { pattern: /\b(rm\s+-rf|bash\s+-c|sh\s+-c|powershell\s+-enc|curl\s+[^|]+\|\s*(sh|bash))\b/i, label: 'shell command injection' },
+    { pattern: /\b(DROP\s+TABLE|TRUNCATE\s+TABLE|DELETE\s+FROM\s+\w+\s*;)\b/i, label: 'raw destructive SQL' },
+    { pattern: /\b(eval\s*\(|new\s+Function\s*\(|child_process)\b/i, label: 'arbitrary code execution' },
+    { pattern: /\b(javascript:|data:text\/html|file:\/\/)/i, label: 'prohibited URL scheme' },
+  ];
+  for (const { pattern, label } of dangerousPatterns) {
+    if (pattern.test(serializedArgs)) {
+      return {
+        valid: false,
+        errorCode: 'UNSAFE_MODEL_CODE_OR_COMMAND_PROPOSAL',
+        reason: `Blocked untrusted model proposal for "${toolName}": detected ${label}.`,
+      };
+    }
+  }
+
+  const callId = String(obj.id ?? obj.call_id ?? `tc-model-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`);
+  const rationale = String(obj.rationale ?? `Model-proposed call to ${toolName}`);
+
+  return {
+    valid: true,
+    toolCall: {
+      id: callId,
+      tool: toolName,
+      args: parsedArgs,
+      rationale,
+    },
+  };
+}
+
+export interface ModelRouterOptions {
+  proxyBaseUrl?: string;
+  maxRequestsPerMinute?: number;
+  defaultTimeoutMs?: number;
 }
 
 export class ModelRouter {
   private mode: ModelRouterMode = 'mock';
   private usageHistory: TokenUsageRecord[] = [];
+  private proxyBaseUrl: string;
+  private maxRequestsPerMinute: number;
+  private defaultTimeoutMs: number;
+  private requestTimestampsMs: number[] = [];
 
-  constructor(initialMode: ModelRouterMode = 'mock') {
+  constructor(initialMode: ModelRouterMode = 'mock', options?: ModelRouterOptions) {
     this.mode = initialMode;
+    this.proxyBaseUrl = (options?.proxyBaseUrl ?? '').replace(/\/+$/, '');
+    this.maxRequestsPerMinute = options?.maxRequestsPerMinute ?? 30;
+    this.defaultTimeoutMs = options?.defaultTimeoutMs ?? 15_000;
   }
 
   public getMode(): ModelRouterMode {
@@ -398,6 +599,14 @@ export class ModelRouter {
 
   public setMode(mode: ModelRouterMode): void {
     this.mode = mode;
+  }
+
+  public setProxyBaseUrl(proxyBaseUrl: string): void {
+    this.proxyBaseUrl = proxyBaseUrl.replace(/\/+$/, '');
+  }
+
+  public getProxyBaseUrl(): string {
+    return this.proxyBaseUrl;
   }
 
   public selectModelForRole(role: 'loop_extraction' | 'planning_recovery'): MetaModelId {
@@ -420,15 +629,526 @@ export class ModelRouter {
     return { valid: true };
   }
 
-  public async testConnection(): Promise<ModelConnectionTestResult> {
+  private estimateCostUsd(model: MetaModelId, inputTokens: number, outputTokens: number): number {
+    // Muse Spark 1.3 vs Muse Wonder 1.0 unit pricing estimate
+    const inputRatePer1k = model === 'muse-wonder-1.0' ? 0.0015 : 0.0003;
+    const outputRatePer1k = model === 'muse-wonder-1.0' ? 0.006 : 0.0012;
+    return Number(
+      ((inputTokens / 1000) * inputRatePer1k + (outputTokens / 1000) * outputRatePer1k).toFixed(6)
+    );
+  }
+
+  /**
+   * Sends a real inference request through the server-side `/api/model` proxy in `live` mode.
+   * Never exposes `MODEL_API_KEY` to the client, enforces bounded payloads (64 KB),
+   * rate limits, timeouts, abort signals, response validation, and separate reported/estimated usage.
+   */
+  public async respond(req: ModelGenerateRequest): Promise<ModelGenerateResponse> {
+    const startMs = Date.now();
+    const requestId =
+      req.requestId || `req-${startMs.toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+    const taskRole = req.role || 'loop_extraction';
+    const model = req.modelOverride || this.selectModelForRole(taskRole);
+    const serializedInput =
+      typeof req.input === 'string' ? req.input : JSON.stringify(req.input);
+    const estimatedInputTokens = Math.max(1, Math.ceil(serializedInput.length / 4));
+
+    const modelValidation = this.validateModelId(model);
+    if (!modelValidation.valid) {
+      const usage: TokenUsageRecord = {
+        requestId,
+        provider: this.mode === 'live' ? 'Meta AI' : 'mock',
+        model,
+        taskRole,
+        inputTokens: estimatedInputTokens,
+        outputTokens: 0,
+        reportedInputTokens: null,
+        reportedOutputTokens: null,
+        estimatedInputTokens,
+        estimatedOutputTokens: 0,
+        source: 'estimated',
+        estimatedCostUsd: 0,
+        latencyMs: Date.now() - startMs,
+        outcome: 'invalid_request',
+        timestampIso: new Date().toISOString(),
+      };
+      this.recordUsage(usage);
+      return {
+        ok: false,
+        requestId,
+        mode: this.mode,
+        provider: usage.provider!,
+        model,
+        taskRole,
+        outputText: '',
+        proposedToolCalls: [],
+        malformedToolCalls: [],
+        usage,
+        latencyMs: usage.latencyMs!,
+        errorCode: 'INVALID_REQUEST',
+        errorMessage: modelValidation.reason,
+      };
+    }
+
+    // Check abort before starting
+    if (req.abortSignal?.aborted) {
+      const usage: TokenUsageRecord = {
+        requestId,
+        provider: this.mode === 'live' ? 'Meta AI' : 'mock',
+        model,
+        taskRole,
+        inputTokens: estimatedInputTokens,
+        outputTokens: 0,
+        reportedInputTokens: null,
+        reportedOutputTokens: null,
+        estimatedInputTokens,
+        estimatedOutputTokens: 0,
+        source: 'estimated',
+        estimatedCostUsd: 0,
+        latencyMs: Date.now() - startMs,
+        outcome: 'aborted',
+        timestampIso: new Date().toISOString(),
+      };
+      this.recordUsage(usage);
+      return {
+        ok: false,
+        requestId,
+        mode: this.mode,
+        provider: usage.provider!,
+        model,
+        taskRole,
+        outputText: '',
+        proposedToolCalls: [],
+        malformedToolCalls: [],
+        usage,
+        latencyMs: usage.latencyMs!,
+        errorCode: 'ABORTED',
+        errorMessage: 'Model request was aborted before dispatch.',
+      };
+    }
+
+    // Client-side rate limit check
+    const now = Date.now();
+    this.requestTimestampsMs = this.requestTimestampsMs.filter((t) => now - t < 60_000);
+    if (this.requestTimestampsMs.length >= this.maxRequestsPerMinute) {
+      const usage: TokenUsageRecord = {
+        requestId,
+        provider: this.mode === 'live' ? 'Meta AI' : 'mock',
+        model,
+        taskRole,
+        inputTokens: estimatedInputTokens,
+        outputTokens: 0,
+        reportedInputTokens: null,
+        reportedOutputTokens: null,
+        estimatedInputTokens,
+        estimatedOutputTokens: 0,
+        source: 'estimated',
+        estimatedCostUsd: 0,
+        latencyMs: Date.now() - startMs,
+        outcome: 'rate_limited',
+        timestampIso: new Date().toISOString(),
+      };
+      this.recordUsage(usage);
+      return {
+        ok: false,
+        requestId,
+        mode: this.mode,
+        provider: usage.provider!,
+        model,
+        taskRole,
+        outputText: '',
+        proposedToolCalls: [],
+        malformedToolCalls: [],
+        usage,
+        latencyMs: usage.latencyMs!,
+        errorCode: 'RATE_LIMITED',
+        errorMessage: `Client rate limit exceeded (${this.maxRequestsPerMinute} requests/min).`,
+      };
+    }
+
+    const requestBodyObj = {
+      requestId,
+      model,
+      input: req.input,
+      tools: req.tools,
+      max_output_tokens: req.maxOutputTokens ?? 1024,
+      temperature: req.temperature ?? 0.1,
+      timeoutMs: req.timeoutMs ?? this.defaultTimeoutMs,
+      rateLimitPerMinute: this.maxRequestsPerMinute,
+    };
+    const serializedBody = JSON.stringify(requestBodyObj);
+    if (serializedBody.length > 64 * 1024) {
+      const usage: TokenUsageRecord = {
+        requestId,
+        provider: this.mode === 'live' ? 'Meta AI' : 'mock',
+        model,
+        taskRole,
+        inputTokens: estimatedInputTokens,
+        outputTokens: 0,
+        reportedInputTokens: null,
+        reportedOutputTokens: null,
+        estimatedInputTokens,
+        estimatedOutputTokens: 0,
+        source: 'estimated',
+        estimatedCostUsd: 0,
+        latencyMs: Date.now() - startMs,
+        outcome: 'invalid_request',
+        timestampIso: new Date().toISOString(),
+      };
+      this.recordUsage(usage);
+      return {
+        ok: false,
+        requestId,
+        mode: this.mode,
+        provider: usage.provider!,
+        model,
+        taskRole,
+        outputText: '',
+        proposedToolCalls: [],
+        malformedToolCalls: [],
+        usage,
+        latencyMs: usage.latencyMs!,
+        errorCode: 'PAYLOAD_TOO_LARGE',
+        errorMessage: `Model request payload (${serializedBody.length} bytes) exceeds 65536 byte safety bound.`,
+      };
+    }
+
+    this.requestTimestampsMs.push(now);
+
+    if (typeof fetch === 'undefined') {
+      const usage: TokenUsageRecord = {
+        requestId,
+        provider: 'Meta AI',
+        model,
+        taskRole,
+        inputTokens: estimatedInputTokens,
+        outputTokens: 0,
+        reportedInputTokens: null,
+        reportedOutputTokens: null,
+        estimatedInputTokens,
+        estimatedOutputTokens: 0,
+        source: 'estimated',
+        estimatedCostUsd: 0,
+        latencyMs: Date.now() - startMs,
+        outcome: 'upstream_error',
+        timestampIso: new Date().toISOString(),
+      };
+      this.recordUsage(usage);
+      return {
+        ok: false,
+        requestId,
+        mode: this.mode,
+        provider: 'Meta AI',
+        model,
+        taskRole,
+        outputText: '',
+        proposedToolCalls: [],
+        malformedToolCalls: [],
+        usage,
+        latencyMs: usage.latencyMs!,
+        errorCode: 'UPSTREAM_ERROR',
+        errorMessage: 'Fetch is unavailable in this environment.',
+      };
+    }
+
+    const timeoutMs = req.timeoutMs ?? this.defaultTimeoutMs;
+    const controller = new AbortController();
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
+
+    const onExternalAbort = () => controller.abort();
+    if (req.abortSignal) {
+      req.abortSignal.addEventListener('abort', onExternalAbort, { once: true });
+    }
+
+    try {
+      const endpointUrl = `${this.proxyBaseUrl}/api/model`;
+      const resp = await fetch(endpointUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: serializedBody,
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
+      if (req.abortSignal) {
+        req.abortSignal.removeEventListener('abort', onExternalAbort);
+      }
+
+      const data = await resp.json().catch(() => ({}));
+      const latencyMs = typeof data?.latencyMs === 'number' ? data.latencyMs : Date.now() - startMs;
+
+      if (!resp.ok || data?.ok === false) {
+        const errorCode: ModelErrorCode =
+          data?.errorCode === 'AUTH_MISSING' ||
+          data?.errorCode === 'AUTH_INVALID' ||
+          data?.errorCode === 'RATE_LIMITED' ||
+          data?.errorCode === 'TIMEOUT' ||
+          data?.errorCode === 'INVALID_REQUEST'
+            ? data.errorCode
+            : resp.status === 401 || resp.status === 403
+              ? 'AUTH_INVALID'
+              : resp.status === 429
+                ? 'RATE_LIMITED'
+                : resp.status === 504
+                  ? 'TIMEOUT'
+                  : 'UPSTREAM_ERROR';
+
+        const outcomeMap: Record<ModelErrorCode, NonNullable<TokenUsageRecord['outcome']>> = {
+          AUTH_MISSING: 'auth_error',
+          AUTH_INVALID: 'auth_error',
+          RATE_LIMITED: 'rate_limited',
+          TIMEOUT: 'timeout',
+          ABORTED: 'aborted',
+          UPSTREAM_ERROR: 'upstream_error',
+          INVALID_REQUEST: 'invalid_request',
+          PAYLOAD_TOO_LARGE: 'invalid_request',
+          MALFORMED_TOOL_CALL: 'malformed_tool_call',
+          BUDGET_EXCEEDED: 'budget_exceeded',
+        };
+
+        const usage: TokenUsageRecord = {
+          requestId,
+          provider: 'Meta AI',
+          model,
+          taskRole,
+          inputTokens: estimatedInputTokens,
+          outputTokens: 0,
+          reportedInputTokens: null,
+          reportedOutputTokens: null,
+          estimatedInputTokens,
+          estimatedOutputTokens: 0,
+          source: 'estimated',
+          estimatedCostUsd: 0,
+          latencyMs,
+          outcome: outcomeMap[errorCode] || 'upstream_error',
+          timestampIso: new Date().toISOString(),
+        };
+        this.recordUsage(usage);
+
+        return {
+          ok: false,
+          requestId,
+          mode: this.mode,
+          provider: 'Meta AI',
+          model,
+          taskRole,
+          outputText: '',
+          proposedToolCalls: [],
+          malformedToolCalls: [],
+          usage,
+          latencyMs,
+          errorCode,
+          errorMessage: String(data?.error || `HTTP ${resp.status} from /api/model`),
+          rawResponse: data,
+        };
+      }
+
+      // Parse Meta Responses API payload from data.response
+      const rawResp = (data?.response ?? data) as Record<string, any>;
+      let outputText = '';
+      const rawToolCalls: unknown[] = [];
+
+      if (typeof rawResp?.output_text === 'string') {
+        outputText = rawResp.output_text;
+      }
+
+      if (Array.isArray(rawResp?.output)) {
+        for (const item of rawResp.output) {
+          if (!item || typeof item !== 'object') continue;
+          if (item.type === 'function_call' || item.type === 'tool_call') {
+            rawToolCalls.push({
+              id: item.call_id || item.id,
+              tool: item.name || item.tool,
+              args: item.arguments ?? item.args ?? {},
+              rationale: item.rationale,
+              ...(item.approvalToken !== undefined ? { approvalToken: item.approvalToken } : {}),
+            });
+          } else if (item.type === 'message') {
+            if (typeof item.content === 'string') {
+              outputText += (outputText ? '\n' : '') + item.content;
+            } else if (Array.isArray(item.content)) {
+              for (const part of item.content) {
+                if (part && typeof part === 'object' && typeof part.text === 'string') {
+                  outputText += (outputText ? '\n' : '') + part.text;
+                } else if (part && typeof part === 'object' && (part.type === 'function_call' || part.type === 'tool_call')) {
+                  rawToolCalls.push({
+                    id: part.call_id || part.id,
+                    tool: part.name || part.tool,
+                    args: part.arguments ?? part.args ?? {},
+                    rationale: part.rationale,
+                  });
+                }
+              }
+            }
+          }
+        }
+      }
+
+      if (Array.isArray(rawResp?.tool_calls)) {
+        for (const tc of rawResp.tool_calls) {
+          rawToolCalls.push(tc);
+        }
+      }
+
+      const proposedToolCalls: RuntimeToolCall[] = [];
+      const malformedToolCalls: Array<{ raw: unknown; reason: string }> = [];
+
+      for (const rawTc of rawToolCalls) {
+        const validation = validateUntrustedModelToolProposal(rawTc);
+        if (validation.valid && validation.toolCall) {
+          proposedToolCalls.push(validation.toolCall);
+        } else {
+          malformedToolCalls.push({
+            raw: rawTc,
+            reason: validation.reason || 'Malformed tool call proposal',
+          });
+        }
+      }
+
+      const estimatedOutputTokens = Math.max(
+        1,
+        Math.ceil((outputText.length + JSON.stringify(rawToolCalls).length) / 4)
+      );
+      const reportedInputTokens =
+        typeof data?.reportedUsage?.inputTokens === 'number'
+          ? data.reportedUsage.inputTokens
+          : typeof rawResp?.usage?.input_tokens === 'number'
+            ? rawResp.usage.input_tokens
+            : null;
+      const reportedOutputTokens =
+        typeof data?.reportedUsage?.outputTokens === 'number'
+          ? data.reportedUsage.outputTokens
+          : typeof rawResp?.usage?.output_tokens === 'number'
+            ? rawResp.usage.output_tokens
+            : null;
+
+      const finalInputTokens = reportedInputTokens ?? estimatedInputTokens;
+      const finalOutputTokens = reportedOutputTokens ?? estimatedOutputTokens;
+      const hasMalformedOnly = malformedToolCalls.length > 0 && proposedToolCalls.length === 0 && !outputText.trim();
+
+      const usage: TokenUsageRecord = {
+        requestId,
+        provider: 'Meta AI',
+        model,
+        taskRole,
+        inputTokens: finalInputTokens,
+        outputTokens: finalOutputTokens,
+        reportedInputTokens,
+        reportedOutputTokens,
+        estimatedInputTokens,
+        estimatedOutputTokens,
+        source: reportedInputTokens !== null ? 'provider_reported' : 'estimated',
+        estimatedCostUsd: this.estimateCostUsd(model, finalInputTokens, finalOutputTokens),
+        latencyMs,
+        outcome: hasMalformedOnly ? 'malformed_tool_call' : 'succeeded',
+        timestampIso: new Date().toISOString(),
+      };
+      this.recordUsage(usage);
+
+      if (hasMalformedOnly) {
+        return {
+          ok: false,
+          requestId,
+          mode: this.mode,
+          provider: 'Meta AI',
+          model,
+          taskRole,
+          outputText,
+          proposedToolCalls: [],
+          malformedToolCalls,
+          usage,
+          latencyMs,
+          errorCode: 'MALFORMED_TOOL_CALL',
+          errorMessage: malformedToolCalls.map((m) => m.reason).join('; '),
+          rawResponse: rawResp,
+        };
+      }
+
+      return {
+        ok: true,
+        requestId,
+        mode: this.mode,
+        provider: 'Meta AI',
+        model,
+        taskRole,
+        outputText,
+        proposedToolCalls,
+        malformedToolCalls,
+        usage,
+        latencyMs,
+        rawResponse: rawResp,
+      };
+    } catch (err: any) {
+      clearTimeout(timer);
+      if (req.abortSignal) {
+        req.abortSignal.removeEventListener('abort', onExternalAbort);
+      }
+      const latencyMs = Date.now() - startMs;
+      const isAbort = !timedOut && (req.abortSignal?.aborted || err?.name === 'AbortError');
+      const errorCode: ModelErrorCode = timedOut ? 'TIMEOUT' : isAbort ? 'ABORTED' : 'UPSTREAM_ERROR';
+      const usage: TokenUsageRecord = {
+        requestId,
+        provider: 'Meta AI',
+        model,
+        taskRole,
+        inputTokens: estimatedInputTokens,
+        outputTokens: 0,
+        reportedInputTokens: null,
+        reportedOutputTokens: null,
+        estimatedInputTokens,
+        estimatedOutputTokens: 0,
+        source: 'estimated',
+        estimatedCostUsd: 0,
+        latencyMs,
+        outcome: timedOut ? 'timeout' : isAbort ? 'aborted' : 'upstream_error',
+        timestampIso: new Date().toISOString(),
+      };
+      this.recordUsage(usage);
+
+      return {
+        ok: false,
+        requestId,
+        mode: this.mode,
+        provider: 'Meta AI',
+        model,
+        taskRole,
+        outputText: '',
+        proposedToolCalls: [],
+        malformedToolCalls: [],
+        usage,
+        latencyMs,
+        errorCode,
+        errorMessage: timedOut
+          ? `Model inference timed out after ${timeoutMs}ms.`
+          : isAbort
+            ? 'Model inference cancelled by caller.'
+            : `Model inference request failed: ${err?.message || 'network error'}`,
+      };
+    }
+  }
+
+  public async generate(req: ModelGenerateRequest): Promise<ModelGenerateResponse> {
+    return this.respond(req);
+  }
+
+  public async testConnection(modelToProbe: MetaModelId = 'muse-spark-1.3'): Promise<ModelConnectionTestResult> {
     const testedAtIso = new Date().toISOString();
     if (this.mode === 'mock') {
       return {
         ok: true,
         mode: 'mock',
-        model: 'muse-spark-1.3',
+        model: modelToProbe,
         endpoint: 'mock://deterministic-scripted-runtime',
         keyConfigured: false,
+        apiKeyConfigured: false,
+        catalogueReachable: false,
+        inferenceSucceeded: false,
+        toolCallingSupported: false,
+        modelAvailable: false,
+        modelUnavailable: true,
         message:
           'Mock mode active (SIMULATED). Responses use deterministic scripted tool sequences with zero external API calls.',
         testedAtIso,
@@ -439,26 +1159,46 @@ export class ModelRouter {
       return {
         ok: false,
         mode: 'live',
-        model: 'muse-spark-1.3',
-        endpoint: '/api/model/test',
+        model: modelToProbe,
+        endpoint: `${this.proxyBaseUrl}/api/model/test`,
         keyConfigured: false,
+        apiKeyConfigured: false,
+        catalogueReachable: false,
+        inferenceSucceeded: false,
+        toolCallingSupported: false,
+        modelAvailable: false,
+        modelUnavailable: true,
         message: 'Fetch is unavailable in this environment. No silent fallback performed.',
         testedAtIso,
       };
     }
 
     try {
-      const resp = await fetch('/api/model/test', {
+      const resp = await fetch(`${this.proxyBaseUrl}/api/model/test`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: modelToProbe }),
       });
       const data = await resp.json();
+      const apiKeyConfigured = Boolean(data.apiKeyConfigured ?? data.keyConfigured);
+      const catalogueReachable = Boolean(data.catalogueReachable);
+      const inferenceSucceeded = Boolean(data.inferenceSucceeded);
+      const toolCallingSupported = Boolean(data.toolCallingSupported);
+      const modelAvailable = Boolean(data.modelAvailable ?? (catalogueReachable && inferenceSucceeded));
+      const modelUnavailable = Boolean(data.modelUnavailable ?? !modelAvailable);
       return {
         ok: Boolean(data.ok),
         mode: 'live',
-        model: 'muse-spark-1.3',
+        model: (data.model as MetaModelId) || modelToProbe,
         endpoint: data.endpoint || 'https://api.meta.ai/v1',
-        keyConfigured: Boolean(data.keyConfigured),
+        keyConfigured: apiKeyConfigured,
+        apiKeyConfigured,
+        catalogueReachable,
+        inferenceSucceeded,
+        toolCallingSupported,
+        modelAvailable,
+        modelUnavailable,
+        latencyMs: typeof data.latencyMs === 'number' ? data.latencyMs : undefined,
         message: data.message || 'Connection test completed.',
         testedAtIso,
       };
@@ -466,9 +1206,15 @@ export class ModelRouter {
       return {
         ok: false,
         mode: 'live',
-        model: 'muse-spark-1.3',
-        endpoint: '/api/model/test',
+        model: modelToProbe,
+        endpoint: `${this.proxyBaseUrl}/api/model/test`,
         keyConfigured: false,
+        apiKeyConfigured: false,
+        catalogueReachable: false,
+        inferenceSucceeded: false,
+        toolCallingSupported: false,
+        modelAvailable: false,
+        modelUnavailable: true,
         message: `Live connection check failed (${err?.message || 'network error'}). No silent fallback performed.`,
         testedAtIso,
       };
@@ -479,20 +1225,48 @@ export class ModelRouter {
     this.usageHistory.push(record);
   }
 
+  public clearUsageHistory(): void {
+    this.usageHistory = [];
+  }
+
   public getUsageSummary(): {
     totalInputTokens: number;
     totalOutputTokens: number;
+    totalReportedInputTokens: number;
+    totalReportedOutputTokens: number;
+    totalEstimatedInputTokens: number;
+    totalEstimatedOutputTokens: number;
     totalEstimatedCostUsd: number;
     records: TokenUsageRecord[];
   } {
     const totalInputTokens = this.usageHistory.reduce((acc, r) => acc + r.inputTokens, 0);
     const totalOutputTokens = this.usageHistory.reduce((acc, r) => acc + r.outputTokens, 0);
+    const totalReportedInputTokens = this.usageHistory.reduce(
+      (acc, r) => acc + (r.reportedInputTokens ?? 0),
+      0
+    );
+    const totalReportedOutputTokens = this.usageHistory.reduce(
+      (acc, r) => acc + (r.reportedOutputTokens ?? 0),
+      0
+    );
+    const totalEstimatedInputTokens = this.usageHistory.reduce(
+      (acc, r) => acc + (r.estimatedInputTokens ?? r.inputTokens),
+      0
+    );
+    const totalEstimatedOutputTokens = this.usageHistory.reduce(
+      (acc, r) => acc + (r.estimatedOutputTokens ?? r.outputTokens),
+      0
+    );
     const totalEstimatedCostUsd = Number(
       this.usageHistory.reduce((acc, r) => acc + r.estimatedCostUsd, 0).toFixed(6)
     );
     return {
       totalInputTokens,
       totalOutputTokens,
+      totalReportedInputTokens,
+      totalReportedOutputTokens,
+      totalEstimatedInputTokens,
+      totalEstimatedOutputTokens,
       totalEstimatedCostUsd,
       records: [...this.usageHistory],
     };
@@ -970,6 +1744,52 @@ export class ToolRegistry {
 
   public list(): ToolRegistration[] {
     return Array.from(this.tools.values());
+  }
+
+  /**
+   * Exports all available registered tools as JSON-Schema function declarations
+   * suitable for the Meta Responses API `tools` parameter.
+   */
+  public toModelToolSchemas(): ModelToolSchemaDeclaration[] {
+    const schemas: ModelToolSchemaDeclaration[] = [];
+    for (const reg of this.tools.values()) {
+      if (
+        reg.availabilityStatus === 'UNSUPPORTED' ||
+        reg.availabilityStatus === 'NOT_CONFIGURED'
+      ) {
+        continue;
+      }
+      const properties: Record<string, { type: string; description: string }> = {};
+      const required: string[] = [];
+      for (const [key, spec] of Object.entries(reg.inputSchema)) {
+        const parts = spec.split(':');
+        const rawType = parts[0] || 'string';
+        const jsonType =
+          rawType === 'number' || rawType === 'boolean' || rawType === 'object' || rawType === 'array'
+            ? rawType
+            : 'string';
+        const isReq = parts.includes('required');
+        if (isReq) {
+          required.push(key);
+        }
+        properties[key] = {
+          type: jsonType,
+          description: `${key} (${spec})`,
+        };
+      }
+      schemas.push({
+        type: 'function',
+        name: reg.name,
+        description: `[${reg.subsystem}] ${reg.name} (risk: ${reg.riskClass}, status: ${reg.availabilityStatus})`,
+        parameters: {
+          type: 'object',
+          properties,
+          required,
+          additionalProperties: true,
+        },
+      });
+    }
+    return schemas;
   }
 
   /**
@@ -2238,6 +3058,13 @@ export interface AgentRuntimeContext {
   plannedToolCallsOverride?: RuntimeToolCall[];
   abortSignal?: AbortSignal;
   cancelAfterStep?: number;
+  maxSteps?: number;
+  maxTokensBudget?: number;
+  maxBudgetUsd?: number;
+  maxDurationMs?: number;
+  requestTimeoutMs?: number;
+  forcePlanningModel?: boolean;
+  allowRecoveryTurn?: boolean;
 }
 
 export interface AgentMissionResult {
@@ -2245,6 +3072,7 @@ export interface AgentMissionResult {
   missionPrompt: string;
   mode: ModelRouterMode;
   modelUsed: MetaModelId;
+  modelsUsed?: MetaModelId[];
   status: RuntimeMissionStatus;
   executionState: ExecutionTruthState;
   verificationState: VerificationTruthState;
@@ -2265,6 +3093,44 @@ export interface AgentMissionResult {
   finalReply: string;
   factPreservationPassed: boolean;
   tokenUsage: TokenUsageRecord;
+  modelTurnRecords?: TokenUsageRecord[];
+  errorCode?: string;
+}
+
+/**
+ * Selects relevant skills dynamically from the user mission prompt and skill triggers/descriptions.
+ */
+export function selectRelevantSkillsForMission(
+  missionPrompt: string,
+  skills: ReusableSkill[]
+): string[] {
+  const lower = missionPrompt.toLowerCase();
+  const matched = new Set<string>();
+
+  if (
+    (lower.includes('reconcile') && lower.includes('october')) ||
+    lower.includes('utility draft') ||
+    lower.includes('prepare the utility draft') ||
+    lower.includes('statement') ||
+    lower.includes('reconcil')
+  ) {
+    matched.add('monthly-statement-reconciler');
+  }
+
+  for (const skill of skills) {
+    if (lower.includes(skill.slug.toLowerCase()) || lower.includes(skill.name.toLowerCase())) {
+      matched.add(skill.slug);
+      continue;
+    }
+    for (const trig of skill.triggers || []) {
+      if (trig && trig.length >= 3 && lower.includes(trig.toLowerCase())) {
+        matched.add(skill.slug);
+        break;
+      }
+    }
+  }
+
+  return Array.from(matched);
 }
 
 export class AgentRuntime {
@@ -2286,17 +3152,26 @@ export class AgentRuntime {
 
   /**
    * Executes a complete mission through the unified runtime loop:
-   * assemble prompt -> call model -> validate tool calls -> PolicyGuard check ->
-   * execute tool via ToolRegistry -> verify post-condition -> record in MemoryLedger -> emit on EventBus.
+   * - In `live` mode (without `plannedToolCallsOverride`):
+   *   user goal -> 4-slot prompt + registered tool schemas -> Meta model inference (`/api/model`) ->
+   *   untrusted proposal validation -> PolicyEngine/PolicyGuard -> ToolRegistry executor ->
+   *   fresh observation wrapped via `wrapUntrustedData` -> independent verifier -> next model turn -> final response.
+   * - In `mock` mode (or with `plannedToolCallsOverride`):
+   *   deterministic scripted tool sequence explicitly labelled `SIMULATED`.
    */
   public async runMission(
     missionPrompt: string,
     ctx: AgentRuntimeContext
   ): Promise<AgentMissionResult> {
-    const missionId = `mission-${Date.now().toString(36)}`;
+    const missionStartMs = Date.now();
+    const missionId = `mission-${missionStartMs.toString(36)}`;
     const bus = ctx.eventBus || globalRuntimeEventBus;
     const mode = ctx.modelRouter.getMode();
-    const modelUsed = ctx.modelRouter.selectModelForRole('loop_extraction');
+    const maxSteps = ctx.maxSteps ?? this.maxSteps;
+    let modelUsed: MetaModelId = ctx.modelRouter.selectModelForRole(
+      ctx.forcePlanningModel ? 'planning_recovery' : 'loop_extraction'
+    );
+    const modelsUsedSet = new Set<MetaModelId>([modelUsed]);
 
     // Step 1: Identify matching skills for progressive disclosure
     const lower = missionPrompt.toLowerCase();
@@ -2305,10 +3180,7 @@ export class AgentRuntime {
       lower.includes('utility draft') ||
       lower.includes('prepare the utility draft');
 
-    const loadedSkillSlugs: string[] = [];
-    if (isFlagshipOctoberScenario || lower.includes('statement') || lower.includes('reconcil')) {
-      loadedSkillSlugs.push('monthly-statement-reconciler');
-    }
+    const loadedSkillSlugs = selectRelevantSkillsForMission(missionPrompt, ctx.skills);
 
     const assembledPrompt = assembleTokenLeanPrompt({
       soul: ctx.soul,
@@ -2329,11 +3201,6 @@ export class AgentRuntime {
       statusChipLabel: 'Thinking',
     });
 
-    // Plan the tool call sequence (deterministic in mock mode, or via /api/model in live mode)
-    const plannedToolCalls: RuntimeToolCall[] =
-      ctx.plannedToolCallsOverride ||
-      this.planToolCalls(missionPrompt, isFlagshipOctoberScenario);
-
     const steps: RuntimeStepRecord[] = [];
     const checkpoints: RuntimeCheckpoint[] = [];
     const proposedIdeDiffs: IdePatchProposal[] = [];
@@ -2342,21 +3209,21 @@ export class AgentRuntime {
     let pendingApproval: RuntimeBusEvent['approvalRequest'] | null = null;
     let status: RuntimeMissionStatus = 'running';
     let currentBrowserUrl = 'https://portal.mockbank.local/dashboard';
+    let liveModelFinalReply = '';
+    let missionErrorCode: string | undefined;
+    let missionErrorSummary: string | undefined;
+    const modelTurnRecords: TokenUsageRecord[] = [];
 
-    for (let i = 0; i < Math.min(plannedToolCalls.length, this.maxSteps); i++) {
-      if (
-        this.cancelledMissionIds.has(missionId) ||
-        ctx.abortSignal?.aborted ||
-        (ctx.cancelAfterStep !== undefined && i >= ctx.cancelAfterStep)
-      ) {
-        status = 'cancelled';
-        break;
-      }
-
-      const toolCall = plannedToolCalls[i];
-      const stepNumber = i + 1;
-
-      // Save pre-step checkpoint
+    const executeSingleToolStep = (
+      toolCall: RuntimeToolCall,
+      stepNumber: number,
+      untrustedContextChain: string
+    ): {
+      stepRecord: RuntimeStepRecord;
+      guardEval: RuntimeStepRecord['guardDecision'];
+      canonicalResult: CanonicalExecutionResult;
+      verification: RuntimeStepRecord['verification'];
+    } => {
       checkpoints.push({
         stepNumber,
         ideFilesSnapshot: ctx.ideFiles.map((f) => ({ ...f })),
@@ -2364,12 +3231,24 @@ export class AgentRuntime {
         ledgerEventCount: ctx.ledger.getEvents().length,
       });
 
-      // Pass tool call through PolicyGuard
-      const guardEval = this.evaluateToolCallThroughGuard(toolCall, ctx.policyConfig, ctx.rules);
+      const effectiveToolCall: RuntimeToolCall = untrustedContextChain
+        ? {
+            ...toolCall,
+            args: {
+              ...toolCall.args,
+              untrustedContext: untrustedContextChain,
+            },
+          }
+        : toolCall;
 
-      // Execute tool via ToolRegistry if allowed, or build blocked/approval canonical result
+      const guardEval = this.evaluateToolCallThroughGuard(
+        effectiveToolCall,
+        ctx.policyConfig,
+        ctx.rules
+      );
+
       const canonicalResult: CanonicalExecutionResult = guardEval.allowed
-        ? this.executeAndVerifyToolCall(toolCall, ctx, {
+        ? this.executeAndVerifyToolCall(effectiveToolCall, ctx, {
             proposedIdeDiffs,
             proposedSchedules,
             reviewQueueAdditions,
@@ -2378,12 +3257,14 @@ export class AgentRuntime {
             },
             getBrowserUrl: () => currentBrowserUrl,
           })
-        : this.buildBlockedOrApprovalCanonicalResult(toolCall, guardEval);
+        : this.buildBlockedOrApprovalCanonicalResult(effectiveToolCall, guardEval);
 
-      // Independent post-condition verification
-      const verification = this.verifyStepOutcome(toolCall, guardEval, canonicalResult);
+      const verification = this.verifyStepOutcome(
+        effectiveToolCall,
+        guardEval,
+        canonicalResult
+      );
 
-      // Record in hash-chained MemoryLedger
       const ledgerEvent = ctx.ledger.appendEvent({
         actor: guardEval.allowed ? 'agent' : 'guard',
         type: guardEval.allowed
@@ -2408,13 +3289,14 @@ export class AgentRuntime {
         missionId,
       });
 
-      const morrowEvent: MissionEngineActivityEvent = guardEval.requiresApproval
-        ? 'awaiting_approval'
-        : !guardEval.allowed || !canonicalResult.ok
-          ? 'blocked_by_guard'
-          : toolCall.tool.startsWith('plugin.l3xi')
-            ? 'verifying'
-            : 'tool_running';
+      const morrowEvent: MissionEngineActivityEvent =
+        guardEval.requiresApproval || canonicalResult.executionState === 'WAITING_FOR_APPROVAL'
+          ? 'awaiting_approval'
+          : !guardEval.allowed || !canonicalResult.ok
+            ? 'blocked_by_guard'
+            : toolCall.tool.startsWith('plugin.l3xi')
+              ? 'verifying'
+              : 'tool_running';
 
       const stepRecord: RuntimeStepRecord = {
         stepNumber,
@@ -2436,54 +3318,366 @@ export class AgentRuntime {
       bus.emit({
         type: 'step_completed',
         missionId,
-        status: guardEval.requiresApproval ? 'waiting_for_approval' : 'running',
+        status:
+          guardEval.requiresApproval || canonicalResult.executionState === 'WAITING_FOR_APPROVAL'
+            ? 'waiting_for_approval'
+            : 'running',
         morrowEvent,
-        statusChipLabel: guardEval.requiresApproval
-          ? 'Needs your approval'
-          : !guardEval.allowed
-            ? 'Blocked for safety'
-            : 'Working',
+        statusChipLabel:
+          guardEval.requiresApproval || canonicalResult.executionState === 'WAITING_FOR_APPROVAL'
+            ? 'Needs your approval'
+            : !guardEval.allowed
+              ? 'Blocked for safety'
+              : 'Working',
         step: stepRecord,
       });
 
-      // If PolicyGuard requires human approval (e.g., unattended utility bill payment), pause mission
-      if (guardEval.requiresApproval) {
-        status = 'waiting_for_approval';
-        pendingApproval = {
-          id: `appr-${missionId}-${stepNumber}`,
-          title:
-            String(toolCall.args.title || '') ||
-            'Utility Bill Draft: GHS 120.00 to ECG Prepaid Meter #04291882',
-          target:
-            String(toolCall.args.targetUrl || '') ||
-            'https://portal.mockbank.local/pay-bill#submit',
-          risk: 'money',
-          evidenceHash: verification.evidenceHash,
-          reason: guardEval.reason,
-          stepNumber,
-        };
-        bus.emit({
-          type: 'approval_requested',
-          missionId,
-          status: 'waiting_for_approval',
-          morrowEvent: 'awaiting_approval',
-          statusChipLabel: 'Needs your approval',
-          approvalRequest: pendingApproval,
+      return { stepRecord, guardEval, canonicalResult, verification };
+    };
+
+    // ========================================================================
+    // BRANCH A: LIVE MODEL-DRIVEN ITERATIVE AGENT LOOP
+    // ========================================================================
+    if (mode === 'live' && !ctx.plannedToolCallsOverride) {
+      const availableToolSchemas = this.toolRegistry.toModelToolSchemas();
+      const conversationMessages: Array<{
+        role: 'system' | 'user' | 'assistant' | 'tool';
+        content: string;
+        name?: string;
+        call_id?: string;
+      }> = [
+        {
+          role: 'system',
+          content: assembledPrompt.fullPromptText,
+        },
+        {
+          role: 'user',
+          content: missionPrompt,
+        },
+      ];
+
+      let untrustedObservationBuffer = '';
+      let needsRecoveryModel = Boolean(ctx.forcePlanningModel);
+      let cumulativeTokens = 0;
+      let cumulativeCostUsd = 0;
+      let turnIndex = 0;
+
+      while (steps.length < maxSteps && turnIndex < maxSteps + 2) {
+        turnIndex++;
+
+        if (
+          this.cancelledMissionIds.has(missionId) ||
+          ctx.abortSignal?.aborted ||
+          (ctx.cancelAfterStep !== undefined && steps.length >= ctx.cancelAfterStep)
+        ) {
+          status = 'cancelled';
+          missionErrorCode = 'ABORTED';
+          break;
+        }
+
+        if (ctx.maxDurationMs !== undefined && Date.now() - missionStartMs > ctx.maxDurationMs) {
+          status = 'failed';
+          missionErrorCode = 'TIMEOUT';
+          missionErrorSummary = `Mission exceeded maxDurationMs (${ctx.maxDurationMs}ms).`;
+          break;
+        }
+
+        if (
+          (ctx.maxTokensBudget !== undefined && cumulativeTokens >= ctx.maxTokensBudget) ||
+          (ctx.maxBudgetUsd !== undefined && cumulativeCostUsd >= ctx.maxBudgetUsd)
+        ) {
+          status = 'failed';
+          missionErrorCode = 'BUDGET_EXCEEDED';
+          missionErrorSummary = `Mission stopped: token/cost budget exhausted (${cumulativeTokens} tokens, $${cumulativeCostUsd.toFixed(6)}).`;
+          break;
+        }
+
+        const roleForTurn: 'loop_extraction' | 'planning_recovery' = needsRecoveryModel
+          ? 'planning_recovery'
+          : 'loop_extraction';
+        const turnModel = ctx.modelRouter.selectModelForRole(roleForTurn);
+        modelUsed = turnModel;
+        modelsUsedSet.add(turnModel);
+
+        const modelResp = await ctx.modelRouter.respond({
+          role: roleForTurn,
+          input: conversationMessages,
+          tools: availableToolSchemas,
+          abortSignal: ctx.abortSignal,
+          timeoutMs: ctx.requestTimeoutMs,
         });
-        break;
+        modelTurnRecords.push(modelResp.usage);
+        cumulativeTokens += modelResp.usage.inputTokens + modelResp.usage.outputTokens;
+        cumulativeCostUsd = Number((cumulativeCostUsd + modelResp.usage.estimatedCostUsd).toFixed(6));
+
+        // Check budget immediately after model turn
+        if (
+          (ctx.maxTokensBudget !== undefined && cumulativeTokens > ctx.maxTokensBudget) ||
+          (ctx.maxBudgetUsd !== undefined && cumulativeCostUsd > ctx.maxBudgetUsd)
+        ) {
+          status = 'failed';
+          missionErrorCode = 'BUDGET_EXCEEDED';
+          missionErrorSummary = `Mission stopped: token/cost budget exceeded (${cumulativeTokens} tokens, $${cumulativeCostUsd.toFixed(6)}).`;
+          ctx.ledger.appendEvent({
+            actor: 'guard',
+            type: 'action_blocked',
+            summary: missionErrorSummary,
+            payload: JSON.stringify({
+              errorCode: 'BUDGET_EXCEEDED',
+              cumulativeTokens,
+              cumulativeCostUsd,
+            }),
+            trustLevel: 'verified_by_evidence',
+            executionState: 'BLOCKED',
+            verificationState: 'BLOCKED',
+            isSimulated: false,
+            missionId,
+          });
+          break;
+        }
+
+        if (!modelResp.ok) {
+          if (modelResp.errorCode === 'ABORTED') {
+            status = 'cancelled';
+            missionErrorCode = 'ABORTED';
+            break;
+          }
+          status = 'failed';
+          missionErrorCode = modelResp.errorCode || 'UPSTREAM_ERROR';
+          missionErrorSummary = modelResp.errorMessage || 'Model inference failed.';
+          ctx.ledger.appendEvent({
+            actor: 'guard',
+            type: 'action_blocked',
+            summary: `Model turn ${turnIndex} failed [${missionErrorCode}]: ${missionErrorSummary}`,
+            payload: JSON.stringify({
+              turnIndex,
+              model: turnModel,
+              errorCode: missionErrorCode,
+              errorMessage: missionErrorSummary,
+              malformedToolCalls: modelResp.malformedToolCalls,
+            }),
+            trustLevel: 'verified_by_evidence',
+            executionState: 'FAILED',
+            verificationState: 'FAILED',
+            isSimulated: false,
+            missionId,
+          });
+          break;
+        }
+
+        // If model emitted any malformed/unsafe tool proposals alongside valid ones, fail closed
+        if (modelResp.malformedToolCalls.length > 0) {
+          status = 'failed';
+          missionErrorCode = 'MALFORMED_TOOL_CALL';
+          missionErrorSummary = modelResp.malformedToolCalls.map((m) => m.reason).join('; ');
+          ctx.ledger.appendEvent({
+            actor: 'guard',
+            type: 'action_blocked',
+            summary: `Blocked malformed/unsafe model tool proposal: ${missionErrorSummary}`,
+            payload: JSON.stringify({
+              turnIndex,
+              malformedToolCalls: modelResp.malformedToolCalls,
+            }),
+            trustLevel: 'verified_by_evidence',
+            executionState: 'BLOCKED',
+            verificationState: 'BLOCKED',
+            isSimulated: false,
+            missionId,
+          });
+          break;
+        }
+
+        // If no tool calls were proposed, the model has finished and returned its final answer
+        if (modelResp.proposedToolCalls.length === 0) {
+          liveModelFinalReply = modelResp.outputText.trim();
+          status = 'completed';
+          break;
+        }
+
+        // Execute proposed tool calls through PolicyEngine -> ToolRegistry -> Verifier
+        needsRecoveryModel = false;
+        let stopMissionLoop = false;
+
+        for (const proposedCall of modelResp.proposedToolCalls) {
+          if (steps.length >= maxSteps) {
+            stopMissionLoop = true;
+            break;
+          }
+          if (
+            this.cancelledMissionIds.has(missionId) ||
+            ctx.abortSignal?.aborted ||
+            (ctx.cancelAfterStep !== undefined && steps.length >= ctx.cancelAfterStep)
+          ) {
+            status = 'cancelled';
+            missionErrorCode = 'ABORTED';
+            stopMissionLoop = true;
+            break;
+          }
+
+          const stepNumber = steps.length + 1;
+          const { guardEval, canonicalResult, verification } = executeSingleToolStep(
+            proposedCall,
+            stepNumber,
+            untrustedObservationBuffer
+          );
+
+          // Wrap fresh tool observation in <untrusted_data> before feeding back to the model
+          const rawObservationJson = JSON.stringify({
+            tool: proposedCall.tool,
+            ok: canonicalResult.ok,
+            executionState: canonicalResult.executionState,
+            verificationState: verification.verificationState,
+            isSimulated: canonicalResult.isSimulated,
+            errorCode: canonicalResult.errorCode || verification.errorCode,
+            output: canonicalResult.output,
+            verifierSummary: verification.summary,
+          });
+          const wrappedEnvelope = wrapUntrustedData(rawObservationJson, 'tool_output');
+          const wrappedObservation = `<untrusted_data source="tool_output" tool="${proposedCall.tool}" wrappedAt="${wrappedEnvelope.wrappedAt}">${wrappedEnvelope.sanitizedContent || wrappedEnvelope.content}</untrusted_data>`;
+          untrustedObservationBuffer += `\n${rawObservationJson}`;
+
+          conversationMessages.push({
+            role: 'assistant',
+            content: JSON.stringify({
+              tool_call: {
+                id: proposedCall.id,
+                name: proposedCall.tool,
+                arguments: proposedCall.args,
+              },
+            }),
+          });
+          conversationMessages.push({
+            role: 'tool',
+            name: proposedCall.tool,
+            call_id: proposedCall.id,
+            content: wrappedObservation,
+          });
+
+          if (
+            guardEval.requiresApproval ||
+            canonicalResult.executionState === 'WAITING_FOR_APPROVAL'
+          ) {
+            status = 'waiting_for_approval';
+            pendingApproval = {
+              id: `appr-${missionId}-${stepNumber}`,
+              title:
+                String(proposedCall.args.title || '') ||
+                `Approval Required: ${proposedCall.tool}`,
+              target:
+                String(proposedCall.args.targetUrl || proposedCall.args.url || proposedCall.tool),
+              risk: 'money',
+              evidenceHash: verification.evidenceHash,
+              reason: guardEval.reason || canonicalResult.errorMessage || 'Requires user approval',
+              stepNumber,
+            };
+            bus.emit({
+              type: 'approval_requested',
+              missionId,
+              status: 'waiting_for_approval',
+              morrowEvent: 'awaiting_approval',
+              statusChipLabel: 'Needs your approval',
+              approvalRequest: pendingApproval,
+            });
+            stopMissionLoop = true;
+            break;
+          }
+
+          if (verification.verificationState === 'UNCERTAIN') {
+            status = 'failed';
+            missionErrorCode = verification.errorCode || 'UNCERTAIN_OUTCOME';
+            missionErrorSummary = verification.summary;
+            stopMissionLoop = true;
+            break;
+          }
+
+          if (!guardEval.allowed || !canonicalResult.ok || !verification.verified) {
+            if (ctx.allowRecoveryTurn && guardEval.allowed && turnIndex < maxSteps) {
+              // Escalate next turn to muse-wonder-1.0 for recovery planning
+              needsRecoveryModel = true;
+            } else {
+              status = 'failed';
+              missionErrorCode =
+                canonicalResult.errorCode || verification.errorCode || 'STEP_FAILED';
+              missionErrorSummary =
+                canonicalResult.errorMessage || verification.summary || 'Step failed';
+              stopMissionLoop = true;
+              break;
+            }
+          }
+        }
+
+        if (stopMissionLoop) {
+          break;
+        }
       }
 
-      if (!guardEval.allowed || !canonicalResult.ok || !verification.verified) {
-        status = 'failed';
-        break;
+      if (status === 'running') {
+        status = 'completed';
+      }
+    } else {
+      // ======================================================================
+      // BRANCH B: DETERMINISTIC MOCK MODE (OR EXPLICIT TEST OVERRIDE)
+      // ======================================================================
+      const plannedToolCalls: RuntimeToolCall[] =
+        ctx.plannedToolCallsOverride ||
+        this.planToolCalls(missionPrompt, isFlagshipOctoberScenario);
+
+      for (let i = 0; i < Math.min(plannedToolCalls.length, maxSteps); i++) {
+        if (
+          this.cancelledMissionIds.has(missionId) ||
+          ctx.abortSignal?.aborted ||
+          (ctx.cancelAfterStep !== undefined && i >= ctx.cancelAfterStep)
+        ) {
+          status = 'cancelled';
+          break;
+        }
+
+        const toolCall = plannedToolCalls[i];
+        const stepNumber = i + 1;
+        const { guardEval, canonicalResult, verification } = executeSingleToolStep(
+          toolCall,
+          stepNumber,
+          ''
+        );
+
+        if (guardEval.requiresApproval) {
+          status = 'waiting_for_approval';
+          pendingApproval = {
+            id: `appr-${missionId}-${stepNumber}`,
+            title:
+              String(toolCall.args.title || '') ||
+              'Utility Bill Draft: GHS 120.00 to ECG Prepaid Meter #04291882',
+            target:
+              String(toolCall.args.targetUrl || '') ||
+              'https://portal.mockbank.local/pay-bill#submit',
+            risk: 'money',
+            evidenceHash: verification.evidenceHash,
+            reason: guardEval.reason,
+            stepNumber,
+          };
+          bus.emit({
+            type: 'approval_requested',
+            missionId,
+            status: 'waiting_for_approval',
+            morrowEvent: 'awaiting_approval',
+            statusChipLabel: 'Needs your approval',
+            approvalRequest: pendingApproval,
+          });
+          break;
+        }
+
+        if (!guardEval.allowed || !canonicalResult.ok || !verification.verified) {
+          status = 'failed';
+          break;
+        }
+      }
+
+      if (status === 'running') {
+        status = 'completed';
       }
     }
 
-    if (status === 'running') {
-      status = 'completed';
-    }
-
-    const anySimulated = steps.some((s) => s.isSimulated);
+    const anySimulated = mode === 'mock' || steps.some((s) => s.isSimulated);
     const lastStep = steps[steps.length - 1];
     const missionExecutionState: ExecutionTruthState =
       status === 'cancelled'
@@ -2491,7 +3685,10 @@ export class AgentRuntime {
         : status === 'waiting_for_approval'
           ? 'WAITING_FOR_APPROVAL'
           : status === 'failed'
-            ? lastStep?.executionState || 'FAILED'
+            ? lastStep?.executionState ||
+              (missionErrorCode === 'MALFORMED_TOOL_CALL' || missionErrorCode === 'BUDGET_EXCEEDED'
+                ? 'BLOCKED'
+                : 'FAILED')
             : anySimulated
               ? 'SIMULATED'
               : 'EXECUTED';
@@ -2502,7 +3699,10 @@ export class AgentRuntime {
         : status === 'waiting_for_approval'
           ? 'WAITING_FOR_APPROVAL'
           : status === 'failed'
-            ? lastStep?.verificationState || 'FAILED'
+            ? lastStep?.verificationState ||
+              (missionErrorCode === 'MALFORMED_TOOL_CALL' || missionErrorCode === 'BUDGET_EXCEEDED'
+                ? 'BLOCKED'
+                : 'FAILED')
             : anySimulated
               ? 'SIMULATED'
               : 'VERIFIED';
@@ -2513,13 +3713,15 @@ export class AgentRuntime {
       isSimulated: anySimulated && status === 'completed',
     });
 
-    const structuredSummary = isFlagshipOctoberScenario
+    const structuredSummary = isFlagshipOctoberScenario && mode === 'mock'
       ? 'Reconciled October statement (Opening GHS 1,240.00 + Credits GHS 2,000.00 - Debits GHS 782.50 = Closing GHS 2,457.50; Safe-to-Spend GHS 1,037.50), staged the reconciliation report diff in Code, scheduled the weekly balance watch, and paused the GHS 120.00 ECG utility payment draft because it Needs your approval.'
       : status === 'cancelled'
         ? `Mission cancelled after ${steps.length} step(s) for "${missionPrompt}".`
         : status === 'failed'
-          ? `Mission stopped (${lastStep?.verification.errorCode || 'FAILED'}): ${lastStep?.verification.summary || 'Step failed verification'}.`
-          : `Processed ${steps.length} tool step(s) (${uiStatusLabel}) for "${missionPrompt}".`;
+          ? `Mission stopped (${missionErrorCode || lastStep?.verification.errorCode || 'FAILED'}): ${missionErrorSummary || lastStep?.verification.summary || 'Step failed verification'}.`
+          : liveModelFinalReply
+            ? `${liveModelFinalReply} (${uiStatusLabel})`
+            : `Processed ${steps.length} tool step(s) (${uiStatusLabel}) for "${missionPrompt}".`;
 
     const statusLabel: 'Verified' | 'Needs your approval' | 'Blocked for safety' =
       status === 'waiting_for_approval'
@@ -2530,23 +3732,85 @@ export class AgentRuntime {
 
     const factChecked = verifyAndRestyleWithPersona({
       structuredFacts: {
-        numbers: isFlagshipOctoberScenario
-          ? ['GHS 1,240.00', 'GHS 2,000.00', 'GHS 782.50', 'GHS 2,457.50', 'GHS 1,037.50', 'GHS 120.00']
-          : [],
+        numbers:
+          isFlagshipOctoberScenario && mode === 'mock'
+            ? [
+                'GHS 1,240.00',
+                'GHS 2,000.00',
+                'GHS 782.50',
+                'GHS 2,457.50',
+                'GHS 1,037.50',
+                'GHS 120.00',
+              ]
+            : [],
         statusLabel,
         summary: structuredSummary,
       },
       soul: ctx.soul,
     });
 
-    const tokenUsage: TokenUsageRecord = {
-      model: modelUsed,
-      inputTokens: assembledPrompt.estimatedTokens,
-      outputTokens: Math.ceil(factChecked.finalReply.length / 4),
-      source: mode === 'mock' ? 'mock_zero_cost' : 'estimated',
-      estimatedCostUsd: mode === 'mock' ? 0 : 0.00042,
-    };
-    ctx.modelRouter.recordUsage(tokenUsage);
+    let tokenUsage: TokenUsageRecord;
+    if (modelTurnRecords.length > 0) {
+      const totalIn = modelTurnRecords.reduce((a, r) => a + r.inputTokens, 0);
+      const totalOut = modelTurnRecords.reduce((a, r) => a + r.outputTokens, 0);
+      const anyReported = modelTurnRecords.some((r) => r.reportedInputTokens !== null && r.reportedInputTokens !== undefined);
+      const totalRepIn = anyReported
+        ? modelTurnRecords.reduce((a, r) => a + (r.reportedInputTokens ?? 0), 0)
+        : null;
+      const totalRepOut = anyReported
+        ? modelTurnRecords.reduce((a, r) => a + (r.reportedOutputTokens ?? 0), 0)
+        : null;
+      const totalEstIn = modelTurnRecords.reduce(
+        (a, r) => a + (r.estimatedInputTokens ?? r.inputTokens),
+        0
+      );
+      const totalEstOut = modelTurnRecords.reduce(
+        (a, r) => a + (r.estimatedOutputTokens ?? r.outputTokens),
+        0
+      );
+      const totalCost = Number(
+        modelTurnRecords.reduce((a, r) => a + r.estimatedCostUsd, 0).toFixed(6)
+      );
+      const totalLatency = modelTurnRecords.reduce((a, r) => a + (r.latencyMs ?? 0), 0);
+      const lastRecord = modelTurnRecords[modelTurnRecords.length - 1];
+      tokenUsage = {
+        requestId: lastRecord.requestId,
+        provider: 'Meta AI',
+        model: modelUsed,
+        taskRole: lastRecord.taskRole,
+        inputTokens: totalIn,
+        outputTokens: totalOut,
+        reportedInputTokens: totalRepIn,
+        reportedOutputTokens: totalRepOut,
+        estimatedInputTokens: totalEstIn,
+        estimatedOutputTokens: totalEstOut,
+        source: anyReported ? 'provider_reported' : 'estimated',
+        estimatedCostUsd: totalCost,
+        latencyMs: totalLatency,
+        outcome: lastRecord.outcome,
+        timestampIso: new Date().toISOString(),
+      };
+    } else {
+      const estOut = Math.ceil(factChecked.finalReply.length / 4);
+      tokenUsage = {
+        requestId: `mock-${missionId}`,
+        provider: mode === 'mock' ? 'mock' : 'Meta AI',
+        model: modelUsed,
+        taskRole: 'loop_extraction',
+        inputTokens: assembledPrompt.estimatedTokens,
+        outputTokens: estOut,
+        reportedInputTokens: null,
+        reportedOutputTokens: null,
+        estimatedInputTokens: assembledPrompt.estimatedTokens,
+        estimatedOutputTokens: estOut,
+        source: mode === 'mock' ? 'mock_zero_cost' : 'estimated',
+        estimatedCostUsd: 0,
+        latencyMs: Date.now() - missionStartMs,
+        outcome: 'mock_simulated',
+        timestampIso: new Date().toISOString(),
+      };
+      ctx.modelRouter.recordUsage(tokenUsage);
+    }
 
     bus.emit({
       type: 'mission_finished',
@@ -2566,6 +3830,7 @@ export class AgentRuntime {
       missionPrompt,
       mode,
       modelUsed,
+      modelsUsed: Array.from(modelsUsedSet),
       status,
       executionState: missionExecutionState,
       verificationState: missionVerificationState,
@@ -2581,6 +3846,8 @@ export class AgentRuntime {
       finalReply: factChecked.finalReply,
       factPreservationPassed: factChecked.factPreservationPassed,
       tokenUsage,
+      modelTurnRecords,
+      errorCode: missionErrorCode,
     };
   }
 
@@ -3326,3 +4593,9 @@ export const INITIAL_DESKTOP_APP_GRANTS: DesktopAppGrant[] = [
     simulatedOnDesktopStage: true,
   },
 ];
+
+// Re-export real Skill Replay Engine with drift detection and checkpoints
+export * from './skill_replay_engine';
+
+// Re-export Phase 8 Self-Extension Manager & Dynamic Skill/Plugin Runtime
+export * from './self_extension_manager';

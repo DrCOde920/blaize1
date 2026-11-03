@@ -32,19 +32,39 @@ Detailed file-and-line proofs for each limitation are recorded in `/FEATURE_STAT
      - `testConnectorReal` (`src/packages/connectors_scheduler/index.ts:756-837`) HTTP testing for all 18 connectors (Phase 3).
    - `invokeConnectorToolWithSafety` (`src/packages/connectors_scheduler/index.ts:842-926`) returns `status: 'executed'` without calling external APIs.
 
-4. **AgentRuntime, Verifiers & Skill Replay Simulation (`F-09`, `F-10`, `F-11`) — Partially Remediated in Phase 1**
+4. **AgentRuntime, Verifiers & Skill Replay Simulation (`F-09`, `F-10`, `F-11`) — Remediated in Phases 1 & 4**
    - **Remediated in Phase 1**:
      - `ToolRegistry` and `AgentRuntime.verifyStepOutcome()` no longer allow unknown tools (`UNSUPPORTED_TOOL`), unknown skills (`UNKNOWN_SKILL`), unknown plugins (`UNKNOWN_PLUGIN`), missing verifiers (`MISSING_VERIFIER`), or success without real side effects (`EXECUTION_WITHOUT_SIDE_EFFECT`).
      - `verifyDesktopStepOutcome()` and `CORE_VERIFIER_STRATEGIES` no longer substitute expected hashes for missing actual hashes or pass when DOM snapshots/UI observations are absent (`UNCERTAIN`), and `vision_verifier` returns `UNSUPPORTED`.
      - All canned runtime, skill, browser, L3xi, workspace, and desktop-stage implementations are explicitly marked `SIMULATED` (`isSimulated: true`) and isolated from promotion to `REAL`.
+   - **Remediated in Phase 4 (`F-09` Meta Model Inference & Mission Loop)**:
+     - `ModelRouter.respond()` / `generate()` calls `/api/model` with request IDs, rate limits, 64 KB payload caps, timeouts, abort signals, and separate reported vs estimated usage tracking.
+     - `AgentRuntime.runMission()` in `live` mode executes a real multi-turn model loop sending the 4-slot prompt and `ToolRegistry.toModelToolSchemas()`, validating untrusted proposals (`validateUntrustedModelToolProposal`), enforcing `PolicyEngine`, wrapping tool observations in `<untrusted_data>`, and escalating from `muse-spark-1.3` to `muse-wonder-1.0` on recovery.
+     - `/api/model/test` performs both catalogue reachability and a real inference + tool-calling probe, exposing 5 distinct health flags in the UI.
    - **Remaining for Future Phases**:
-     - `AgentRuntime.runMission` still uses deterministic tool-call planning templates in `planToolCalls()` when live model tool-calling is not invoked (Phase 3/5).
      - `replayCompiledSkillByIntent` still replays against simulated in-memory state (`executionState: 'SIMULATED'`).
 
-5. **PC Operator, Browser & Profiler Simulation (`F-12`, `F-13`, `F-14`, `F-15`, `F-16`, `F-17`, `F-18`, `F-19`)**
-   - `BaseCrossPlatformDriver` (`src/packages/pc_operator/index.ts`) and `runEverydayPcBenchmarkSuite` are now explicitly tagged `executionState: 'SIMULATED'` and `isSimulated: true` (Phase 1), but still simulate desktop windows/elements in memory and hardcode OS permission checks (`AXIsProcessTrusted`, `CGPreflightScreenCaptureAccess`, Windows UIA, Linux AT-SPI2) as `'granted'` (to be remediated in Phase 5).
-   - `ReaderEngine.navigate` (`src/packages/browser_ide/index.ts:200-204`) masks network errors with a hardcoded Kyoto HTML string (`statusCode: 200`), and `RemoteBrowserEngine` (`lines 294-307`) aliases `ReaderEngine` (to be remediated in Phase 4).
-   - `measurePerProcessMemory` (`src/packages/living/index.ts:879-977`) returns hardcoded PIDs and MB values (to be remediated in Phase 6).
-   - `scripts/verify.ts` Gate 6 (`lines 177-180`) is a no-op stub (to be remediated in Phase 7).
-   - `PlacesGuard` (`src/packages/places/index.ts`) is implemented and unit-tested as pure logic, but not yet enforced as a mandatory pre-execution hook across all workspace/runtime tools (to be remediated in Phase 4).
-
+5. **Electron Packaging Host Limits & PC Operator / Browser / Profiler Simulation (`F-12`, `F-13`, `F-14`, `F-15`, `F-16`, `F-17`, `F-18`, `F-19`)**
+   - **Remediated in Phase 5 (`F-16` Electron Desktop Foundation)**:
+     - Installed and pinned `electron` (`45.2.1`) and `electron-builder` (`26.18.0`); added `desktop:dev`, `desktop:build`, `desktop:package`, `desktop:package:linux`, `desktop:package:win`, `desktop:package:mac`, and `test:electron`.
+     - Hardened `BrowserWindow` defaults, CSP, navigation allowlist, default-deny permissions, HTTPS-only external links, mainFrame/origin IPC validation, runtime Zod schemas across all 25 channels, `PolicyEngine` routing, and durable SQLite WAL + FTS5 persistence.
+     - Built and smoke-tested the Linux `x64` desktop bundle (`release/blaize-desktop-linux-x64` + `.tar.gz`).
+   - **Remediated in Phase 6A (`F-11` / `F-12` Linux Desktop Driver)**:
+     - Replaced `LinuxDesktopDriver` synthetic `BaseCrossPlatformDriver` inheritance with a real Linux desktop adapter (`src/packages/pc_operator/linux_driver.ts`, `isSimulated: false`).
+     - Dynamically probes session type (`wayland` / `x11` / `headless`), desktop environment, AT-SPI2 bus/sockets, XDG Desktop Portals (`WaylandPortalSessionManager`), X11 tools, monitors, `/proc` processes, and permissions (zero hardcoded `'granted'` values).
+     - Captures fresh pre-action and post-action OS snapshots (`beforeSnapshot` / `afterSnapshot`), enforces Wayland global input restrictions (`UNSUPPORTED_WAYLAND_GLOBAL_INPUT`) and T4 user-input pause hooks (`UNSUPPORTED_T4_NO_USER_INPUT_HOOK`), and prevents synthetic snapshots (`isSimulated: true`) from being labelled `VERIFIED` or promoted to `REAL`.
+   - **Remediated in Phase 6B (`F-11` / `F-12` Windows Desktop Driver)**:
+     - Replaced `WindowsDesktopDriver` synthetic `BaseCrossPlatformDriver` inheritance with a real Windows desktop adapter (`src/packages/pc_operator/windows_driver.ts`, `isSimulated: false`).
+     - Implements Win32 window/process discovery, Per-Monitor DPI v2 coordinate & monitor mapping, UIPI standard-user security boundary (refuses to bypass UAC or inject into elevated Administrator windows, returning `UNSUPPORTED` or `WAITING_FOR_APPROVAL`), all 5 UIA patterns (`InvokePattern`, `ValuePattern`, `SelectionItemPattern`, `ExpandCollapsePattern`, `ScrollPattern`), dynamic permission checks (zero hardcoded `'granted'` values), fresh pre/post OS observations, and T4 physical user-input auto-pause detection.
+   - **Remediated in Phase 6C (`F-12` macOS Desktop Driver)**:
+     - Replaced `MacOSDesktopDriver` synthetic `BaseCrossPlatformDriver` inheritance with a real macOS desktop adapter (`src/packages/pc_operator/macos_driver.ts`, `isSimulated: false`) with Retina 2.0x DPI mapping, `SecurityAgent` and `AXSecureTextField` security boundaries, dynamic permission checks, and fresh pre/post OS observations.
+   - **Remediated in Phase 7 (`F-10`, `F-11`, `F-14`, `F-15` AI Browser, Scoped IDE Workspace, Consented Recorder & Skill Replay)**:
+     - Implemented `ChromiumBrowserSessionManager` (`src/packages/browser_ide/browser_session.ts`) with isolated persistent profile partitions (`personal`, `work`, `testing`), PolicyEngine URL/redirect/download validation, credential shield auto-pause, untrusted page text wrapping, and removal of the silent Kyoto fallback from live browser paths (offline fixtures require explicit `useOfflineFixture: true` and are tagged `SIMULATED`).
+     - Implemented `ScopedWorkspaceManager` and `RestrictedCommandRegistry` (`src/packages/browser_ide/scoped_workspace.ts`) with canonical path resolution, symlink/traversal escape prevention, SHA-256 file verification, checkpoints, staged diffs, and allowlisted test commands.
+     - Implemented `ConsentedRecorder` (`src/packages/recorder/consented_recorder.ts`) and `SkillReplayEngine` (`src/packages/runtime/skill_replay_engine.ts`) with explicit capture consent, credential screen auto-pause, secret redaction, parameterized skill compilation, drift detection, checkpoints/rollback, and real file/state verification.
+   - **Remediated in Phase 8 (Dynamic Skill/Plugin Runtime & Self-Extension Manager)**:
+     - Implemented `SelfExtensionManager` (`src/packages/runtime/self_extension_manager.ts`) enforcing a deterministic code boundary between `CapabilityPlane` and `ProtectedControlPlane`, strict `PluginManifestV1` with Ed25519 signature & SHA-256 content hash verification, zero default permissions (`effectiveGrants = requested ∩ HostCapabilityCeiling`), out-of-process restricted worker execution (`prlimit` + Node `--permission` + `--max-old-space-size=64` + null-prototype `vm`), version-pinned skills (`blaize.skill.v1`) executing through `PolicyEngine` + `ToolRegistry` + `MemoryLedger`, and secret-redacted skill creation from natural language and Teach & Replay traces.
+   - **Remaining Platform & Subsystem Limitations**:
+     - Because the current CI / AI Studio runner is a headless Linux container (`process.platform === 'linux'`), `WindowsDesktopDriver` is exercised end-to-end against `scripts/windows-test-app.py` over `BLAIZE_WINDOWS_UIA_SOCKET` and `MacOSDesktopDriver` against `scripts/macos-test-app.py` over `BLAIZE_MACOS_AX_SOCKET`, while physical Windows 10/11 and macOS sessions are documented in `docs/WINDOWS_DRIVER_TEST_CHECKLIST.md` and `docs/MACOS_DRIVER_TEST_CHECKLIST.md`.
+     - Cross-OS installer generation (`desktop:package:mac` `.dmg` and `desktop:package:win` `.exe`) cannot be executed on a Linux container runner and honestly exits with `UNSUPPORTED_HOST_OS` (requires native `darwin` and `win32` CI runners).
+     - `measurePerProcessMemory` (`src/packages/living/index.ts:879-977`) and `scripts/verify.ts` Gate 6 remain to be remediated in future phases.

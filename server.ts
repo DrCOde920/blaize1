@@ -122,7 +122,7 @@ function hasConfiguredApiKey(): boolean {
   );
 }
 
-export async function createBlaizeServer() {
+export async function createBlaizeServer(options?: { skipVite?: boolean }) {
   const app = express();
   app.use(express.json({ limit: '64kb' }));
 
@@ -250,22 +250,51 @@ export async function createBlaizeServer() {
     });
   });
 
-  // 1. Honest Connection Check Endpoint (Never leaks key; no silent fallback)
-  app.post('/api/model/test', async (_req, res) => {
+  const proxyRequestTimestamps: number[] = [];
+  function checkProxyRateLimit(maxPerMin = Number(process.env.META_MODEL_RATE_LIMIT_PER_MIN) || 60): boolean {
+    const now = Date.now();
+    while (proxyRequestTimestamps.length > 0 && now - proxyRequestTimestamps[0] > 60_000) {
+      proxyRequestTimestamps.shift();
+    }
+    if (proxyRequestTimestamps.length >= maxPerMin) {
+      return false;
+    }
+    proxyRequestTimestamps.push(now);
+    return true;
+  }
+
+  // 1. Honest Connection & Real Inference Health Check Endpoint (Never leaks key; no silent fallback)
+  app.post('/api/model/test', async (req, res) => {
+    const startedAt = Date.now();
     const baseUrl = (process.env.META_API_BASE_URL || 'https://api.meta.ai/v1').replace(/\/$/, '');
+    const probeInference = req.body?.probeInference !== false;
+    const requestedModel =
+      typeof req.body?.model === 'string' && ALLOWED_META_MODELS.has(req.body.model)
+        ? req.body.model
+        : 'muse-spark-1.3';
+
     if (!hasConfiguredApiKey()) {
       res.status(200).json({
         ok: false,
         mode: 'mock_only',
         keyConfigured: false,
+        apiKeyConfigured: false,
+        catalogueReachable: false,
+        inferenceSucceeded: false,
+        toolCallingSupported: false,
+        modelAvailable: false,
+        modelUnavailable: true,
         endpoint: baseUrl,
         defaultLoopModel: 'muse-spark-1.3',
         defaultPlanningModel: 'muse-wonder-1.0',
+        latencyMs: Date.now() - startedAt,
         message:
           'MODEL_API_KEY is not configured on the server. Live mode is unavailable; running in Mock mode.',
       });
       return;
     }
+
+    const rawApiKey = process.env.MODEL_API_KEY!.trim();
 
     try {
       const controller = new AbortController();
@@ -273,7 +302,7 @@ export async function createBlaizeServer() {
       const response = await fetch(`${baseUrl}/models`, {
         method: 'GET',
         headers: {
-          Authorization: `Bearer ${process.env.MODEL_API_KEY!.trim()}`,
+          Authorization: `Bearer ${rawApiKey}`,
           Accept: 'application/json',
         },
         signal: controller.signal,
@@ -285,41 +314,176 @@ export async function createBlaizeServer() {
           ok: false,
           mode: 'live_error',
           keyConfigured: true,
+          apiKeyConfigured: true,
+          catalogueReachable: false,
+          inferenceSucceeded: false,
+          toolCallingSupported: false,
+          modelAvailable: false,
+          modelUnavailable: true,
           endpoint: baseUrl,
           httpStatus: response.status,
-          message: `Meta Model API returned HTTP ${response.status}. Check MODEL_API_KEY permissions.`,
+          latencyMs: Date.now() - startedAt,
+          message: `Meta Model API catalogue returned HTTP ${response.status}. Check MODEL_API_KEY permissions.`,
         });
         return;
       }
 
+      const catalogueData = await response.json().catch(() => null);
+      const catalogueModels: string[] = Array.isArray(catalogueData?.data)
+        ? catalogueData.data.map((m: any) => String(m?.id || ''))
+        : [];
+      const modelInCatalogue =
+        catalogueModels.length === 0 || catalogueModels.includes(requestedModel);
+
+      if (!probeInference) {
+        res.status(200).json({
+          ok: modelInCatalogue,
+          mode: modelInCatalogue ? 'live_ready' : 'live_error',
+          keyConfigured: true,
+          apiKeyConfigured: true,
+          catalogueReachable: true,
+          inferenceSucceeded: false,
+          toolCallingSupported: false,
+          modelAvailable: modelInCatalogue,
+          modelUnavailable: !modelInCatalogue,
+          endpoint: baseUrl,
+          defaultLoopModel: 'muse-spark-1.3',
+          defaultPlanningModel: 'muse-wonder-1.0',
+          latencyMs: Date.now() - startedAt,
+          message: modelInCatalogue
+            ? 'Catalogue reachable on Meta Model API (inference probe skipped).'
+            : `Catalogue reachable, but model '${requestedModel}' is unavailable.`,
+        });
+        return;
+      }
+
+      // Perform a real inference + tool-calling probe distinct from /models catalogue check
+      const infController = new AbortController();
+      const infTimeout = setTimeout(() => infController.abort(), 6000);
+      const probePayload = {
+        model: requestedModel,
+        input: 'Health check: call health_ping with status="ok".',
+        max_output_tokens: 64,
+        temperature: 0,
+        tools: [
+          {
+            type: 'function',
+            name: 'health_ping',
+            description: 'Diagnostic health check tool call probe',
+            parameters: {
+              type: 'object',
+              properties: { status: { type: 'string' } },
+              required: ['status'],
+            },
+          },
+        ],
+      };
+
+      const infResponse = await fetch(`${baseUrl}/responses`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${rawApiKey}`,
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        body: JSON.stringify(probePayload),
+        signal: infController.signal,
+      });
+      clearTimeout(infTimeout);
+
+      const infData = await infResponse.json().catch(() => null);
+      if (!infResponse.ok) {
+        res.status(200).json({
+          ok: false,
+          mode: 'live_error',
+          keyConfigured: true,
+          apiKeyConfigured: true,
+          catalogueReachable: true,
+          inferenceSucceeded: false,
+          toolCallingSupported: false,
+          modelAvailable: false,
+          modelUnavailable: true,
+          endpoint: baseUrl,
+          httpStatus: infResponse.status,
+          latencyMs: Date.now() - startedAt,
+          message: redactSecretsFromText(
+            `Catalogue reachable, but inference probe failed (HTTP ${infResponse.status}): ${
+              infData?.error?.message || infData?.error || 'model unavailable'
+            }`,
+            [rawApiKey]
+          ),
+        });
+        return;
+      }
+
+      const outputItems: any[] = Array.isArray(infData?.output) ? infData.output : [];
+      const hasToolCallInOutput =
+        outputItems.some(
+          (item) => item?.type === 'function_call' || item?.type === 'tool_call'
+        ) ||
+        (Array.isArray(infData?.tool_calls) && infData.tool_calls.length > 0) ||
+        Boolean(infData?.supports_tool_calling);
+
+      const inferenceSucceeded = true;
+      const toolCallingSupported = Boolean(hasToolCallInOutput);
+      const modelAvailable = modelInCatalogue && inferenceSucceeded;
+
       res.status(200).json({
-        ok: true,
-        mode: 'live_ready',
+        ok: modelAvailable,
+        mode: modelAvailable ? 'live_ready' : 'live_error',
         keyConfigured: true,
+        apiKeyConfigured: true,
+        catalogueReachable: true,
+        inferenceSucceeded,
+        toolCallingSupported,
+        modelAvailable,
+        modelUnavailable: !modelAvailable,
         endpoint: baseUrl,
         defaultLoopModel: 'muse-spark-1.3',
         defaultPlanningModel: 'muse-wonder-1.0',
-        message: 'Connected to Meta Model API (muse-spark-1.3 / muse-wonder-1.0).',
+        latencyMs: Date.now() - startedAt,
+        message: `Connected to Meta Model API (${requestedModel}) · Catalogue reachable · Inference succeeded · Tool calling ${
+          toolCallingSupported ? 'verified' : 'not detected'
+        }.`,
       });
     } catch (err: any) {
       res.status(200).json({
         ok: false,
         mode: 'live_unreachable',
         keyConfigured: true,
+        apiKeyConfigured: true,
+        catalogueReachable: false,
+        inferenceSucceeded: false,
+        toolCallingSupported: false,
+        modelAvailable: false,
+        modelUnavailable: true,
         endpoint: baseUrl,
-        message: `Could not reach ${baseUrl} (${err?.message || 'network error'}). No silent fallback performed.`,
+        latencyMs: Date.now() - startedAt,
+        message: redactSecretsFromText(
+          `Could not reach ${baseUrl} (${err?.message || 'network error'}). No silent fallback performed.`,
+          [rawApiKey]
+        ),
       });
     }
   });
 
   // 2. Server-Side Meta Model API Proxy (/api/model)
   app.post('/api/model', async (req, res) => {
+    const startedAt = Date.now();
+    const requestId =
+      typeof req.body?.requestId === 'string' && req.body.requestId.trim()
+        ? req.body.requestId.trim()
+        : `req_${crypto.randomBytes(6).toString('hex')}`;
+
     const validation = validateMetaModelProxyRequest(req.body);
     if (!validation.valid) {
       res.status(400).json({
         ok: false,
+        requestId,
+        errorCode: 'INVALID_REQUEST',
         error: validation.error,
         model: validation.resolvedModel,
+        latencyMs: Date.now() - startedAt,
       });
       return;
     }
@@ -327,14 +491,35 @@ export async function createBlaizeServer() {
     if (!hasConfiguredApiKey()) {
       res.status(503).json({
         ok: false,
+        requestId,
+        errorCode: 'AUTH_MISSING',
         error:
           'Live mode requested, but MODEL_API_KEY is not configured in the server environment. Switch to Mock mode or set MODEL_API_KEY.',
         model: validation.resolvedModel,
         silentFallbackUsed: false,
+        latencyMs: Date.now() - startedAt,
       });
       return;
     }
 
+    const customRateLimit =
+      typeof req.body?.rateLimitPerMinute === 'number'
+        ? req.body.rateLimitPerMinute
+        : Number(process.env.META_MODEL_RATE_LIMIT_PER_MIN) || 60;
+    if (!checkProxyRateLimit(customRateLimit)) {
+      res.status(429).json({
+        ok: false,
+        requestId,
+        errorCode: 'RATE_LIMITED',
+        error: `Rate limit exceeded (${customRateLimit} requests/min). Please wait before sending more model requests.`,
+        model: validation.resolvedModel,
+        silentFallbackUsed: false,
+        latencyMs: Date.now() - startedAt,
+      });
+      return;
+    }
+
+    const rawApiKey = process.env.MODEL_API_KEY!.trim();
     const baseUrl = (process.env.META_API_BASE_URL || 'https://api.meta.ai/v1').replace(/\/$/, '');
     const upstreamPayload = {
       model: validation.resolvedModel,
@@ -344,15 +529,18 @@ export async function createBlaizeServer() {
       ...(Array.isArray(req.body.tools) ? { tools: req.body.tools } : {}),
     };
 
+    const timeoutMs = Math.min(Math.max(Number(req.body?.timeoutMs) || 15000, 100), 30000);
+
     try {
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 15000);
+      const timeout = setTimeout(() => controller.abort(), timeoutMs);
       const response = await fetch(`${baseUrl}/responses`, {
         method: 'POST',
         headers: {
-          Authorization: `Bearer ${process.env.MODEL_API_KEY!.trim()}`,
+          Authorization: `Bearer ${rawApiKey}`,
           'Content-Type': 'application/json',
           Accept: 'application/json',
+          'X-Request-Id': requestId,
         },
         body: JSON.stringify(upstreamPayload),
         signal: controller.signal,
@@ -360,42 +548,97 @@ export async function createBlaizeServer() {
       clearTimeout(timeout);
 
       const data = await response.json().catch(() => null);
+      const latencyMs = Date.now() - startedAt;
+
       if (!response.ok) {
+        const errorCode =
+          response.status === 401 || response.status === 403
+            ? 'AUTH_INVALID'
+            : response.status === 429
+              ? 'RATE_LIMITED'
+              : 'UPSTREAM_ERROR';
         res.status(response.status).json({
           ok: false,
-          error:
-            (data && (data.error?.message || data.error)) ||
-            `Meta Model API error (HTTP ${response.status})`,
+          requestId,
+          errorCode,
+          error: redactSecretsFromText(
+            String(
+              (data && (data.error?.message || data.error)) ||
+                `Meta Model API error (HTTP ${response.status})`
+            ),
+            [rawApiKey]
+          ),
           model: validation.resolvedModel,
+          provider: 'Meta AI',
+          latencyMs,
           silentFallbackUsed: false,
         });
         return;
       }
 
-      const reportedUsage = data?.usage
+      const estimatedInputTokens = Math.ceil(JSON.stringify(upstreamPayload.input).length / 4);
+      const estimatedOutputTokens = Math.ceil(JSON.stringify(data || {}).length / 4);
+      const hasReportedUsage = Boolean(
+        data?.usage &&
+          (data.usage.input_tokens !== undefined ||
+            data.usage.prompt_tokens !== undefined ||
+            data.usage.output_tokens !== undefined ||
+            data.usage.completion_tokens !== undefined)
+      );
+
+      const reportedInputTokens = hasReportedUsage
+        ? Number(data.usage.input_tokens ?? data.usage.prompt_tokens ?? 0)
+        : null;
+      const reportedOutputTokens = hasReportedUsage
+        ? Number(data.usage.output_tokens ?? data.usage.completion_tokens ?? 0)
+        : null;
+
+      const reportedUsage = hasReportedUsage
         ? {
-            inputTokens: Number(data.usage.input_tokens ?? data.usage.prompt_tokens ?? 0),
-            outputTokens: Number(data.usage.output_tokens ?? data.usage.completion_tokens ?? 0),
+            inputTokens: reportedInputTokens!,
+            outputTokens: reportedOutputTokens!,
             source: 'reported' as const,
           }
         : {
-            inputTokens: Math.ceil(JSON.stringify(upstreamPayload.input).length / 4),
-            outputTokens: Math.ceil(JSON.stringify(data).length / 4),
+            inputTokens: estimatedInputTokens,
+            outputTokens: estimatedOutputTokens,
             source: 'estimated' as const,
           };
 
       res.status(200).json({
         ok: true,
+        requestId,
+        provider: 'Meta AI',
         model: validation.resolvedModel,
         response: data,
         usage: reportedUsage,
+        reportedUsage: hasReportedUsage
+          ? { inputTokens: reportedInputTokens!, outputTokens: reportedOutputTokens! }
+          : null,
+        estimatedUsage: {
+          inputTokens: estimatedInputTokens,
+          outputTokens: estimatedOutputTokens,
+        },
+        latencyMs,
         silentFallbackUsed: false,
       });
     } catch (err: any) {
-      res.status(502).json({
+      const latencyMs = Date.now() - startedAt;
+      const isAbort =
+        err?.name === 'AbortError' || /abort|timed?\s*out/i.test(String(err?.message || ''));
+      res.status(isAbort ? 504 : 502).json({
         ok: false,
-        error: `Meta Model API request failed: ${err?.message || 'upstream error'}. No silent fallback performed.`,
+        requestId,
+        errorCode: isAbort ? 'TIMEOUT' : 'UPSTREAM_ERROR',
+        error: redactSecretsFromText(
+          `Meta Model API request ${isAbort ? 'timed out' : 'failed'}: ${
+            err?.message || 'upstream error'
+          }. No silent fallback performed.`,
+          [rawApiKey]
+        ),
         model: validation.resolvedModel,
+        provider: 'Meta AI',
+        latencyMs,
         silentFallbackUsed: false,
       });
     }
@@ -1015,19 +1258,21 @@ export async function createBlaizeServer() {
   });
 
   const isProd = process.env.NODE_ENV === 'production';
-  if (!isProd) {
-    const { createServer: createViteServer } = await import('vite');
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: 'spa',
-    });
-    app.use(vite.middlewares);
-  } else {
-    const distPath = path.resolve(__dirname, 'dist');
-    app.use(express.static(distPath));
-    app.get('*', (_req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
-    });
+  if (!options?.skipVite) {
+    if (!isProd) {
+      const { createServer: createViteServer } = await import('vite');
+      const vite = await createViteServer({
+        server: { middlewareMode: true },
+        appType: 'spa',
+      });
+      app.use(vite.middlewares);
+    } else {
+      const distPath = path.resolve(__dirname, 'dist');
+      app.use(express.static(distPath));
+      app.get('*', (_req, res) => {
+        res.sendFile(path.join(distPath, 'index.html'));
+      });
+    }
   }
 
   return app;

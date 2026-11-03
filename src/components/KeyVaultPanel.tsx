@@ -61,7 +61,7 @@ export const KeyVaultPanel: React.FC<KeyVaultPanelProps> = ({
   const [newPlainKeyInput, setNewPlainKeyInput] = useState('');
   const [newSpendCapUsd, setNewSpendCapUsd] = useState(15);
   const [newRateLimitPerMin, setNewRateLimitPerMin] = useState(30);
-  const [secretCodeInput, setSecretCodeInput] = useState('2026');
+  const [secretCodeInput, setSecretCodeInput] = useState('');
 
   // Rotate / Delete / Unlock state
   const [activeRotateKeyId, setActiveRotateKeyId] = useState<string | null>(null);
@@ -326,13 +326,30 @@ export const KeyVaultPanel: React.FC<KeyVaultPanelProps> = ({
       {connectionTestResult && (
         <div
           data-testid="vault-connection-banner"
-          className={`p-3 rounded-xl border text-xs ${
+          className={`p-3 rounded-xl border text-xs space-y-2 ${
             connectionTestResult.ok
               ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
               : 'border-amber-500/30 bg-amber-500/10 text-amber-300'
           }`}
         >
-          {connectionTestResult.message}
+          <div>{connectionTestResult.message}</div>
+          <div className="flex flex-wrap gap-1.5 text-[11px]">
+            <span className="px-2 py-0.5 rounded bg-stone-950/60 border border-stone-800">
+              API Key: {connectionTestResult.apiKeyConfigured ? 'Configured' : 'Missing'}
+            </span>
+            <span className="px-2 py-0.5 rounded bg-stone-950/60 border border-stone-800">
+              Catalogue: {connectionTestResult.catalogueReachable ? 'Reachable' : 'Unreachable'}
+            </span>
+            <span className="px-2 py-0.5 rounded bg-stone-950/60 border border-stone-800">
+              Inference: {connectionTestResult.inferenceSucceeded ? 'Succeeded' : 'Failed'}
+            </span>
+            <span className="px-2 py-0.5 rounded bg-stone-950/60 border border-stone-800">
+              Tool Calling: {connectionTestResult.toolCallingSupported ? 'Supported' : 'Not Verified'}
+            </span>
+            <span className="px-2 py-0.5 rounded bg-stone-950/60 border border-stone-800">
+              Model: {connectionTestResult.modelAvailable ? 'Available' : 'Unavailable'}
+            </span>
+          </div>
         </div>
       )}
 

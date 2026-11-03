@@ -2027,6 +2027,7 @@ export default function App() {
     window.setTimeout(async () => {
       const matchedSkills = matchSkillsForPrompt(text, reusableSkills);
       const isRuntimeScenario =
+        modelRouter.getMode() === 'live' ||
         lower.includes('why did you') ||
         lower.includes('explain') ||
         lower.includes('consensus') ||
@@ -4996,7 +4997,7 @@ export default function App() {
                     {connectionTestResult && (
                       <div
                         data-testid="model-connection-test-banner"
-                        className={`p-3.5 rounded-xl border space-y-1 ${
+                        className={`p-3.5 rounded-xl border space-y-2 ${
                           connectionTestResult.ok
                             ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
                             : 'border-amber-500/30 bg-amber-500/10 text-amber-300'
@@ -5004,9 +5005,48 @@ export default function App() {
                       >
                         <div className="font-semibold">
                           Connection Test ({connectionTestResult.mode.toUpperCase()}):{' '}
-                          {connectionTestResult.ok ? 'READY' : 'UNAVAILABLE (No silent fallback)'}
+                          {connectionTestResult.mode === 'mock'
+                            ? 'SIMULATED (MOCK MODE)'
+                            : connectionTestResult.ok
+                              ? 'LIVE INFERENCE & TOOL-CALLING VERIFIED'
+                              : 'UNAVAILABLE (No silent fallback)'}
                         </div>
                         <div>{connectionTestResult.message}</div>
+                        <div
+                          data-testid="model-health-matrix"
+                          className="grid grid-cols-2 sm:grid-cols-5 gap-2 pt-1 text-[11px]"
+                        >
+                          <div className="px-2 py-1 rounded bg-stone-950/60 border border-stone-800">
+                            <span className="text-stone-400 block">API Key Configured</span>
+                            <span className="font-semibold">
+                              {connectionTestResult.apiKeyConfigured ? 'Yes' : 'No'}
+                            </span>
+                          </div>
+                          <div className="px-2 py-1 rounded bg-stone-950/60 border border-stone-800">
+                            <span className="text-stone-400 block">Catalogue Reachable</span>
+                            <span className="font-semibold">
+                              {connectionTestResult.catalogueReachable ? 'Yes' : 'No'}
+                            </span>
+                          </div>
+                          <div className="px-2 py-1 rounded bg-stone-950/60 border border-stone-800">
+                            <span className="text-stone-400 block">Inference Succeeded</span>
+                            <span className="font-semibold">
+                              {connectionTestResult.inferenceSucceeded ? 'Yes' : 'No'}
+                            </span>
+                          </div>
+                          <div className="px-2 py-1 rounded bg-stone-950/60 border border-stone-800">
+                            <span className="text-stone-400 block">Tool Calling Supported</span>
+                            <span className="font-semibold">
+                              {connectionTestResult.toolCallingSupported ? 'Yes' : 'No'}
+                            </span>
+                          </div>
+                          <div className="px-2 py-1 rounded bg-stone-950/60 border border-stone-800">
+                            <span className="text-stone-400 block">Model Status</span>
+                            <span className="font-semibold">
+                              {connectionTestResult.modelAvailable ? 'Available' : 'Unavailable'}
+                            </span>
+                          </div>
+                        </div>
                       </div>
                     )}
 

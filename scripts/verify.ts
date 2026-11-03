@@ -17,6 +17,14 @@ import { execSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { runMeasuredEvaluationSuite } from '../src/packages/runtime/index.js';
+import { IPC_CONTRACT_MANIFEST } from '../electron/ipc-contracts.js';
+import {
+  registerIpcHandlers,
+  getRegisteredIpcChannels,
+  HARDENED_WEB_PREFERENCES,
+  gracefulShutdown,
+} from '../electron/main.js';
+import { buildPreloadApi } from '../electron/preload.js';
 
 interface GateResult {
   gate: number;
@@ -58,17 +66,27 @@ runGate(2, 'Unit & Integration Tests (node:test)', () => {
     'src/packages/trust/trust_kernel_boundary.test.ts',
     'src/packages/trust/durable_security.test.ts',
     'src/packages/storage/sqlite_db.test.ts',
+    'src/packages/platform/electron_desktop.test.ts',
     'src/packages/l3xi/l3xi.test.ts',
     'src/packages/living/living.test.ts',
     'src/packages/workspace/workspace.test.ts',
     'src/packages/runtime/runtime.test.ts',
+    'src/packages/runtime/meta_model_loop.test.ts',
     'src/packages/recorder/recorder.test.ts',
     'src/packages/character/studio_vault_hermes.test.ts',
     'src/packages/hub/index.test.ts',
     'src/packages/projects_evals/index.test.ts',
     'src/packages/connectors_scheduler/index.test.ts',
     'src/packages/browser_ide/index.test.ts',
+    'src/packages/browser_ide/browser_session.test.ts',
+    'src/packages/browser_ide/scoped_workspace.test.ts',
+    'src/packages/recorder/consented_recorder.test.ts',
+    'src/packages/runtime/skill_replay_engine.test.ts',
+    'src/packages/runtime/self_extension_manager.test.ts',
     'src/packages/pc_operator/index.test.ts',
+    'src/packages/pc_operator/linux_driver.test.ts',
+    'src/packages/pc_operator/windows_driver.test.ts',
+    'src/packages/pc_operator/macos_driver.test.ts',
     'src/packages/places/index.test.ts',
   ].filter(f => fs.existsSync(path.join(process.cwd(), f)));
 
@@ -145,36 +163,70 @@ runGate(4, 'Dependency & License Audit (Open VSX)', () => {
   return { passed: true, detail: `Verified ${allDeps.length} dependencies. Open VSX registry exclusivity confirmed.` };
 });
 
-// Gate 5: IPC & Permission Conformance
+// Gate 5: Programmatic IPC Contract, Handler, Preload & Hardening Conformance
 runGate(5, 'Electron IPC Contract Conformance', () => {
-  const contractsPath = 'electron/ipc-contracts.ts';
-  const mainPath = 'electron/main.ts';
-  const preloadPath = 'electron/preload.ts';
+  registerIpcHandlers();
+  const registeredChannels = new Set(getRegisteredIpcChannels());
+  const preloadApi = buildPreloadApi({
+    invoke: async () => undefined,
+    on: () => undefined,
+    removeListener: () => undefined,
+  });
 
-  if (!fs.existsSync(contractsPath) || !fs.existsSync(mainPath) || !fs.existsSync(preloadPath)) {
-    return { passed: false, detail: 'Electron IPC files missing.' };
+  if (!Object.isFrozen(preloadApi)) {
+    gracefulShutdown();
+    return { passed: false, detail: 'Preload API object is not frozen with Object.freeze.' };
   }
 
-  const contractsContent = fs.readFileSync(contractsPath, 'utf8');
-  const mainContent = fs.readFileSync(mainPath, 'utf8');
-  const preloadContent = fs.readFileSync(preloadPath, 'utf8');
-
-  // Verify core channels exist in contracts, main, and preload
-  const channels = [
-    'window:minimize',
-    'system:get-metrics',
-    'vault:get-backend-status',
-    'storage:query-fts',
-    'pc-operator:list-windows',
-  ];
-
-  for (const ch of channels) {
-    if (!contractsContent.includes(ch) || !mainContent.includes(ch) || !preloadContent.includes(ch)) {
-      return { passed: false, detail: `IPC channel '${ch}' missing implementation or contract.` };
+  // Ensure forbidden raw globals are never exposed on preloadApi
+  const forbiddenKeys = ['ipcRenderer', 'fs', 'child_process', 'shell', 'process', 'require'];
+  for (const forbidden of forbiddenKeys) {
+    if (forbidden in (preloadApi as any)) {
+      gracefulShutdown();
+      return { passed: false, detail: `Preload API exposes forbidden key '${forbidden}'.` };
     }
   }
 
-  return { passed: true, detail: 'All core IPC channels verified across contracts, main, and preload.' };
+  // Verify BrowserWindow hardening flags
+  if (
+    !HARDENED_WEB_PREFERENCES.sandbox ||
+    !HARDENED_WEB_PREFERENCES.contextIsolation ||
+    HARDENED_WEB_PREFERENCES.nodeIntegration ||
+    !HARDENED_WEB_PREFERENCES.webSecurity
+  ) {
+    gracefulShutdown();
+    return { passed: false, detail: 'HARDENED_WEB_PREFERENCES violates BrowserWindow security requirements.' };
+  }
+
+  // Programmatically verify every channel in IPC_CONTRACT_MANIFEST has:
+  // 1) Zod reqSchema & resSchema
+  // 2) Registered handler in electron/main.ts
+  // 3) Matching narrow method on preloadApi[preloadNamespace][preloadMethod]
+  const manifestEntries = Object.entries(IPC_CONTRACT_MANIFEST);
+  for (const [channel, spec] of manifestEntries) {
+    if (!spec.reqSchema || !spec.resSchema) {
+      gracefulShutdown();
+      return { passed: false, detail: `IPC channel '${channel}' is missing Zod reqSchema or resSchema.` };
+    }
+    if (!registeredChannels.has(channel as any)) {
+      gracefulShutdown();
+      return { passed: false, detail: `IPC channel '${channel}' is not registered in electron/main.ts.` };
+    }
+    const nsObj = (preloadApi as any)[spec.preloadNamespace];
+    if (!nsObj || typeof nsObj[spec.preloadMethod] !== 'function') {
+      gracefulShutdown();
+      return {
+        passed: false,
+        detail: `IPC channel '${channel}' missing preload method preloadApi.${spec.preloadNamespace}.${spec.preloadMethod}.`,
+      };
+    }
+  }
+
+  gracefulShutdown();
+  return {
+    passed: true,
+    detail: `Programmatically verified all ${manifestEntries.length} IPC channels (Zod schemas + main handlers + frozen preload API + hardened BrowserWindow).`,
+  };
 });
 
 // Gate 6: Metric Honesty Scan

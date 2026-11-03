@@ -703,6 +703,60 @@ export class DurableSqliteDatabase {
     return res.changes > 0;
   }
 
+  public recordModelUsage(record: {
+    id: string;
+    missionId?: string;
+    model: string;
+    inputTokens: number;
+    outputTokens: number;
+    estimatedCostUsd: number;
+    timestamp?: string;
+  }): void {
+    this.checkOpen();
+    const stmt = this.db.prepare(`
+      INSERT INTO model_usage_records (id, mission_id, model, input_tokens, output_tokens, estimated_cost_usd, timestamp)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        input_tokens = excluded.input_tokens,
+        output_tokens = excluded.output_tokens,
+        estimated_cost_usd = excluded.estimated_cost_usd,
+        timestamp = excluded.timestamp
+    `);
+    stmt.run(
+      record.id,
+      record.missionId || null,
+      record.model,
+      record.inputTokens,
+      record.outputTokens,
+      record.estimatedCostUsd,
+      record.timestamp || new Date().toISOString()
+    );
+  }
+
+  public listModelUsageRecords(): Array<{
+    id: string;
+    missionId: string | null;
+    model: string;
+    inputTokens: number;
+    outputTokens: number;
+    estimatedCostUsd: number;
+    timestamp: string;
+  }> {
+    this.checkOpen();
+    const rows = this.db
+      .prepare('SELECT * FROM model_usage_records ORDER BY timestamp ASC')
+      .all() as any[];
+    return rows.map((r) => ({
+      id: r.id,
+      missionId: r.mission_id,
+      model: r.model,
+      inputTokens: Number(r.input_tokens),
+      outputTokens: Number(r.output_tokens),
+      estimatedCostUsd: Number(r.estimated_cost_usd),
+      timestamp: r.timestamp,
+    }));
+  }
+
   // ==========================================================================
   // 6. BACKUP & RESTORE
   // ==========================================================================

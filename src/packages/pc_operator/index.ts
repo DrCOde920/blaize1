@@ -20,6 +20,59 @@ import {
   formatTruthfulUiStatusLabel,
 } from '../contracts/index.js';
 import { globalPolicyEngine } from '../trust/index.js';
+import {
+  LinuxDesktopDriver,
+  WaylandPortalSessionManager,
+  probeLinuxDesktopEnvironment,
+  enumerateRealLinuxProcesses,
+  type LinuxSessionType,
+  type LinuxPortalSessionState,
+  type LinuxEnvironmentProbeResult,
+  type LinuxUserInputMonitor,
+  type LinuxDesktopDriverOptions,
+} from './linux_driver.js';
+import {
+  WindowsDesktopDriver,
+  probeWindowsDesktopEnvironment,
+  enumerateRealWindowsProcesses,
+  type WindowsIntegrityLevel,
+  type WindowsEnvironmentProbeResult,
+  type WindowsUserInputMonitor,
+  type WindowsDesktopDriverOptions,
+} from './windows_driver.js';
+import {
+  MacOSDesktopDriver,
+  probeMacOSDesktopEnvironment,
+  enumerateRealMacOSProcesses,
+  type MacOSUserInputMonitor,
+  type MacOSEnvironmentProbeResult,
+  type MacOSDesktopDriverOptions,
+} from './macos_driver.js';
+
+export {
+  LinuxDesktopDriver,
+  WaylandPortalSessionManager,
+  probeLinuxDesktopEnvironment,
+  enumerateRealLinuxProcesses,
+  type LinuxSessionType,
+  type LinuxPortalSessionState,
+  type LinuxEnvironmentProbeResult,
+  type LinuxUserInputMonitor,
+  type LinuxDesktopDriverOptions,
+  WindowsDesktopDriver,
+  probeWindowsDesktopEnvironment,
+  enumerateRealWindowsProcesses,
+  type WindowsIntegrityLevel,
+  type WindowsEnvironmentProbeResult,
+  type WindowsUserInputMonitor,
+  type WindowsDesktopDriverOptions,
+  MacOSDesktopDriver,
+  probeMacOSDesktopEnvironment,
+  enumerateRealMacOSProcesses,
+  type MacOSUserInputMonitor,
+  type MacOSEnvironmentProbeResult,
+  type MacOSDesktopDriverOptions,
+};
 
 // ============================================================================
 // LEGACY M11 ENGINE (Preserved for 100% backward compatibility)
@@ -404,7 +457,7 @@ export interface UIElement {
   value: string;
   bounds: NormalizedBounds;
   states: UIElementState[];
-  supportedActions: Array<'invoke' | 'set_value' | 'select' | 'expand' | 'scroll_into_view'>;
+  supportedActions: Array<'invoke' | 'set_value' | 'select' | 'expand' | 'scroll' | 'scroll_into_view'>;
   shortcutHint?: string;
   ocrConfidence?: number;
 }
@@ -449,6 +502,7 @@ export interface DesktopPerceptionSnapshot {
   snapshotId: string;
   capturedAtMs: number;
   platform: DesktopOSPlatform;
+  isSimulated?: boolean;
   activeVirtualDesktopId: string;
   keyboardLayout: string;
   imeComposing: boolean;
@@ -472,6 +526,7 @@ export interface DesktopPerceptionSnapshot {
  */
 export function buildPerceptionSnapshot(params: {
   platform: DesktopOSPlatform;
+  isSimulated?: boolean;
   snapshotSeq?: number;
   windows?: DesktopWindowSnapshot[];
   rawElements?: Array<Partial<UIElement> & { role: UIElementRole; name: string; windowId: string }>;
@@ -683,6 +738,7 @@ export function buildPerceptionSnapshot(params: {
     snapshotId: `snap_${seq}_${Date.now()}`,
     capturedAtMs: Date.now(),
     platform: params.platform,
+    isSimulated: params.isSimulated ?? true,
     activeVirtualDesktopId: 'vdesk-1',
     keyboardLayout: params.keyboardLayout ?? 'US-QWERTY',
     imeComposing: params.imeComposing ?? false,
@@ -809,7 +865,7 @@ export interface DesktopActionCommand {
   tier?: ActionLadderTier;
   toolCommand?: string;
   targetElementId?: string;
-  accessibilityAction?: 'invoke' | 'set_value' | 'select' | 'expand' | 'scroll_into_view';
+  accessibilityAction?: 'invoke' | 'set_value' | 'select' | 'expand' | 'scroll' | 'scroll_into_view';
   valueToSet?: string;
   shortcutKeys?: string;
   menuPath?: string[];
@@ -862,7 +918,7 @@ export interface DesktopDriver {
   checkPermissions(): PermissionCheckItem[];
 }
 
-class BaseCrossPlatformDriver implements DesktopDriver {
+export class BaseCrossPlatformDriver implements DesktopDriver {
   public readonly platform: DesktopOSPlatform;
   public readonly driverName: string;
   public readonly nativeApisUsed: string[];
@@ -1071,38 +1127,6 @@ class BaseCrossPlatformDriver implements DesktopDriver {
   }
 }
 
-export class WindowsDesktopDriver extends BaseCrossPlatformDriver {
-  constructor() {
-    super('windows', 'WindowsDesktopDriver (UIA + PowerShell/COM + Win32)', [
-      'Windows UI Automation (IUIAutomation8)',
-      'PowerShell & COM IDispatch',
-      'Win32 EnumWindows & PrintWindow DPI-Aware',
-      'RawInput User-Activity Pause Hook',
-    ]);
-  }
-}
-
-export class MacOSDesktopDriver extends BaseCrossPlatformDriver {
-  constructor() {
-    super('macos', 'MacOSDesktopDriver (AXUIElement + JXA/AppleScript + Quartz)', [
-      'ApplicationServices AXUIElement API',
-      'OSAKit JXA / AppleScript Bridge',
-      'ScreenCaptureKit Per-Window ROI Capture',
-      'Quartz Event Tap & HID User-Activity Hook',
-    ]);
-  }
-}
-
-export class LinuxDesktopDriver extends BaseCrossPlatformDriver {
-  constructor() {
-    super('linux', 'LinuxDesktopDriver (AT-SPI2 + D-Bus + PipeWire/X11)', [
-      'AT-SPI2 D-Bus Accessibility Protocol',
-      'Session D-Bus (gdbus / freedesktop portals)',
-      'XDG Desktop Portal ScreenCast / XComposite',
-      'libinput / XTest User-Activity Pause Hook',
-    ]);
-  }
-}
 
 export function createDesktopDriver(platform: DesktopOSPlatform): DesktopDriver {
   switch (platform) {
@@ -1487,13 +1511,15 @@ export function verifyDesktopStepOutcome(
     };
   }
 
+  const snapIsSimulated = Boolean(options?.isSimulated ?? snapshot.isSimulated);
+
   if (spec.kind === 'element_exists') {
     const found = snapshot.elements.some(
       (e) => e.id === spec.targetIdOrPath || e.name.toLowerCase().includes(spec.targetIdOrPath.toLowerCase())
     );
     return {
       passed: found,
-      verificationState: found ? (options?.isSimulated ? 'SIMULATED' : 'VERIFIED') : 'FAILED',
+      verificationState: found ? (snapIsSimulated ? 'SIMULATED' : 'VERIFIED') : 'FAILED',
       deterministicCheckPassed: found,
       visionVerifierPassed: false,
       verifierKindUsed: 'element_exists',
@@ -1518,7 +1544,7 @@ export function verifyDesktopStepOutcome(
     const matched = el.value === spec.expectedValueOrHash;
     return {
       passed: matched,
-      verificationState: matched ? (options?.isSimulated ? 'SIMULATED' : 'VERIFIED') : 'FAILED',
+      verificationState: matched ? (snapIsSimulated ? 'SIMULATED' : 'VERIFIED') : 'FAILED',
       deterministicCheckPassed: matched,
       visionVerifierPassed: false,
       verifierKindUsed: 'value_matches',
@@ -1657,6 +1683,7 @@ export function runDesktopExecutionLoop(params: {
 
   // 3. ACT (with tier switching recovery if first tier fails)
   let currentSnapshot = initialSnapshot;
+  let lastFailedOutcomeState: ExecutionTruthState | undefined;
   for (const cmd of params.commands) {
     stepsExecuted += 1;
     if (stepsExecuted > hardStops.maxSteps) {
@@ -1799,6 +1826,10 @@ export function runDesktopExecutionLoop(params: {
       };
     }
 
+    if (!outcome.ok) {
+      lastFailedOutcomeState = outcome.executionState;
+    }
+
     params.profileStore.recordTierOutcome(cmd.appId, currentTier, outcome.ok);
     currentSnapshot = outcome.resultingSnapshot;
   }
@@ -1841,19 +1872,32 @@ export function runDesktopExecutionLoop(params: {
   }
 
   const finalExecState: ExecutionTruthState = !verification.passed
-    ? verification.verificationState === 'UNCERTAIN'
-      ? 'UNCERTAIN'
-      : verification.verificationState === 'UNSUPPORTED'
-        ? 'UNSUPPORTED'
-        : 'FAILED'
+    ? lastFailedOutcomeState === 'UNSUPPORTED' ||
+      lastFailedOutcomeState === 'BLOCKED' ||
+      lastFailedOutcomeState === 'WAITING_FOR_APPROVAL'
+      ? lastFailedOutcomeState
+      : verification.verificationState === 'UNCERTAIN'
+        ? 'UNCERTAIN'
+        : verification.verificationState === 'UNSUPPORTED'
+          ? 'UNSUPPORTED'
+          : 'FAILED'
     : isSimulated
       ? 'SIMULATED'
       : 'EXECUTED';
 
+  const uipiBoundaryHit = traceLog.some((msg) =>
+    msg.includes('UIPI_ELEVATED_WINDOW_BOUNDARY')
+  );
+
   return {
     ok: verification.passed,
     executionState: finalExecState,
-    verificationState: verification.verificationState,
+    verificationState:
+      uipiBoundaryHit && finalExecState === 'WAITING_FOR_APPROVAL'
+        ? 'WAITING_FOR_APPROVAL'
+        : uipiBoundaryHit && finalExecState === 'UNSUPPORTED'
+          ? 'UNSUPPORTED'
+          : verification.verificationState,
     isSimulated,
     stepsExecuted,
     batchedActionsCount,
@@ -1866,7 +1910,8 @@ export function runDesktopExecutionLoop(params: {
     tokensUsed,
     costUsd,
     durationMs,
-    humanInterventionRequired: false,
+    humanInterventionRequired:
+      uipiBoundaryHit || finalExecState === 'WAITING_FOR_APPROVAL',
     traceLog,
   };
 }
@@ -1952,20 +1997,42 @@ export function runBlaizeDoctorDiagnostics(platform: DesktopOSPlatform): {
 } {
   const driver = createDesktopDriver(platform);
   const permissions = driver.checkPermissions();
+
+  const a11yPerm = permissions.find(
+    (p) => p.id === 'perm-linux-atspi' || p.id === 'perm-win-uia' || p.id === 'perm-mac-ax'
+  );
+  const pauseHookPerm = permissions.find(
+    (p) =>
+      p.id === 'perm-linux-user-input-hook' ||
+      p.id === 'perm-win-user-input-hook' ||
+      p.id === 'perm-mac-user-input-hook'
+  );
+
+  const a11yHealthy = !a11yPerm || a11yPerm.status === 'granted';
+  const pauseHookHealthy = !pauseHookPerm || pauseHookPerm.status === 'granted';
+
   const checks: DoctorDiagnosticItem[] = [
     {
       id: 'doc-driver',
       subsystem: `DesktopDriver (${driver.driverName})`,
       status: 'healthy',
-      detail: `Active with ${driver.nativeApisUsed.length} native OS bridges.`,
+      detail: `Active with ${driver.nativeApisUsed.length} native OS bridges (${driver.isSimulated ? 'simulated' : 'real OS adapter'}).`,
       remediation: 'None required.',
     },
     {
       id: 'doc-a11y',
       subsystem: 'T2 Accessibility Tree Bridge',
-      status: 'healthy',
-      detail: 'Normalized UIElement tree extraction operational (0px cursor movement).',
-      remediation: 'None required.',
+      status: a11yHealthy ? 'healthy' : 'warning',
+      detail: a11yHealthy
+        ? 'Normalized UIElement tree extraction operational (0px cursor movement).'
+        : platform === 'windows'
+          ? 'Windows UI Automation (UIA3) bridge not reachable on current host.'
+          : platform === 'macos'
+            ? 'macOS Accessibility (AXUIElement) bridge not reachable on current host.'
+            : 'AT-SPI2 accessibility bus not reachable in current Linux session.',
+      remediation: a11yHealthy
+        ? 'None required.'
+        : (a11yPerm?.remediationSteps.join(' | ') ?? 'Enable OS accessibility.'),
     },
     {
       id: 'doc-ocr',
@@ -1977,9 +2044,13 @@ export function runBlaizeDoctorDiagnostics(platform: DesktopOSPlatform): {
     {
       id: 'doc-pause-hook',
       subsystem: 'T4 User-Input Auto-Pause Hook',
-      status: 'healthy',
-      detail: 'Hardware mouse/keyboard interrupt listener armed (<15ms yield).',
-      remediation: 'None required.',
+      status: pauseHookHealthy ? 'healthy' : 'warning',
+      detail: pauseHookHealthy
+        ? 'Hardware mouse/keyboard interrupt listener armed (<15ms yield).'
+        : `No user-input pause hook available in current ${platform} session; T4 pixel tier is marked UNSUPPORTED.`,
+      remediation: pauseHookHealthy
+        ? 'None required.'
+        : (pauseHookPerm?.remediationSteps.join(' | ') ?? 'Attach userInputMonitor.'),
     },
     {
       id: 'doc-undo-journal',
@@ -1997,9 +2068,13 @@ export function runBlaizeDoctorDiagnostics(platform: DesktopOSPlatform): {
     },
   ];
 
+  const passedCount = checks.filter((c) => c.status === 'healthy').length;
+  const overallStatus: 'healthy' | 'warning' =
+    passedCount === checks.length ? 'healthy' : 'warning';
+
   return {
-    overallStatus: 'healthy',
-    passedCount: checks.length,
+    overallStatus,
+    passedCount,
     totalCount: checks.length,
     permissions,
     checks,
