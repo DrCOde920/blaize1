@@ -22,6 +22,11 @@
  *    - Read-only permission-scoped player plugin (cap_player_readonly_audio) + M3U8 path guard
  */
 
+import {
+  computeNextRunsInTimeZone,
+  isValidIanaTimeZone,
+} from '../connectors_scheduler/cron_math';
+
 export type ActionRegistryName =
   | 'idle_float'
   | 'wave'
@@ -2020,17 +2025,27 @@ export function compileNaturalLanguageSchedule(params: {
   const dynamicStepCountEstimate = isMusic ? 1 : isFolderCheck ? 2 : 4;
 
   const id = `sched_${Date.now().toString(36)}`;
-  const nextRunAt = '2026-10-29T09:00:00Z';
+  const rawCron = lower.includes('weekday')
+    ? '30 8 * * 1-5'
+    : lower.includes('friday')
+      ? '0 17 * * 5'
+      : '0 9 * * *';
+  const cleanIanaTz = tz.split(/\s+/)[0] || 'Europe/London';
+  const safeTz = isValidIanaTimeZone(cleanIanaTz) ? cleanIanaTz : 'Europe/London';
+  const [slot] = computeNextRunsInTimeZone({
+    cronExpression: rawCron,
+    timeZone: safeTz,
+    fromTime: new Date(),
+    count: 1,
+    scheduleId: id,
+  });
+  const nextRunAt = slot ? slot.utcIso : new Date(Date.now() + 3600_000).toISOString();
 
   return {
     id,
     title: raw.length > 52 ? `${raw.slice(0, 52)}...` : raw,
     naturalLanguagePrompt: raw,
-    recurrenceRule: lower.includes('weekday')
-      ? 'CRON 30 8 * * 1-5'
-      : lower.includes('friday')
-      ? 'CRON 0 17 * * 5'
-      : 'CRON 0 9 * * *',
+    recurrenceRule: `CRON ${rawCron}`,
     timezone: tz,
     nextRunAt,
     idempotencyKey: `idem_${id}_${nextRunAt}`,
@@ -2495,53 +2510,17 @@ export function computeNextFiveRunTimes(params: {
   timezone: ScheduleSpec['timezone'];
   weekdaysOnly?: boolean;
 }): string[] {
-  const results: string[] = [];
-  const start = new Date(params.baseReferenceIso);
-  let cursor = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), start.getUTCDate(), 0, 0, 0));
-
-  const getUtcOffsetHours = (d: Date, tz: ScheduleSpec['timezone']): number => {
-    if (tz === 'UTC' || tz === 'Africa/Accra') return 0;
-    const m = d.getUTCMonth() + 1; // 1..12
-    const day = d.getUTCDate();
-    if (tz === 'Europe/London') {
-      // BST (UTC+1) from late March to Oct 25; GMT (UTC+0) from Oct 25 onwards in 2026
-      if (m > 3 && m < 10) return 1;
-      if (m === 10 && day < 25) return 1;
-      return 0;
-    }
-    if (tz === 'America/New_York') {
-      // EDT (UTC-4) until Nov 1, 2026; EST (UTC-5) from Nov 1, 2026 onwards
-      if (m > 3 && m < 11) return -4;
-      if (m === 11 && day < 1) return -4;
-      return -5;
-    }
-    return 0;
-  };
-
-  for (let i = 0; i < 16 && results.length < 5; i++) {
-    const dayDate = new Date(cursor.getTime() + i * 86400_000);
-    const dow = dayDate.getUTCDay(); // 0=Sun .. 6=Sat
-    if (params.weekdaysOnly && (dow === 0 || dow === 6)) {
-      continue;
-    }
-    const offsetHours = getUtcOffsetHours(dayDate, params.timezone);
-    const utcHour = params.hourLocal - offsetHours;
-    const candidate = new Date(
-      Date.UTC(
-        dayDate.getUTCFullYear(),
-        dayDate.getUTCMonth(),
-        dayDate.getUTCDate(),
-        utcHour,
-        params.minuteLocal,
-        0
-      )
-    );
-    if (candidate.getTime() > start.getTime()) {
-      results.push(candidate.toISOString());
-    }
-  }
-
-  return results;
+  const cronExpression = `${params.minuteLocal} ${params.hourLocal} * * ${
+    params.weekdaysOnly ? '1-5' : '*'
+  }`;
+  const safeTz = isValidIanaTimeZone(params.timezone) ? params.timezone : 'UTC';
+  const slots = computeNextRunsInTimeZone({
+    cronExpression,
+    timeZone: safeTz,
+    fromTime: new Date(params.baseReferenceIso),
+    count: 5,
+  });
+  return slots.map((s) => s.utcIso);
 }
 
 export function compileNaturalLanguageToScheduleSpec(params: {
@@ -2552,7 +2531,7 @@ export function compileNaturalLanguageToScheduleSpec(params: {
   const raw = params.prompt.trim();
   const lower = raw.toLowerCase();
   const tz: ScheduleSpec['timezone'] = params.timezone || 'Europe/London';
-  const refNow = params.referenceNowIso || '2026-10-28T09:00:00.000Z';
+  const refNow = params.referenceNowIso || new Date().toISOString();
 
   const isWatchResource =
     lower.includes('watch') || lower.includes('monitor') || lower.includes('alert if') || lower.includes('below');

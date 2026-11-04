@@ -11,6 +11,12 @@
  * 6. VS Code IDE & VS Code Marketplace Addons (file tree, extensions catalog, OpenVSX query adapter, formatting & lint diagnostics)
  */
 
+import {
+  computeNextRunsInTimeZone,
+  getZonedWallClockParts,
+  isValidIanaTimeZone,
+} from '../connectors_scheduler/cron_math';
+
 export type ArtifactKind =
   | 'html_preview'
   | 'react_component'
@@ -1391,13 +1397,13 @@ export const INITIAL_WORKSPACE_CONNECTORS: WorkspaceConnector[] = [
     category: 'Code & Git',
     description:
       'Syncs repository branches, pull requests, and code artifacts directly with the VS Code IDE and Project Artifacts.',
-    status: 'connected',
+    status: 'needs_auth',
     endpointSummary: 'api.github.com/repos/blaize/*',
     scopes: ['repo:read', 'pull_requests:read', 'contents:write_guarded'],
     readAllowed: true,
     writeRequiresApproval: true,
     boundProjectIds: ['proj-work', 'proj-sandbox'],
-    lastSyncAt: '2 mins ago',
+    lastSyncAt: 'Not authenticated',
   },
   {
     id: 'conn-google-workspace',
@@ -1406,13 +1412,13 @@ export const INITIAL_WORKSPACE_CONNECTORS: WorkspaceConnector[] = [
     category: 'Workspace & Docs',
     description:
       'Exports saved Artifacts to Google Docs/Sheets and reads project specification folders.',
-    status: 'connected',
+    status: 'needs_auth',
     endpointSummary: 'googleapis.com/drive/v3',
     scopes: ['drive.readonly', 'spreadsheets.currentonly'],
     readAllowed: true,
     writeRequiresApproval: true,
     boundProjectIds: ['proj-personal', 'proj-work'],
-    lastSyncAt: '8 mins ago',
+    lastSyncAt: 'Not authenticated',
   },
   {
     id: 'conn-sqlite-local',
@@ -1421,13 +1427,13 @@ export const INITIAL_WORKSPACE_CONNECTORS: WorkspaceConnector[] = [
     category: 'Database',
     description:
       'Fast embedded database for project state, indexed document metadata, and test vectors.',
-    status: 'connected',
+    status: 'needs_auth',
     endpointSummary: 'file:~/.blaize/workspace.db',
     scopes: ['sqlite:read', 'sqlite:write_guarded'],
     readAllowed: true,
     writeRequiresApproval: true,
     boundProjectIds: ['proj-personal', 'proj-work', 'proj-sandbox'],
-    lastSyncAt: 'Just now',
+    lastSyncAt: 'Awaiting connection check',
   },
   {
     id: 'conn-slack-ops',
@@ -1436,13 +1442,13 @@ export const INITIAL_WORKSPACE_CONNECTORS: WorkspaceConnector[] = [
     category: 'Messaging',
     description:
       'Posts verified mission digests and requests human-in-the-loop approval for guarded actions.',
-    status: 'connected',
+    status: 'disconnected',
     endpointSummary: 'slack.com/api/chat.postMessage (#ops-audit)',
     scopes: ['channels:read', 'chat:write_guarded'],
     readAllowed: true,
     writeRequiresApproval: true,
     boundProjectIds: ['proj-work'],
-    lastSyncAt: '14 mins ago',
+    lastSyncAt: 'Not configured',
   },
   {
     id: 'conn-linear-issues',
@@ -1465,6 +1471,22 @@ export const INITIAL_WORKSPACE_CONNECTORS: WorkspaceConnector[] = [
 // 5. SCHEDULER (Cron + Interval Compiler & PolicyGuard Verification)
 // ============================================================================
 
+function formatNextFiveRunsForWorkspace(cronExpression: string, timezone: string, fromTime?: Date): string[] {
+  const safeTz = isValidIanaTimeZone(timezone) ? timezone : 'UTC';
+  const slots = computeNextRunsInTimeZone({
+    cronExpression,
+    timeZone: safeTz,
+    fromTime: fromTime ?? new Date(),
+    count: 5,
+  });
+  return slots.map((slot) => {
+    const parts = getZonedWallClockParts(slot.epochMs, safeTz);
+    const hStr = String(parts.hour).padStart(2, '0');
+    const mStr = String(parts.minute).padStart(2, '0');
+    return `${parts.localDateKey} ${hStr}:${mStr} ${safeTz}`;
+  });
+}
+
 export const INITIAL_SCHEDULED_TASKS: ScheduledTaskItem[] = [
   {
     id: 'sched-workspace-cleanup',
@@ -1477,16 +1499,11 @@ export const INITIAL_SCHEDULED_TASKS: ScheduledTaskItem[] = [
       'Run unit tests and verify workspace builds with 0 regressions, clearing temporary build cache.',
     linkedSkillId: 'skill-pr-security-audit',
     enabled: true,
-    nextFiveRuns: [
-      '2026-10-29 08:30 UTC',
-      '2026-10-30 08:30 UTC',
-      '2026-11-02 08:30 UTC',
-      '2026-11-03 08:30 UTC',
-      '2026-11-04 08:30 UTC',
-    ],
+    nextFiveRuns: formatNextFiveRunsForWorkspace('30 8 * * 1-5', 'UTC'),
     lastRunAt: 'Today 08:30 UTC',
     lastRunStatus: 'verified_ok',
     guardNote: 'Read-only test run and cache verification. Zero destructive actions.',
+    offlinePolicy: 'skip',
   },
   {
     id: 'sched-nightly-security-audit',
@@ -1499,16 +1516,11 @@ export const INITIAL_SCHEDULED_TASKS: ScheduledTaskItem[] = [
       'Run Trust Kernel Security & Lint Auditor across IDE workspace files and verify hash chain integrity.',
     linkedSkillId: 'skill-pr-security-audit',
     enabled: true,
-    nextFiveRuns: [
-      '2026-10-29 23:00 UTC',
-      '2026-10-30 23:00 UTC',
-      '2026-10-31 23:00 UTC',
-      '2026-11-01 23:00 UTC',
-      '2026-11-02 23:00 UTC',
-    ],
+    nextFiveRuns: formatNextFiveRunsForWorkspace('0 23 * * *', 'UTC'),
     lastRunAt: 'Yesterday 23:00 UTC',
     lastRunStatus: 'verified_ok',
     guardNote: 'Deterministic audit only; emits markdown report artifact.',
+    offlinePolicy: 'skip',
   },
 ];
 
@@ -1522,6 +1534,7 @@ export function createScheduledTask(input: {
   linkedSkillId?: string;
   offlinePolicy?: OfflineMissedRunPolicy;
   offlineMissedRunPolicy?: OfflineMissedRunPolicy;
+  fromTime?: Date;
 }): ScheduledTaskItem {
   const cleanTitle = input.title.trim();
   const cleanPrompt = input.actionPrompt.trim();
@@ -1548,18 +1561,12 @@ export function createScheduledTask(input: {
     actionPrompt: cleanPrompt,
     linkedSkillId: input.linkedSkillId,
     enabled: !attemptsAutoMoney,
-    nextFiveRuns: [
-      `2026-10-30 09:00 ${tz}`,
-      `2026-10-31 09:00 ${tz}`,
-      `2026-11-01 09:00 ${tz}`,
-      `2026-11-02 09:00 ${tz}`,
-      `2026-11-03 09:00 ${tz}`,
-    ],
+    nextFiveRuns: formatNextFiveRunsForWorkspace(cron, tz, input.fromTime),
     lastRunStatus: attemptsAutoMoney ? 'blocked_by_guard' : 'idle',
     guardNote: attemptsAutoMoney
       ? 'BLOCKED BY POLICYGUARD: Unattended scheduled tasks cannot execute money transfers without interactive approval.'
       : 'Verified safe for unattended execution under PolicyGuard.',
-    offlinePolicy: input.offlinePolicy || 'skip',
+    offlinePolicy: input.offlinePolicy || input.offlineMissedRunPolicy || 'skip',
   };
 }
 
@@ -2376,5 +2383,4 @@ export function searchCommandPalette(
   return scored.map((s) => s.item);
 }
 
-
-
+export * from './soul_self_management';

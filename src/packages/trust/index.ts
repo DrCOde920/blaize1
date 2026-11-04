@@ -87,6 +87,7 @@ export type {
 
 export * from './crypto';
 export * from './canonical_ledger';
+export * from './protected_settings';
 
 import {
   computeCryptographicSha256,

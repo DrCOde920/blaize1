@@ -228,6 +228,20 @@ export class SingleUseApprovalTokenStore {
     return had;
   }
 
+  public revokeAllActiveTokens(): number {
+    let count = 0;
+    for (const tokenId of this.activeTokens.keys()) {
+      this.consumedTokens.add(tokenId);
+      count++;
+    }
+    this.activeTokens.clear();
+    return count;
+  }
+
+  public getActiveTokenCount(): number {
+    return this.activeTokens.size;
+  }
+
   public clear(): void {
     this.activeTokens.clear();
     this.consumedTokens.clear();
@@ -235,3 +249,4 @@ export class SingleUseApprovalTokenStore {
 }
 
 export const globalApprovalTokenStore = new SingleUseApprovalTokenStore();
+

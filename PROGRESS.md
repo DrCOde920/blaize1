@@ -1,5 +1,155 @@
 # Blaize — Remediation Progress Log (`PROGRESS.md`)
 
+## Final Acceptance Review — Independent Audit & Adversarial Verification (Completed 2026-11-03)
+- **Branch**: `remediation/final-acceptance-audit`
+- **Audit Deliverable**: `FINAL_REMEDIATION_AUDIT.md`
+- **Scope**: Comprehensive independent audit of findings F-01 through F-19 against all 12 phase acceptance gates, live hostile test suite, safe self-management proofs, and real platform hardware truth.
+- **Key Results**:
+  1. **Audit Matrix**: 16 findings `RESOLVED`, 3 findings `PARTIALLY_RESOLVED` (`F-02`, `F-17`, `F-19`), 0 `OPEN`, 0 `BLOCKED`.
+  2. **Hostile Attack Vectors Verified Blocked and Recorded (`src/packages/runtime/final_acceptance_audit.test.ts`)**:
+     - Hostile Attempt 1: Permission expansion beyond HostCapabilityCeiling -> BLOCKED and recorded in ledger.
+     - Hostile Attempt 2: Modification of user rules / standing instructions in protected plane -> BLOCKED and recorded in ledger.
+     - Hostile Attempt 3: Deletion or bypass of immutable safety-floor controls -> BLOCKED and recorded in ledger.
+     - Hostile Attempt 4: Credential extraction / vault secret theft via manifest or execution -> BLOCKED and recorded in ledger.
+     - Hostile Attempt 5: Out-of-bounds directory traversal -> BLOCKED and recorded in ledger.
+     - Hostile Attempt 6: Unapproved network egress -> BLOCKED and recorded in ledger.
+     - Hostile Attempt 7: Unauthorized shell command spawning / child process execution -> BLOCKED and recorded in ledger.
+     - Hostile Attempt 8: Audit ledger hash-chain tampering -> DETECTED via SHA-256 verification and rejected.
+     - Hostile Attempt 9: Verification suppression / fake verifier injection -> BLOCKED by immutable strategy registry.
+     - Hostile Attempt 10: Self-approval of plugin installation / auto-grant capabilities -> BLOCKED by HostCapabilityCeiling.
+  3. **Morrow Safe Self-Management Capability Verified**:
+     - Creates, tests, activates, and uses safe local plugin within existing capabilities.
+     - Creates and executes safe natural-language skill without requiring new permissions.
+     - Creates and installs custom visual figure with 9 pose slots and 7 facial expressions via `CharacterFactory`, with zero-click persistent pose switching.
+  4. **Verification Pipeline**: 9-Gate pipeline executes 32 test suites (244 unit & integration tests) — 100% PASS, 0 failures, 0 skipped, 0 cancelled. Zero TypeScript errors.
+
+## Phase 12 — Make Verification, Benchmarks, CI & Releases Honest (Completed 2026-11-03)
+- **Branch**: `remediation/phase-12-honest-verification-benchmarks-ci-releases`
+- **Addresses**: Findings 17, 18, and 19 (`F-13`, `F-17`, `F-18` in `FEATURE_STATUS.md`).
+- **Deliverables Implemented**:
+  1. **Strict Tri-State Verification Reporting Pipeline (`scripts/verify.ts`)**:
+     - Completely overhauled the 9-gate verification script to use strict tri-state reporting (`[✓ PASS   ]`, `[✗ FAIL   ]`, `[○ NOT_RUN]`).
+     - A gate or test suite fails if a required test is skipped, absent, or fails.
+     - Gate 1: Real TypeScript compilation (`tsc --noEmit`) with 0 errors across `src/`, `electron/`, `server.ts`, and `scripts/`.
+     - Gate 2: Runs all 31 unit & integration test suites without silent file filtering (231 tests pass cleanly, 0 failures, 0 skipped, 0 cancelled).
+     - Gate 3: Credential and secret scan across all source files.
+     - Gate 4: Audits 382 resolved dependencies in `node_modules` against approved SPDX open-source licenses (with SPDX `OR` parsing) and enforces Open VSX registry exclusivity.
+     - Gate 5: Programmatically verifies all 25 IPC channels against Zod request/response schemas, IPC main handlers, frozen preload bridge, and sender authorization (`validateIpcSender`).
+     - Gate 6: Real metric-honesty scan verifying zero `const ladderPassed = true` or synthetic claims, and confirming 3-category separation in `evals/results.md`.
+     - Gate 7: Returns the actual computed `passed` boolean from live evaluation and native benchmarks.
+     - Gate 8: Measures live Node process memory (`process.memoryUsage()`).
+     - Gate 9: Renders semantic HTML and ARIA landmarks (`PCOperatorView` with `benchmark` tab) via `react-dom/server` `renderToStaticMarkup` and asserts accessible roles and labels.
+  2. **Removal of `const ladderPassed = true` & 3-Category Honest Desktop Benchmarks (`src/packages/pc_operator/index.ts`, `src/components/PCOperatorView.tsx`, `scripts/run-eval.ts`, `evals/results.md`)**:
+     - Completely removed `const ladderPassed = true` and synthetic claims.
+     - Implemented `runNativeLocalBenchmarkSuite()` running 8 real empirical host tasks:
+       - Directory sorting by extension
+       - Batch ISO timestamp renaming
+       - UTF-16LE CRLF normalization & round-trip verification
+       - SHA-256 deduplication and reversible trash relocation
+       - CSV financial ledger parsing and balance reconciliation
+       - PolicyEngine gate enforcement
+       - Linux host `/proc` process state inspection
+       - 5-stage SHA-256 audit ledger hash chain verification
+     - Emits full provenance per task: raw logs, task specs, OS environment, driver version, commit SHA, before/after observations, verifier output, retry counts, cost source, and intervention events.
+     - Decoupled `runEverydayPcBenchmarkSuite()` as an explicit `SIMULATED BENCHMARK` harness labeled as non-empirical.
+     - Added explicit `PUBLIC BENCHMARK` category labeling external benchmarks (e.g. `OSWorld-Verified`) as `UNSUPPORTED` / `NOT_CONFIGURED` without remote runner infrastructure.
+  3. **Reproducible Desktop Packaging Lifecycle (`scripts/package-desktop.ts`, `package.json`)**:
+     - Added honest code-signing status (`signingStatus: 'UNSIGNED' | 'SIGNED'`) to desktop package manifests.
+     - Enforced `SOURCE_DATE_EPOCH` timestamp clamping for reproducible `.tar.gz` archive generation.
+     - Added `runPackageLifecycleVerification()` and `npm run desktop:lifecycle` exercising clean install, upgrade (preserving user SQLite database), rollback, and clean uninstall.
+  4. **GitHub Actions CI/CD Workflows (`.github/workflows/ci.yml`, `.github/workflows/release.yml`)**:
+     - Created `.github/workflows/ci.yml` running lint, all 31 unit test suites, 9-gate verification, package lifecycle verification, and web build.
+     - Created `.github/workflows/release.yml` generating reproducible release archives, SHA-256 checksums, and signing status manifests on version tags.
+  5. **Automated Verification Test Suite (`src/packages/runtime/phase12_verification_benchmarks_packaging.test.ts`)**:
+     - Added 15 comprehensive automated tests across 4 sub-suites validating native benchmarks, verification gates, package lifecycle, and cross-package contracts.
+
+---
+
+## Phase 11 — Implement Operational Defaults, Mission Management & Observability (Completed 2026-11-03)
+- **Branch**: `remediation/phase-11-operations-and-observability`
+- **Addresses**: Cross-cutting management/operational gaps and requested management defaults (Prompt 11 requirements 1–10).
+- **Deliverables Implemented**:
+  1. **Central Typed `RuntimePolicy` with Schema Validation, v1->v2 Migrations & Morrow Ceiling Protection (`src/packages/runtime/operations_and_observability.ts`)**:
+     - Implemented `RuntimePolicy` (`schemaVersion: 2`), `validateRuntimePolicy()`, `migrateRuntimePolicy()`, and `RuntimePolicyManager`.
+     - Separated user-configurable non-protected preferences (`preferences`) from immutable protected policy ceilings (`protectedCeilings`).
+     - Deterministically blocked Morrow/agent/plugin/skill callers (`actor: 'morrow' | 'agent' | 'plugin' | 'skill'`) from mutating `protectedCeilings` (`PROTECTED_POLICY_CEILING_IMMUTABLE`) or altering budgets, telemetry opt-in, cloud background reflection, or notification policies (`AGENT_SAFETY_MUTATION_FORBIDDEN`).
+  2. **Operational Defaults Enforced in Real Runtime Services**:
+     - Enforced: `maxInteractiveMissions: 1`, `maxBackgroundJobs: 1`, `cloudBackgroundReflectionEnabled: false`, `preferDeterministicLocalFirst: true`, `maxSafeIdempotentRetries: 2` (only when `riskClass === 'read' && idempotent === true`), `allowRetriesForWriteSpendSendUncertain: false` (0 retries for `scoped_write`, `spend`, `external_send`, `destructive`, or `UNCERTAIN` outcomes), configurable per-tool timeout (`defaultToolTimeoutMs: 15_000`, `perToolTimeoutMs`), `checkpointBeforeWrites: true`, validated system local IANA timezone (`localTimeZone`), `missedScheduleRunPolicy: 'skip'`, and quiet-by-default notifications (`allowedEvents: ['approval_required', 'failure', 'uncertainty', 'final_verified_completion']`).
+  3. **Per-Mission & Per-Day Model Usage Budgets (`ModelUsageBudgetController`)**:
+     - Tracks provider-reported token usage (`reportedInputTokens`, `reportedOutputTokens`, `reportedCostUsd`) separately from local deterministic estimates (`estimatedInputTokens`, `estimatedOutputTokens`, `estimatedCostUsd`).
+     - Enforces hard per-mission and per-day token and USD limits (`evaluatePreTurnBudget()`), stopping safely before exceeding limits (`MISSION_TOKEN_BUDGET_EXCEEDED`, `MISSION_COST_BUDGET_EXCEEDED`, `DAILY_TOKEN_BUDGET_EXCEEDED`, `DAILY_COST_BUDGET_EXCEEDED`).
+     - Never invents zero-cost live model usage (`computeDeterministicModelCostUsd()` charges positive deterministic cost whenever a live provider omits usage fields).
+  4. **Mission Queue, Concurrency Locks, Cancellation Tokens, Pause/Resume, Checkpoints & Orphan Recovery (`DeviceConcurrencyLockManager`, `MissionQueueAndLifecycleManager`)**:
+     - Enforces `1` active interactive mission and `1` active background job with automatic queue promotion.
+     - Implements concurrency resource locks (`browser:personal`, `browser:work`, `browser:testing`, `input_device:desktop`, `workspace:<id>`) with interactive-over-background priority waiting.
+     - Propagates `AbortController` / `AbortSignal` cancellation tokens, supports `pauseMission()` / `resumeMission()`, persists pre-write recovery checkpoints (`createPreWriteCheckpoint()`, `restoreCheckpoint()`), and recovers orphaned `running` missions on startup (`recoverOrphanedMissionsAndJobs()`) into `orphaned_recovered` without blindly re-executing write/spend steps.
+  5. **Evidence-Based, Timestamped Health Checks Across All 9 Subsystems (`SubsystemHealthRegistry`)**:
+     - Probes and reports real, timestamped health with `evidenceClass` across `server`, `electron_shell`, `database` (SQLite `PRAGMA integrity_check` + file size), `vault`, `model_provider`, `browser_profiles` (partition isolation check), `native_driver` (`runBlaizeDoctorDiagnostics`), `skills_plugins`, and `scheduler`.
+  6. **Resource Limits & Runaway Worker Supervisor (`ResourceLimiterAndWorkerSupervisor`)**:
+     - Enforces file size limits (`checkFileSizeLimit`, 5 MB max), tool output size limits (`enforceToolOutputSizeLimit`, 256 KB max), per-mission network call limits (`recordAndCheckNetworkCall`, 25 calls/mission max), and isolated child worker V8 heap (`--max-old-space-size=128`) and wall-clock timeout limits (`runSupervisedWorkerScript`), killing runaway workers with `SIGKILL` and recording structured `WorkerTerminationRecord` entries.
+  7. **Operational Dashboard Service & Server Endpoints (`OperationalDashboardService`, `server.ts`)**:
+     - Built `OperationalDashboardService.getDashboardSnapshot()` reading real state across active mission, queue, job scheduler, native driver capabilities, model/provider health, reported vs. estimated usage/cost, SQLite storage on disk, vault status, plugin health, permissions, backup/restore status, and last verification.
+     - Mounted `/api/operations/dashboard`, `/api/operations/health`, `/api/operations/policy`, `/api/operations/emergency-stop`, and `/api/operations/emergency-stop/clear` in `server.ts`.
+  8. **Incident Handling, Emergency Stop & Local Telemetry Secret Redaction (`IncidentResponseAndEmergencyStopManager`, `LocalTelemetryCollector`)**:
+     - `triggerEmergencyStop()` blocks new work (`EMERGENCY_STOP_ACTIVE`), aborts active/queued missions, pauses all enabled schedules (`scheduler.pauseAllSchedules()`), terminates active plugin workers (`SIGKILL`), revokes all active single-use approval tokens (`globalApprovalTokenStore.revokeAllActiveTokens()`) and session tokens, locks `PassphraseWrapVault`, records a `MemoryLedger` event, and preserves secret-redacted forensic logs with step-by-step recovery instructions (`clearEmergencyStop()`).
+     - Telemetry stays local by default (`externalTelemetryOptIn: false`), strips prompts/screenshots/files/credentials even if opt-in is enabled, and redacts secrets (`redactSecretsFromOperationalText`, `redactSecretsFromObject`) before logging.
+  9. **Documentation & Automated Tests (`docs/OPERATIONAL_POLICY_AND_DEFAULTS.md`, `src/packages/runtime/phase11_operations_observability.test.ts`)**:
+     - Documented operational defaults and user preferences vs. protected policy ceilings in `docs/OPERATIONAL_POLICY_AND_DEFAULTS.md`.
+     - Added 6 comprehensive test suites in `src/packages/runtime/phase11_operations_observability.test.ts`.
+
+---
+
+## Phase 10 — Make Connectors Real & Make Scheduling Time-Correct (Completed 2026-11-03)
+- **Branch**: `remediation/phase-10-connectors-and-scheduler`
+- **Addresses**: Findings 13 and 14 (`F-05`, `F-06`, `F-07`, `F-08` in `FEATURE_STATUS.md`).
+- **Deliverables Implemented**:
+  1. **Honest Connector Statuses & Catalogue vs. Implemented Adapter Separation (`src/packages/connectors_scheduler/provider_adapters.ts`, `src/packages/connectors_scheduler/index.ts`, `src/packages/workspace/index.ts`, `src/components/WorkingConnectorsView.tsx`)**:
+     - Removed all generic connector success responses and removed fixture fallbacks from live connector checks.
+     - A connector reports `status: 'connected'` (`evidenceClass: 'REAL'`) **only** after a real provider-authenticated request succeeds and passes schema validation.
+     - Fixtures explicitly return `status: 'simulated'` (`evidenceClass: 'SIMULATED'`, `isSimulated: true`); missing credentials return `status: 'needs_setup'` (`NEEDS_SETUP`); catalogue-only entries (`conn-web-fetch`, `conn-web-search`, `conn-telegram`, `conn-slack`, `conn-discord`, `conn-notion`, `conn-linear`, `conn-todoist`, `conn-home-assistant`, `conn-microsoft-365`, `conn-universal-mcp`) are explicitly marked `adapterImplemented: false` and return `status: 'not_configured'` (`NOT_CONFIGURED`).
+  2. **Strict Separation of Connection Test, Capability Discovery & Tool Invocation (`ConnectorProviderAdapter`)**:
+     - Separated `testConnection()`, `discoverCapabilities()`, and `invokeConnectorAdapterTool()` across all adapters, enforcing `connectionTestProvesAllToolsWork: false`.
+     - Built 7 real, tested provider adapters (`adapterImplemented: true`): `conn-weather` (Open-Meteo REST), `conn-wikipedia` (MediaWiki REST + Opensearch pagination), `conn-rss-atom` (deterministic RSS 2.0 / Atom XML parser `parseRssOrAtomXml` + cursor pagination), `conn-calendar-ics` (RFC 5545 `VCALENDAR`/`VEVENT` parser `parseIcsCalendarText` + pagination), `conn-local-folder` (canonical `realpathSync` scoped directory/file reader with path traversal defense), `conn-github` (GitHub REST API v3 with scope inspection, pagination & write issue creation), and `conn-google-workspace` (Google Calendar/Drive/Gmail REST adapter with OAuth scope inspection).
+     - Enforced `globalPolicyEngine.evaluateToolCall`, exact capability grant (`connector:<id>:<tool>`), required OAuth/API scope check, single-use `ScopedApprovalToken` verification for write tools, per-connector token-bucket rate limiting (`ConnectorRateLimiter`), idempotent read retry/backoff, and output schema verifiers on every tool invocation.
+  3. **OAuth 2.0 PKCE + Encrypted Vault Lifecycle & Server Proxy Host Allowlist (`OAuthPkceLifecycleManager`, `server.ts`)**:
+     - Implemented RFC 7636 S256 `code_challenge` generation and verification, single-use anti-CSRF `state` tokens with TTL expiration, strict HTTPS/loopback `redirectUri` validation, real token exchange (`exchangeCodeForTokens`), token refresh (`refreshAccessToken`), upstream & local credential revocation (`revokeCredentials`), and scope inspection (`inspectScopes`) storing tokens exclusively in the Phase 3 `SecretVault` (`PassphraseWrapVault`).
+     - Enforced `ALLOWED_CONNECTOR_HOSTS` in `/api/connectors/proxy` and replaced fake `/api/connectors/oauth/exchange` responses in `server.ts` with real upstream token POST requests and encrypted Vault storage.
+  4. **5-Field Cron Parser, IANA Timezone & DST Transition Calculator (`src/packages/connectors_scheduler/cron_math.ts`, `src/packages/workspace/index.ts`, `src/packages/living/index.ts`)**:
+     - Removed all hardcoded `2026-10-29...` / `2026-10-30...` next-run timestamps across `workspace/index.ts`, `living/index.ts`, and `connectors_scheduler/index.ts`.
+     - Implemented `parseCronExpression()` (supporting wildcards, lists, ranges, steps, and named weekdays/months) and `computeNextRunsInTimeZone()` using `Intl.DateTimeFormat` IANA wall-clock parts (`getZonedWallClockParts`).
+     - Properly handles DST spring-forward skipped hours (`strict_skip` and `shift_forward` policies) and DST fall-back repeated hours (executes once on the first occurrence and deduplicates the repeated local wall-clock hour).
+  5. **Durable Scheduler Engine, Idempotency Keys, Missed-Run Policies & Runtime PolicyEngine Re-Entry (`src/packages/connectors_scheduler/cron_and_scheduler.ts`)**:
+     - Implemented `DurableSchedulerEngine` persisting schedules, active execution locks, completed deterministic idempotency keys (`idem:<scheduleId>:<slotUtcIso>`), job history, and failure notifications to disk.
+     - Default missed-run policy is `'skip'` (with optional `'run_when_back'` executing at most once and `'ask_me'` queuing for approval).
+     - Scheduled executions re-enter `AgentRuntime` and `globalPolicyEngine.evaluateToolCall` at execution time (`executeSlotAtRuntime`), strip any pre-attached `staleApprovalToken`, block capability widening beyond `runtimeCeilingCapabilities`, pause write/sensitive tasks in `waiting_for_approval`, retry only idempotent read tasks with exponential backoff, and explicitly report `canExecuteWhilePoweredOff: false`.
+  6. **Comprehensive Automated Test Suite (`src/packages/connectors_scheduler/phase10_connectors_scheduler.test.ts`, `src/packages/connectors_scheduler/index.test.ts`)**:
+     - Added 9 comprehensive test suites in `phase10_connectors_scheduler.test.ts` (16 total tests across both connector/scheduler test files) covering all 12 Phase 10 requirements.
+
+---
+
+## Phase 9 — Figure Factory & Safe Non-Sensitive Morrow Self-Management (Completed 2026-11-03)
+- **Branch**: `remediation/phase-1-truth-states`
+- **Addresses**: Findings 15 and 16 and the user's figure/personality self-control requirement (Morrow creating and managing her own visual figures and non-sensitive presentation settings on explicit user request while keeping protected control-plane domains immutable).
+- **Deliverables Implemented**:
+  1. **Structured Character Planning Pipeline & Provider vs. Template Placeholder Honesty (`src/packages/character/index.ts`, `src/packages/character/figure_factory.ts`)**:
+     - Upgraded `compileNaturalLanguageCharacterSpec()` and added `runStructuredCharacterPlanningPipeline()` to produce a validated `MasterCharacterSpec` (`figureId`, `name`, `appearanceSummary`, `proportions`, `palette`, `clothing`, `outfits`, `accessories`, `props`, `rigTarget`, `poseSlots`, `facialExpressions`, `animationStates`, `assetRequirements`).
+     - Uses the configured `ImageGenerationProviderAdapter` (`generationMode: 'LIVE_PROVIDER'`, `providerStatus: 'AVAILABLE'`, `executionState: 'EXECUTED'`) only when available; when unconfigured, returns `generationMode: 'TEMPLATE_PLACEHOLDER'`, `providerStatus: 'NOT_CONFIGURED'`, `executionState: 'SIMULATED'` with an explicit `TEMPLATE_PLACEHOLDER` banner.
+  2. **`CharacterFactory` Tool, Transparent PNG/WebP Binary Verification, Rig Compatibility & Executable Prohibition (`src/packages/character/figure_factory.ts`)**:
+     - Implemented `buildDeterministicTransparentPngDataUrl()`, `buildDeterministicTransparentWebpDataUrl()`, and `inspectPngOrWebpDataUrl()` verifying PNG/WebP binary headers, alpha channels (`colorType === 6` / `VP8X` alpha flag), and scanning for embedded `<script>`, `javascript:`, `eval()`, or ELF/MZ/Mach-O/Wasm executable headers.
+     - Implemented `validateFigurePackForInstallation()` enforcing content safety (blocking copyrighted characters, real-person likenesses, and underage/NSFW prompts), 2 MB per-slot / 15 MB per-pack size caps, explicit license and source attribution, normalized anchor bounds, dimension consistency, and strict prohibition of scripts/executables (`PACK_EXECUTABLE_CONTENT_PROHIBITED`).
+  3. **Persistent Figure Library with Version Rollback & Zero-Click Pose Switching (`PersistentFigureLibrary`)**:
+     - Persists installed figures, active figure, pose, facial expression, animation state, outfit, props, and version history to `figure_library_state.json`.
+     - Once a figure is validated and installed on user request, Morrow can switch poses (`switchPose`), expressions (`switchExpression`), outfits (`switchOutfit`), and props (`setActiveProps`) across restarts with `requiresAdditionalApproval: false` (no second click per pose), and roll back figure versions (`rollbackFigureVersion`).
+  4. **Allowlisted Non-Sensitive Soul Presentation Self-Edit API & Mixed-Request Splitting (`src/packages/workspace/soul_self_management.ts`)**:
+     - Created `MorrowPresentationSelfManager` with a strict 7-field allowlist (`tone`, `concision`, `humour`, `voiceStyle`, `animationPreference`, `initiativeLevel`, `notificationStyle`) and 11 blocked protected domains (`user_rules`, `standing_instructions`, `trust_kernel_code`, `security_settings`, `identity_authentication`, `privacy_settings`, `credentials_vault`, `os_permissions`, `domain_allowlists`, `spend_limits`, `approval_rules`).
+     - Converts user-requested presentation edits into a `SoulPresentationVersionedDiff`, auto-applies safe edits while preserving `# Stance & Uncertainty` safety boundaries verbatim, saves prior snapshots to `soul_presentation_state.json`, and supports one-click `rollback()`.
+     - When a request mixes safe presentation changes with protected settings, applies ONLY the safe non-sensitive presentation fields (`status: 'PARTIALLY_APPLIED_SAFE_ONLY'`) and refuses the protected parts with a clear explanation.
+  5. **ToolRegistry Integration & Automated Test Suite (`src/packages/character/figure_and_soul_self_management.test.ts`)**:
+     - Wired `character.factory.create_figure` and `soul.presentation.self_edit` with independent target-state verifiers into `ToolRegistry`.
+     - Added 5 comprehensive tests in `src/packages/character/figure_and_soul_self_management.test.ts` verifying live vs. template figure creation, pack safety/executable blocking, persistent figure library switching & rollback, mixed-request splitting, and immutability of `RULES`, safety-floor config, Vault, model keys, permission ceilings, and audit ledger.
+
+---
+
 ## Phase 8 — Dynamic Skill/Plugin Runtime & Self-Extension Manager (Completed 2026-11-03)
 - **Branch**: `remediation/phase-8-self-extension` (branched from `remediation/phase-7-browser-ide-recorder` at `c704c9eedd73cf2b679e7642e3c0dd2cc925abeb`).
 - **Addresses**: Finding 12 and the core user requirement for Morrow to create, test, activate, and use her own non-sensitive skills and plugins within a deterministic capability ceiling.

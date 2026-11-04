@@ -219,6 +219,26 @@ export const WorkingConnectorsView: React.FC<WorkingConnectorsViewProps> = ({
             <span>Error</span>
           </span>
         );
+      case 'not_configured':
+        return (
+          <span
+            data-testid={testId}
+            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold bg-stone-500/15 text-stone-400 border border-stone-500/30"
+          >
+            <HelpCircle className="w-3 h-3" />
+            <span>Not configured</span>
+          </span>
+        );
+      case 'unsupported':
+        return (
+          <span
+            data-testid={testId}
+            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold bg-stone-500/15 text-stone-400 border border-stone-500/30"
+          >
+            <ShieldAlert className="w-3 h-3" />
+            <span>Unsupported</span>
+          </span>
+        );
       case 'simulated':
         return (
           <span

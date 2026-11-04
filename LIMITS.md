@@ -18,7 +18,7 @@ Detailed file-and-line proofs for each limitation are recorded in `/FEATURE_STAT
      - `PER_LAUNCH_AUTH_TOKEN` (`server.ts:107`) is generated at startup; enforcement headers across `/api/vault/*` and `/api/model` will be completed in Phase 4.
      - `exportEncryptedMapArchive` in `Places` (`src/packages/places/index.ts:1042-1071`) uses local string hash; will be wired to `encryptPayloadAesGcm` in Phase 4.
 
-3. **SSRF & OAuth PKCE Limitations (`F-05`, `F-06`, `F-07`, `F-08`) — Partially Remediated in Phase 2**
+3. **Connectors, OAuth PKCE & Time-Correct Scheduler (`F-05`, `F-06`, `F-07`, `F-08`) — Remediated in Phases 2 & 10**
    - **Remediated in Phase 2 (`F-06` PolicyGuard & Security Boundaries)**:
      - `PolicyEngine` enforces default-deny on unidentified callers, unknown risk classes, or policy errors (`fail closed`).
      - `mockbank.local` fallback has been completely eliminated. Unresolvable or relative URLs fail closed (`UNRESOLVED_DOMAIN_DEFAULT_DENY`).
@@ -26,11 +26,11 @@ Detailed file-and-line proofs for each limitation are recorded in `/FEATURE_STAT
      - Single-use scoped approval tokens have a 5-minute TTL (`300,000 ms`) and strict parameter binding (replays and parameter mutations rejected).
      - Safety-floor rules and protected paths (`packages/trust/*`, `SOUL.md`, `.env`) are immutable to model changes or file writes.
      - Untrusted external content is wrapped and stripped of instruction-hijacking prefixes.
-   - **Remaining for Future Phases**:
-     - Socket-level DNS rebinding resolution during upstream HTTP requests (`dns.lookup` before connection) in `server.ts` `/api/connectors/proxy` (Phase 3).
-     - `/api/connectors/oauth/exchange` (`server.ts:791-807`) returns `status: 'authenticated'` without performing an upstream OAuth token exchange POST (Phase 3).
-     - `testConnectorReal` (`src/packages/connectors_scheduler/index.ts:756-837`) HTTP testing for all 18 connectors (Phase 3).
-   - `invokeConnectorToolWithSafety` (`src/packages/connectors_scheduler/index.ts:842-926`) returns `status: 'executed'` without calling external APIs.
+   - **Remediated in Phase 10 (`F-05`, `F-06`, `F-07`, `F-08` Real Connectors, OAuth PKCE & Durable Time-Correct Scheduler)**:
+     - Enforced `ALLOWED_CONNECTOR_HOSTS` in `/api/connectors/proxy` (`server.ts`) and replaced fake `/api/connectors/oauth/exchange` responses with real upstream OAuth PKCE token endpoint POSTs and encrypted `SecretVault` storage.
+     - Built `ConnectorProviderAdapter`, `OAuthPkceLifecycleManager`, and `invokeConnectorAdapterTool` (`src/packages/connectors_scheduler/provider_adapters.ts`). Implemented 7 real adapters (`conn-weather`, `conn-wikipedia`, `conn-rss-atom`, `conn-calendar-ics`, `conn-local-folder`, `conn-github`, `conn-google-workspace`) and explicitly marked the 11 catalogue-only entries as `adapterImplemented: false` (`status: 'not_configured'`).
+     - Separated `testConnection`, `discoverCapabilities`, and `invokeConnectorAdapterTool` (`connectionTestProvesAllToolsWork: false`), routing every tool invocation through `PolicyEngine`, exact capability grant (`connector:<id>:<tool>`), scope check, single-use `ScopedApprovalToken`, rate limiting, idempotent read retry, and output schema verifier.
+     - Built `parseCronExpression`, `computeNextRunsInTimeZone`, and `DurableSchedulerEngine` (`src/packages/connectors_scheduler/cron_math.ts`, `cron_and_scheduler.ts`) removing all hardcoded `2026-10-29` timestamps, handling IANA timezones and DST spring-forward/fall-back transitions, persisting schedules/locks/idempotency keys/history to disk, defaulting missed-run policy to `'skip'`, stripping stale approval tokens, re-entering `AgentRuntime` + `PolicyEngine` at execution time, and disclosing `canExecuteWhilePoweredOff: false`.
 
 4. **AgentRuntime, Verifiers & Skill Replay Simulation (`F-09`, `F-10`, `F-11`) — Remediated in Phases 1 & 4**
    - **Remediated in Phase 1**:
@@ -64,7 +64,27 @@ Detailed file-and-line proofs for each limitation are recorded in `/FEATURE_STAT
      - Implemented `ConsentedRecorder` (`src/packages/recorder/consented_recorder.ts`) and `SkillReplayEngine` (`src/packages/runtime/skill_replay_engine.ts`) with explicit capture consent, credential screen auto-pause, secret redaction, parameterized skill compilation, drift detection, checkpoints/rollback, and real file/state verification.
    - **Remediated in Phase 8 (Dynamic Skill/Plugin Runtime & Self-Extension Manager)**:
      - Implemented `SelfExtensionManager` (`src/packages/runtime/self_extension_manager.ts`) enforcing a deterministic code boundary between `CapabilityPlane` and `ProtectedControlPlane`, strict `PluginManifestV1` with Ed25519 signature & SHA-256 content hash verification, zero default permissions (`effectiveGrants = requested ∩ HostCapabilityCeiling`), out-of-process restricted worker execution (`prlimit` + Node `--permission` + `--max-old-space-size=64` + null-prototype `vm`), version-pinned skills (`blaize.skill.v1`) executing through `PolicyEngine` + `ToolRegistry` + `MemoryLedger`, and secret-redacted skill creation from natural language and Teach & Replay traces.
+   - **Remediated in Phase 9 (Figure Factory & Safe Non-Sensitive Morrow Self-Management)**:
+     - Implemented `CharacterFactory`, `runStructuredCharacterPlanningPipeline`, `validateFigurePackForInstallation`, and `PersistentFigureLibrary` (`src/packages/character/figure_factory.ts`). Clearly distinguishes `LIVE_PROVIDER` (`EXECUTED`) when an `ImageGenerationProviderAdapter` is configured from `TEMPLATE_PLACEHOLDER` (`SIMULATED` / `NOT_CONFIGURED`) when no live image provider is configured.
+     - Implemented `MorrowPresentationSelfManager` (`src/packages/workspace/soul_self_management.ts`) allowing versioned self-edits and one-click rollback across 7 allowlisted presentation fields while splitting mixed requests and blocking all 11 protected control-plane domains.
+   - **Remediated in Phase 11 (Operational Defaults, Mission Management & Observability)**:
+     - Implemented `RuntimePolicyManager`, `ModelUsageBudgetController`, `DeviceConcurrencyLockManager`, `MissionQueueAndLifecycleManager`, `ResourceLimiterAndWorkerSupervisor`, `SubsystemHealthRegistry`, `LocalTelemetryCollector`, `IncidentResponseAndEmergencyStopManager`, and `OperationalDashboardService` (`src/packages/runtime/operations_and_observability.ts`).
+     - Enforces immutable `ProtectedPolicyCeilings`, separate provider-reported vs. estimated model usage budgets (with zero-cost live usage prohibited), `1` interactive mission + `1` background job queueing, device/browser locks, pre-write checkpoints, orphaned job recovery, 9-subsystem health probes (with `electron_shell` and `model_provider` reporting `NOT_CONFIGURED` when running outside native Electron or without `MODEL_API_KEY`), `SIGKILL` runaway worker supervision, Emergency Stop, and local-by-default secret-redacted telemetry.
    - **Remaining Platform & Subsystem Limitations**:
      - Because the current CI / AI Studio runner is a headless Linux container (`process.platform === 'linux'`), `WindowsDesktopDriver` is exercised end-to-end against `scripts/windows-test-app.py` over `BLAIZE_WINDOWS_UIA_SOCKET` and `MacOSDesktopDriver` against `scripts/macos-test-app.py` over `BLAIZE_MACOS_AX_SOCKET`, while physical Windows 10/11 and macOS sessions are documented in `docs/WINDOWS_DRIVER_TEST_CHECKLIST.md` and `docs/MACOS_DRIVER_TEST_CHECKLIST.md`.
+     - Unless a live `ImageGenerationProviderAdapter` is supplied to `CharacterFactory`, figure pack creation operates in `TEMPLATE_PLACEHOLDER` (`NOT_CONFIGURED`) mode and synthesizes deterministic transparent PNG/WebP placeholder rig assets rather than claiming live AI image generation.
      - Cross-OS installer generation (`desktop:package:mac` `.dmg` and `desktop:package:win` `.exe`) cannot be executed on a Linux container runner and honestly exits with `UNSUPPORTED_HOST_OS` (requires native `darwin` and `win32` CI runners).
-     - `measurePerProcessMemory` (`src/packages/living/index.ts:879-977`) and `scripts/verify.ts` Gate 6 remain to be remediated in future phases.
+     - Public external benchmarks (`OSWorld-Verified`) require dedicated cloud VM runner infrastructure and are honestly reported as `UNSUPPORTED` / `NOT_CONFIGURED`.
+     - Per-process Electron memory breakdown requires a running graphical Electron process with `app.getAppMetrics()`; in Node/preview mode, process memory is measured via `process.memoryUsage()`.
+
+   - **Remediated in Phase 12 (Honest Verification Pipeline, 3-Category Desktop Benchmarks, CI & Releases)**:
+     - Overhauled `scripts/verify.ts` to implement strict tri-state reporting (`PASS`, `FAIL`, `NOT_RUN`) across all 9 gates.
+     - Gate 4 audits 382 resolved npm packages in `node_modules` against approved SPDX licenses (with SPDX OR handling) and enforces Open VSX registry exclusivity.
+     - Gate 5 validates all 25 IPC channels against runtime Zod schemas, main handlers, frozen preload, and sender authorization (`validateIpcSender`).
+     - Gate 6 performs a live metric-honesty scan across source files confirming zero `const ladderPassed = true` synthetic claims and verifying 3-category separation.
+     - Gate 7 returns the actual computed `passed` boolean from live evaluation suites.
+     - Gate 9 renders static DOM via `react-dom/server` and verifies semantic HTML and ARIA landmarks.
+     - Removed `const ladderPassed = true` completely; built `runNativeLocalBenchmarkSuite()` executing 8 real host tasks on disk with full provenance records; decoupled the 64-task everyday benchmark as an explicit `SIMULATED BENCHMARK` harness; and marked `OSWorld-Verified` as `UNSUPPORTED` / `NOT_CONFIGURED` in `PUBLIC BENCHMARK`.
+     - Added honest desktop packaging code signing status (`signingStatus: 'UNSIGNED' | 'SIGNED'`), `SOURCE_DATE_EPOCH` reproducibility clamp, and packaging lifecycle tests (`clean_install`, `upgrade_preserve_db`, `rollback`, `uninstall`).
+     - Configured GitHub Actions CI/CD workflows (`ci.yml`, `release.yml`).
+

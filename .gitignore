@@ -11,4 +11,11 @@ coverage/
 .playwright-cli/
 .env*
 !.env.example
-
+.aistudio/
+.tempmediaStorage/
+*.png
+*.jpg
+*.jpeg
+*.webm
+*.mp4
+!public/*

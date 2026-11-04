@@ -1,0 +1,36 @@
+name: Blaize CI/CD Security & Verification Pipeline
+
+on:
+  push:
+    branches: [ main, remediation/* ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  verify-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run lint
+
+      - name: Run Test Suite
+        run: npm test
+
+      - name: Run 9-Gate Honest Verification
+        run: npm run verify
+
+      - name: Build Application
+        run: npm run build

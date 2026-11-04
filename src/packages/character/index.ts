@@ -501,10 +501,19 @@ export type CharacterSpec = z.infer<typeof CharacterSpecSchema>;
 
 export function compileNaturalLanguageCharacterSpec(
   descriptionText: string,
-  nameInput = 'Nova'
+  nameInput = 'Nova',
+  options?: {
+    imageProvider?: {
+      providerId: string;
+      isAvailable(): boolean;
+    };
+  }
 ): {
   ok: boolean;
   spec?: CharacterSpec;
+  generationMode?: 'LIVE_PROVIDER' | 'TEMPLATE_PLACEHOLDER';
+  providerStatus?: 'AVAILABLE' | 'NOT_CONFIGURED';
+  placeholderBanner?: string | null;
   safety: CharacterSafetyResult;
   error?: string;
 } {
@@ -513,13 +522,60 @@ export function compileNaturalLanguageCharacterSpec(
     return { ok: false, safety, error: safety.reason };
   }
 
-  const lower = descriptionText.toLowerCase();
-  const isPink = lower.includes('pink') || lower.includes('rose');
-  const isBlue = lower.includes('blue') || lower.includes('cyan') || lower.includes('cobalt');
-  const isSilver = lower.includes('silver') || lower.includes('white');
+  const lower = (descriptionText || '').toLowerCase();
+  const isPink = /\b(pink|rose|magenta|sakura|coral)\b/.test(lower);
+  const isBlue = /\b(blue|cyan|cobalt|sapphire|navy|azure)\b/.test(lower);
+  const isSilver = /\b(silver|white|platinum|frost|lunar)\b/.test(lower);
+  const isEmerald = /\b(emerald|green|mint|sage|jade)\b/.test(lower);
+  const isGold = /\b(gold|amber|blonde|honey|solar)\b/.test(lower);
 
-  const hairPrimary = isPink ? '#831843' : isBlue ? '#1E3A8A' : isSilver ? '#64748B' : '#1A1922';
-  const hairAccent = isPink ? '#F472B6' : isBlue ? '#38BDF8' : isSilver ? '#E2E8F0' : '#C5B0F2';
+  const hairPrimary = isPink
+    ? '#831843'
+    : isBlue
+      ? '#1E3A8A'
+      : isSilver
+        ? '#64748B'
+        : isEmerald
+          ? '#064E3B'
+          : isGold
+            ? '#78350F'
+            : '#1A1922';
+  const hairAccent = isPink
+    ? '#F472B6'
+    : isBlue
+      ? '#38BDF8'
+      : isSilver
+        ? '#E2E8F0'
+        : isEmerald
+          ? '#34D399'
+          : isGold
+            ? '#FBBF24'
+            : '#C5B0F2';
+
+  const irisColor = isBlue
+    ? '#0EA5E9'
+    : isPink
+      ? '#EC4899'
+      : isEmerald
+        ? '#10B981'
+        : isGold
+          ? '#F59E0B'
+          : '#7C5CBF';
+
+  const jacketColor =
+    lower.includes('white jacket') || lower.includes('cream')
+      ? '#E2E8F0'
+      : lower.includes('crimson jacket') || lower.includes('red jacket')
+        ? '#991B1B'
+        : '#334155';
+
+  const accessories = ['studio headphones', 'star clips', 'layered silver chain'];
+  if (lower.includes('glasses') || lower.includes('spectacles')) {
+    accessories.push('silver frame glasses');
+  }
+  if (lower.includes('boba')) {
+    accessories.push('boba tea');
+  }
 
   const spec: CharacterSpec = CharacterSpecSchema.parse({
     id: `spec-${Date.now()}`,
@@ -528,40 +584,65 @@ export function compileNaturalLanguageCharacterSpec(
       descriptionText.trim() ||
       'Original adult-presenting studio companion in a tailored techwear jacket.',
     hair: {
-      style: lower.includes('short')
+      style: /\b(short|bob|pixie)\b/.test(lower)
         ? 'Asymmetric bob with braided side locks'
-        : 'Long articulated box braids with star clips',
+        : /\b(ponytail|updo)\b/.test(lower)
+          ? 'High articulated studio ponytail with ribbon accents'
+          : 'Long articulated box braids with star clips',
       primaryColor: hairPrimary,
       accentColor: hairAccent,
     },
     eyes: {
       shape: 'Expressive almond studio eyes',
-      irisColor: isBlue ? '#0EA5E9' : isPink ? '#EC4899' : '#7C5CBF',
+      irisColor,
     },
     outfit: {
-      top: 'Fitted ribbed mock-neck sleeveless top',
-      outerwear: 'Structured slate studio bomber jacket',
-      bottoms: 'High-waisted tailored trousers',
-      footwear: 'Clean monochrome studio boots',
+      top: lower.includes('hoodie')
+        ? 'Technical zip hoodie with subtle geometric piping'
+        : 'Fitted ribbed mock-neck sleeveless top',
+      outerwear:
+        lower.includes('coat') || lower.includes('trench')
+          ? 'Long architectural studio trench coat'
+          : 'Structured slate studio bomber jacket',
+      bottoms: lower.includes('cargo')
+        ? 'Tapered technical cargo trousers'
+        : 'High-waisted tailored trousers',
+      footwear: lower.includes('sneakers')
+        ? 'High-top monochrome studio sneakers'
+        : 'Clean monochrome studio boots',
     },
     palette: {
       hairColor: hairPrimary,
       accentBraidColor: hairAccent,
-      jacketColor: '#334155',
+      jacketColor,
       topColor: '#1E293B',
-      eyeColor: isBlue ? '#0EA5E9' : '#7C5CBF',
+      eyeColor: irisColor,
     },
     proportions: lower.includes('chibi')
       ? 'chibi'
       : lower.includes('bust')
         ? 'portrait_bust'
         : 'vtuber_full',
-    accessories: ['studio headphones', 'star clips', 'layered silver chain'],
+    accessories,
     maturityConfirmedAdult: true,
     sfwConfirmed: true,
   });
 
-  return { ok: true, spec, safety };
+  const providerAvailable = Boolean(options?.imageProvider?.isAvailable());
+  const generationMode = providerAvailable ? 'LIVE_PROVIDER' : 'TEMPLATE_PLACEHOLDER';
+  const providerStatus = providerAvailable ? 'AVAILABLE' : 'NOT_CONFIGURED';
+  const placeholderBanner = providerAvailable
+    ? null
+    : 'TEMPLATE_PLACEHOLDER: Configured image-generation provider is unavailable; using labelled deterministic template assets.';
+
+  return {
+    ok: true,
+    spec,
+    generationMode,
+    providerStatus,
+    placeholderBanner,
+    safety,
+  };
 }
 
 export const POSE_SLOTS = [
@@ -675,7 +756,7 @@ export function validateCharacterPackManifest(
 
   // Never allow code or executable files inside a Character Pack
   for (const fname of attachedFileNames) {
-    if (/\.(js|ts|jsx|tsx|mjs|cjs|wasm|sh|bat|exe|py|html|svg)$/i.test(fname)) {
+    if (/\.(js|ts|jsx|tsx|mjs|cjs|wasm|sh|bat|ps1|cmd|exe|dll|so|dylib|py|rb|php|html|htm|svg|jar|app)$/i.test(fname)) {
       errors.push(
         `Blocked file "${fname}": Character Packs may only contain transparent PNG or WebP images and a JSON manifest, never code.`
       );
@@ -696,6 +777,16 @@ export function validateCharacterPackManifest(
     }
     if (asset.byteSize > MAX_PACK_SLOT_BYTES) {
       errors.push(`Slot "${slotKey}" exceeds the 2 MB per-image cap.`);
+    }
+    if (
+      typeof asset.webpDataUrl === 'string' &&
+      (/<script\b/i.test(asset.webpDataUrl) ||
+        /javascript:/i.test(asset.webpDataUrl) ||
+        /\beval\s*\(/i.test(asset.webpDataUrl))
+    ) {
+      errors.push(
+        `Slot "${slotKey}" contains prohibited executable or script content; Character Packs must contain data/assets only.`
+      );
     }
     if (
       asset.anchor.feetX < 0 ||
@@ -751,3 +842,6 @@ export function buildCopyableCharacterPrompts(spec: CharacterSpec): {
     posePrompts,
   };
 }
+
+export * from './figure_factory';
+

@@ -731,4 +731,15 @@ export class PassphraseWrapVault implements SecretVault {
       record.envelope.ciphertextB64 = bytesToBase64(raw);
     }
   }
+
+  getStatus(): { locked: boolean; backend: VaultBackendKind; keyCount: number } {
+    return {
+      locked: this.isLocked(),
+      backend: this.backendKind,
+      keyCount: this.records.size,
+    };
+  }
 }
+
+export const globalSecretVault = new PassphraseWrapVault();
+

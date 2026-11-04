@@ -30,6 +30,20 @@
 import { ScopedApprovalToken } from '../contracts';
 import { ScopedRuleItem } from '../hub/index';
 import { globalApprovalTokenStore, globalPolicyEngine } from '../trust';
+import {
+  CONNECTOR_PROVIDER_ADAPTERS,
+  ConnectorEvidenceClass,
+  ConnectorHttpTransport,
+  getConnectorProviderAdapter,
+} from './provider_adapters';
+import {
+  computeNextRunsInTimeZone,
+  isValidIanaTimeZone,
+  parseCronExpression,
+} from './cron_and_scheduler';
+
+export * from './provider_adapters';
+export * from './cron_and_scheduler';
 
 // ============================================================================
 // 1. CONNECTOR SDK INTERFACES & MANIFEST TYPES
@@ -37,7 +51,13 @@ import { globalApprovalTokenStore, globalPolicyEngine } from '../trust';
 
 export type ConnectorAuthType = 'none' | 'api_key' | 'bearer' | 'oauth_pkce' | 'mcp';
 
-export type ConnectorStatus = 'connected' | 'needs_setup' | 'error' | 'simulated';
+export type ConnectorStatus =
+  | 'connected'
+  | 'needs_setup'
+  | 'not_configured'
+  | 'unsupported'
+  | 'error'
+  | 'simulated';
 
 export type ConnectorCategory =
   | 'no_account'
@@ -61,6 +81,8 @@ export interface ConnectorManifest {
   category: ConnectorCategory;
   authType: ConnectorAuthType;
   status: ConnectorStatus;
+  adapterImplemented?: boolean;
+  evidenceClass?: ConnectorEvidenceClass;
   errorMessage?: string;
   setupGuide: [string, string, string]; // Exactly 3-step guide
   scopes: string[];
@@ -87,7 +109,15 @@ export interface ConnectorInvocationResult {
   ok: boolean;
   toolName: string;
   risk: 'read' | 'write';
-  status: 'executed' | 'needs_approval' | 'blocked_by_rule' | 'failed';
+  status:
+    | 'executed'
+    | 'simulated'
+    | 'needs_approval'
+    | 'blocked_by_rule'
+    | 'not_configured'
+    | 'failed';
+  evidenceClass?: ConnectorEvidenceClass;
+  isSimulated?: boolean;
   output?: unknown;
   error?: string;
   recordedInLedger: boolean;
@@ -290,7 +320,7 @@ export const RECORDED_CONNECTOR_TEST_FIXTURES: Record<
 // 4. BUILT-IN INITIAL CONNECTOR MANIFESTS (All 18 connectors)
 // ============================================================================
 
-export const INITIAL_CONNECTOR_MANIFESTS: ConnectorManifest[] = [
+const RAW_INITIAL_CONNECTOR_MANIFESTS: ConnectorManifest[] = [
   // 1. Weather (Open-Meteo) — No account
   {
     id: 'conn-weather',
@@ -745,6 +775,17 @@ export const INITIAL_CONNECTOR_MANIFESTS: ConnectorManifest[] = [
   },
 ];
 
+export const INITIAL_CONNECTOR_MANIFESTS: ConnectorManifest[] = RAW_INITIAL_CONNECTOR_MANIFESTS.map((manifest): ConnectorManifest => {
+  const adapter = CONNECTOR_PROVIDER_ADAPTERS[manifest.id];
+  const implemented = Boolean(adapter?.adapterImplemented);
+  return {
+    ...manifest,
+    adapterImplemented: implemented,
+    status: implemented ? 'needs_setup' : 'not_configured',
+    evidenceClass: implemented ? 'NEEDS_SETUP' : 'NOT_CONFIGURED',
+  };
+});
+
 // ============================================================================
 // 5. CONNECTOR TESTING & EXECUTION ENGINE (Honest Status Rule)
 // ============================================================================
@@ -753,6 +794,8 @@ export interface ConnectorTestOptions {
   connector: ConnectorManifest;
   mode?: 'mock' | 'live';
   customToken?: string;
+  transport?: ConnectorHttpTransport;
+  workspaceRoot?: string;
 }
 
 export async function testConnectorReal(
@@ -760,16 +803,24 @@ export async function testConnectorReal(
 ): Promise<{
   ok: boolean;
   status: ConnectorStatus;
+  evidenceClass: ConnectorEvidenceClass;
+  isSimulated: boolean;
+  connectionTestProvesAllToolsWork: false;
   summary: string;
   testedAt: string;
   sampleData?: Record<string, unknown>;
   error?: string;
 }> {
-  const { connector, mode = 'mock', customToken } = options;
+  const { connector, mode = 'mock', customToken, transport, workspaceRoot } = options;
   const now = new Date();
   const testedAt = now.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  const adapter = getConnectorProviderAdapter(connector.id);
+  const isAdapterImplemented =
+    connector.adapterImplemented !== undefined
+      ? connector.adapterImplemented
+      : Boolean(adapter?.adapterImplemented);
 
-  // For token/oauth connectors, if no token or credentials configured and no customToken provided:
+  // 1. Missing credentials -> NEEDS_SETUP
   if (
     connector.authType !== 'none' &&
     !connector.credentialsConfigured &&
@@ -778,68 +829,163 @@ export async function testConnectorReal(
     return {
       ok: false,
       status: 'needs_setup',
+      evidenceClass: 'NEEDS_SETUP',
+      isSimulated: false,
+      connectionTestProvesAllToolsWork: false,
       summary: `Needs setup: ${connector.name} requires credentials. See the 3-step setup guide.`,
       testedAt,
       error: 'Missing credentials. Configure in Key Vault first.',
     };
   }
 
-  // Live Mode: Perform real call if Open-Meteo or Wikipedia or configured token
-  if (mode === 'live' && typeof fetch !== 'undefined') {
-    try {
-      if (connector.id === 'conn-weather') {
-        const res = await fetch(connector.healthCheck.endpoint);
-        if (res.ok) {
-          const json = await res.json();
-          const temp = json?.current_weather?.temperature ?? 18.0;
-          return {
-            ok: true,
-            status: 'connected',
-            summary: `Open-Meteo live connection succeeded. Kyoto: ${temp}°C, clear sky.`,
-            testedAt,
-            sampleData: json?.current_weather,
-          };
-        }
-      } else if (connector.id === 'conn-wikipedia') {
-        const res = await fetch(connector.healthCheck.endpoint);
-        if (res.ok) {
-          const json = await res.json();
-          return {
-            ok: true,
-            status: 'connected',
-            summary: `Wikipedia API live call succeeded. Retrieved summary for "${json?.title || 'Kyoto'}".`,
-            testedAt,
-            sampleData: { title: json?.title, extract: json?.extract?.slice(0, 80) },
-          };
-        }
-      }
-    } catch {
-      // Network failure -> fall back to error or mock fixture below
+  // 2. Fixture / Mock mode -> Strictly labelled SIMULATED (NEVER 'connected'!)
+  if (mode === 'mock') {
+    const fixture = RECORDED_CONNECTOR_TEST_FIXTURES[connector.id];
+    if (fixture) {
+      return {
+        ok: fixture.ok,
+        status: fixture.ok ? 'simulated' : 'error',
+        evidenceClass: fixture.ok ? 'SIMULATED' : 'FAILED',
+        isSimulated: true,
+        connectionTestProvesAllToolsWork: false,
+        summary: `[SIMULATED FIXTURE] ${fixture.statusSummary}`,
+        testedAt,
+        sampleData: fixture.sampleData,
+      };
     }
-  }
-
-  // Recorded test fixtures for mock mode or testing verification
-  const fixture = RECORDED_CONNECTOR_TEST_FIXTURES[connector.id];
-  if (fixture) {
     return {
-      ok: fixture.ok,
-      status: fixture.ok ? 'connected' : 'error',
-      summary: fixture.statusSummary,
+      ok: false,
+      status: 'not_configured',
+      evidenceClass: 'NOT_CONFIGURED',
+      isSimulated: false,
+      connectionTestProvesAllToolsWork: false,
+      summary: `No recorded fixture or live adapter configured for ${connector.name}.`,
       testedAt,
-      sampleData: fixture.sampleData,
+      error: 'Connector is not configured.',
     };
   }
 
+  // 3. Live Mode: Catalogue-only entries without a real provider adapter -> NOT_CONFIGURED
+  if (!isAdapterImplemented || !adapter) {
+    return {
+      ok: false,
+      status: 'not_configured',
+      evidenceClass: 'NOT_CONFIGURED',
+      isSimulated: false,
+      connectionTestProvesAllToolsWork: false,
+      summary: `Not configured: ${connector.name} is a catalogue entry without a live provider adapter in this build.`,
+      testedAt,
+      error: `Provider adapter for '${connector.id}' is not configured.`,
+    };
+  }
+
+  // 4. Live Mode with Real Provider Adapter:
+  // If customToken is passed for a bearer/oauth connector, execute healthCheck via transport/fetch
+  if (connector.authType !== 'none' && customToken) {
+    const ssrf = validateConnectorUrlAgainstSsrf(
+      connector.customEndpointUrl || connector.healthCheck.endpoint,
+      connector.id === 'conn-universal-mcp' || connector.id === 'conn-home-assistant'
+    );
+    if (!ssrf.allowed || !ssrf.sanitizedUrl) {
+      return {
+        ok: false,
+        status: 'error',
+        evidenceClass: 'FAILED',
+        isSimulated: false,
+        connectionTestProvesAllToolsWork: false,
+        summary: `SSRF guard blocked health check URL: ${ssrf.reason}`,
+        testedAt,
+        error: ssrf.reason,
+      };
+    }
+    try {
+      const doFetch = transport
+        ? await transport({
+            url: ssrf.sanitizedUrl,
+            method: connector.healthCheck.method || 'GET',
+            headers: {
+              Authorization: `Bearer ${customToken}`,
+              Accept: 'application/json',
+            },
+          })
+        : await (async () => {
+            const r = await fetch(ssrf.sanitizedUrl!, {
+              method: connector.healthCheck.method || 'GET',
+              headers: {
+                Authorization: `Bearer ${customToken}`,
+                Accept: 'application/json',
+              },
+            });
+            const text = await r.text();
+            let json: unknown;
+            try {
+              json = JSON.parse(text);
+            } catch {
+              // ignore
+            }
+            return { ok: r.ok, status: r.status, headers: {}, text, json };
+          })();
+
+      if (!doFetch.ok || !doFetch.json || typeof doFetch.json !== 'object') {
+        return {
+          ok: false,
+          status: 'error',
+          evidenceClass: 'FAILED',
+          isSimulated: false,
+          connectionTestProvesAllToolsWork: false,
+          summary: `${connector.name} live authentication test failed (HTTP ${doFetch.status}).`,
+          testedAt,
+          error: `Upstream returned HTTP ${doFetch.status}.`,
+        };
+      }
+
+      return {
+        ok: true,
+        status: 'connected',
+        evidenceClass: 'REAL',
+        isSimulated: false,
+        connectionTestProvesAllToolsWork: false,
+        summary: `${connector.name} live provider authentication verified (HTTP ${doFetch.status}).`,
+        testedAt,
+        sampleData: doFetch.json as Record<string, unknown>,
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        status: 'error',
+        evidenceClass: 'FAILED',
+        isSimulated: false,
+        connectionTestProvesAllToolsWork: false,
+        summary: `${connector.name} live connection failed: ${err instanceof Error ? err.message : String(err)}`,
+        testedAt,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
+
+  // Delegate to the real provider adapter's testConnection
+  const adapterRes = await adapter.testConnection({
+    mode: 'live',
+    customEndpointUrl: connector.customEndpointUrl || connector.healthCheck.endpoint,
+    workspaceRoot,
+    transport,
+  });
+
   return {
-    ok: true,
-    status: 'connected',
-    summary: `Test call to ${connector.name} succeeded.`,
+    ok: adapterRes.ok,
+    status: adapterRes.status,
+    evidenceClass: adapterRes.evidenceClass,
+    isSimulated: adapterRes.isSimulated,
+    connectionTestProvesAllToolsWork: false,
+    summary: adapterRes.summary,
     testedAt,
+    error: adapterRes.error?.message,
   };
 }
 
 /**
- * Invoke a connector tool through PolicyGuard check & Rule Book rules
+ * Invoke a connector tool through PolicyGuard check, capability check & Rule Book rules.
+ * Never claims REAL execution unless a real provider response is supplied or executed via invokeConnectorAdapterTool.
  */
 export function invokeConnectorToolWithSafety(input: {
   connector: ConnectorManifest;
@@ -848,8 +994,21 @@ export function invokeConnectorToolWithSafety(input: {
   rules: ScopedRuleItem[];
   operatorApproved?: boolean;
   approvalToken?: ScopedApprovalToken;
+  grantedCapabilities?: string[];
+  grantedScopes?: string[];
+  mode?: 'mock' | 'live';
+  verifiedProviderData?: Record<string, unknown>;
 }): ConnectorInvocationResult {
-  const { connector, toolName, rules, operatorApproved = false, approvalToken } = input;
+  const {
+    connector,
+    toolName,
+    rules,
+    operatorApproved = false,
+    approvalToken,
+    grantedCapabilities,
+    mode = 'mock',
+    verifiedProviderData,
+  } = input;
   const tool = connector.tools.find((t) => t.name === toolName);
 
   if (!tool) {
@@ -858,9 +1017,53 @@ export function invokeConnectorToolWithSafety(input: {
       toolName,
       risk: 'read',
       status: 'failed',
+      evidenceClass: 'UNSUPPORTED',
+      isSimulated: false,
       error: `Tool "${toolName}" not found on connector "${connector.name}".`,
       recordedInLedger: false,
     };
+  }
+
+  // Check if adapter is implemented when in live mode
+  const adapter = getConnectorProviderAdapter(connector.id);
+  const isImplemented =
+    connector.adapterImplemented !== undefined
+      ? connector.adapterImplemented
+      : Boolean(adapter?.adapterImplemented);
+
+  if (mode === 'live' && !isImplemented) {
+    return {
+      ok: false,
+      toolName,
+      risk: tool.risk,
+      status: 'not_configured',
+      evidenceClass: 'NOT_CONFIGURED',
+      isSimulated: false,
+      error: `Connector "${connector.name}" is not configured with a live provider adapter.`,
+      recordedInLedger: false,
+    };
+  }
+
+  // Exact capability grant check if caller supplied grantedCapabilities
+  if (grantedCapabilities) {
+    const exactCap = `connector:${connector.id}:${toolName}`;
+    const wildcardCap = `connector:${connector.id}:*`;
+    if (
+      !grantedCapabilities.includes(exactCap) &&
+      !grantedCapabilities.includes(wildcardCap)
+    ) {
+      return {
+        ok: false,
+        toolName,
+        risk: tool.risk,
+        status: 'blocked_by_rule',
+        evidenceClass: 'BLOCKED',
+        isSimulated: false,
+        error: `Missing capability grant "${exactCap}" for connector "${connector.name}".`,
+        recordedInLedger: true,
+        ledgerRef: `lead-cap-deny-${Date.now()}`,
+      };
+    }
   }
 
   // 1. Rule Book block overrides everything
@@ -873,12 +1076,14 @@ export function invokeConnectorToolWithSafety(input: {
       (r.actionClass === 'write' || r.actionClass === 'destructive')
   );
 
-  if (matchedRule?.enforcement === 'block') {
+  if (matchedRule?.enforcement === 'block' && tool.risk === 'write') {
     return {
       ok: false,
       toolName,
       risk: tool.risk,
       status: 'blocked_by_rule',
+      evidenceClass: 'BLOCKED',
+      isSimulated: false,
       error: `Blocked for safety: Rule Book prohibits write action "${toolName}" on connector "${connector.name}".`,
       recordedInLedger: true,
     };
@@ -888,7 +1093,7 @@ export function invokeConnectorToolWithSafety(input: {
   let activeToken = approvalToken;
   if (!activeToken && operatorApproved && tool.risk === 'write') {
     activeToken = globalApprovalTokenStore.issueToken({
-      toolOrActionName: toolName,
+      toolOrActionName: `connector.${toolName}`,
       target: connector.name,
       payload: input.params,
       profileId: 'personal',
@@ -897,13 +1102,13 @@ export function invokeConnectorToolWithSafety(input: {
     });
   }
 
-  // 3. Central PolicyEngine Authorization Boundary (PROMPT 2.1 & 2.2)
+  // 3. Central PolicyEngine Authorization Boundary
   const policyDecision = globalPolicyEngine.evaluateToolCall({
     callerId: `connector:${connector.id}`,
     toolName: `connector.${toolName}`,
     target: connector.name,
     args: input.params,
-    riskClass: tool.risk === 'write' ? 'scoped_write' : 'read',
+    riskClass: tool.risk === 'write' ? 'external_send' : 'read',
     approvalToken: activeToken,
   });
 
@@ -916,6 +1121,8 @@ export function invokeConnectorToolWithSafety(input: {
       toolName,
       risk: tool.risk,
       status: isApproval ? 'needs_approval' : 'blocked_by_rule',
+      evidenceClass: isApproval ? 'WAITING_FOR_APPROVAL' : 'BLOCKED',
+      isSimulated: false,
       error: isApproval
         ? `Needs your approval: Write tool "${toolName}" on "${connector.name}" modifies external state.`
         : `Blocked for safety: PolicyGuard denied "${toolName}" on connector "${connector.name}" (${policyDecision.reason}).`,
@@ -923,49 +1130,74 @@ export function invokeConnectorToolWithSafety(input: {
     };
   }
 
-  // 4. Read tools run freely
-  if (tool.risk === 'read') {
+  // 4. Write tools need approval per writeRequiresApproval or Rule Book
+  if (tool.risk === 'write') {
+    const ruleEnforcement =
+      matchedRule?.enforcement || (connector.writeRequiresApproval ? 'ask_first' : 'allow');
+    if (ruleEnforcement === 'ask_first' && !operatorApproved && !activeToken) {
+      return {
+        ok: false,
+        toolName,
+        risk: 'write',
+        status: 'needs_approval',
+        evidenceClass: 'WAITING_FOR_APPROVAL',
+        isSimulated: false,
+        error: `Needs your approval: Write tool "${toolName}" on "${connector.name}" modifies external state.`,
+        recordedInLedger: false,
+      };
+    }
+  }
+
+  // 5. In live mode without verified provider data, refuse to fabricate generic "executed" output
+  if (mode === 'live' && !verifiedProviderData) {
+    return {
+      ok: false,
+      toolName,
+      risk: tool.risk,
+      status: 'failed',
+      evidenceClass: 'FAILED',
+      isSimulated: false,
+      error: `Live invocation of "${toolName}" requires async provider execution via invokeConnectorAdapterTool.`,
+      recordedInLedger: true,
+    };
+  }
+
+  if (mode === 'live' && verifiedProviderData) {
     return {
       ok: true,
       toolName,
-      risk: 'read',
+      risk: tool.risk,
       status: 'executed',
+      evidenceClass: 'REAL',
+      isSimulated: false,
       output: {
-        message: `Executed read tool "${toolName}" on "${connector.name}".`,
+        ...verifiedProviderData,
         timestamp: new Date().toISOString(),
+        consumedApprovalToken: activeToken?.tokenId,
       },
       recordedInLedger: true,
       ledgerRef: `lead-${Date.now()}`,
     };
   }
 
-  // 5. Write tools need approval per writeRequiresApproval or Rule Book
-  const ruleEnforcement = matchedRule?.enforcement || (connector.writeRequiresApproval ? 'ask_first' : 'allow');
-
-  if (ruleEnforcement === 'ask_first' && !operatorApproved && !activeToken) {
-    return {
-      ok: false,
-      toolName,
-      risk: 'write',
-      status: 'needs_approval',
-      error: `Needs your approval: Write tool "${toolName}" on "${connector.name}" modifies external state.`,
-      recordedInLedger: false,
-    };
-  }
-
-  // Approved write execution
+  // 6. Mock / preview fixture execution -> explicitly marked SIMULATED
+  const fixture = RECORDED_CONNECTOR_TEST_FIXTURES[connector.id];
   return {
     ok: true,
     toolName,
-    risk: 'write',
+    risk: tool.risk,
     status: 'executed',
+    evidenceClass: 'SIMULATED',
+    isSimulated: true,
     output: {
-      message: `Executed approved write action "${toolName}" on "${connector.name}".`,
+      simulated: true,
+      evidenceClass: 'SIMULATED',
+      sampleData: fixture?.sampleData ?? input.params,
       timestamp: new Date().toISOString(),
       consumedApprovalToken: activeToken?.tokenId,
     },
     recordedInLedger: true,
-    ledgerRef: `lead-${Date.now()}`,
+    ledgerRef: `lead-sim-${Date.now()}`,
   };
 }
 
@@ -1147,91 +1379,85 @@ export function formatFrequencyPlainWords(
 }
 
 /**
- * Compute the next execution Date and plain words ("Tomorrow, 8:00 AM", "Today, 2:30 PM")
+ * Compute the next execution Date and plain words using a real 5-field cron expression
+ * and IANA timezone (DST-correct).
  */
 export function computeNextScheduleRun(input: {
   frequency: ScheduleFrequency;
   timeOfDay: string;
   daysOfWeek?: DayOfWeek[];
   fromTime?: Date;
-}): { nextEpochMs: number; plainWords: string; utcIso: string; cronExpression: string } {
+  timeZone?: string;
+  customCronExpression?: string;
+  scheduleId?: string;
+}): {
+  nextEpochMs: number;
+  plainWords: string;
+  utcIso: string;
+  cronExpression: string;
+  timeZone: string;
+  idempotencyKey: string;
+} {
   const now = input.fromTime || new Date();
-  const [targetH, targetM] = (input.timeOfDay || '08:00').split(':').map((s) => parseInt(s, 10));
+  const timeZone =
+    input.timeZone && isValidIanaTimeZone(input.timeZone)
+      ? input.timeZone
+      : getDeviceTimeZone();
+  const [rawH, rawM] = (input.timeOfDay || '08:00').split(':').map((s) => parseInt(s, 10));
+  const targetH = Number.isFinite(rawH) && rawH >= 0 && rawH <= 23 ? rawH : 8;
+  const targetM = Number.isFinite(rawM) && rawM >= 0 && rawM <= 59 ? rawM : 0;
 
-  let candidate = new Date(now);
-  candidate.setHours(targetH, targetM, 0, 0);
+  const dayMap: Record<DayOfWeek, number> = {
+    sun: 0,
+    mon: 1,
+    tue: 2,
+    wed: 3,
+    thu: 4,
+    fri: 5,
+    sat: 6,
+  };
 
-  // If candidate time is already in the past today, advance by at least 1 day
-  if (candidate.getTime() <= now.getTime()) {
-    candidate.setDate(candidate.getDate() + 1);
+  let cron = input.customCronExpression?.trim() || '';
+  if (!cron) {
+    if (input.frequency === 'every_day' || input.frequency === 'once') {
+      cron = `${targetM} ${targetH} * * *`;
+    } else if (input.frequency === 'weekdays') {
+      cron = `${targetM} ${targetH} * * 1-5`;
+    } else if (input.frequency === 'weekly') {
+      const targetDays =
+        input.daysOfWeek && input.daysOfWeek.length > 0
+          ? input.daysOfWeek.map((d) => dayMap[d])
+          : [1];
+      cron = `${targetM} ${targetH} * * ${targetDays.join(',')}`;
+    } else if (input.frequency === 'monthly') {
+      cron = `${targetM} ${targetH} 1 * *`;
+    } else {
+      cron = `${targetM} ${targetH} * * *`;
+    }
   }
 
-  if (input.frequency === 'weekdays') {
-    // 0 is Sunday, 6 is Saturday
-    while (candidate.getDay() === 0 || candidate.getDay() === 6) {
-      candidate.setDate(candidate.getDate() + 1);
-    }
-  } else if (input.frequency === 'weekly') {
-    const dayMap: Record<DayOfWeek, number> = {
-      sun: 0,
-      mon: 1,
-      tue: 2,
-      wed: 3,
-      thu: 4,
-      fri: 5,
-      sat: 6,
-    };
-    const targetDays = (input.daysOfWeek && input.daysOfWeek.length > 0)
-      ? input.daysOfWeek.map((d) => dayMap[d])
-      : [1]; // Default Monday
-    while (!targetDays.includes(candidate.getDay())) {
-      candidate.setDate(candidate.getDate() + 1);
-    }
-  } else if (input.frequency === 'monthly') {
-    // Next month on 1st or same day
-    if (candidate.getTime() <= now.getTime()) {
-      candidate.setMonth(candidate.getMonth() + 1);
-    }
+  // Validate 5-field cron expression
+  parseCronExpression(cron);
+
+  const [slot] = computeNextRunsInTimeZone({
+    cronExpression: cron,
+    timeZone,
+    fromTime: now,
+    count: 1,
+    scheduleId: input.scheduleId ?? 'sched',
+  });
+
+  if (!slot) {
+    throw new Error(`Unable to compute next schedule run for cron '${cron}' in '${timeZone}'.`);
   }
-
-  // Generate plain words relative to now
-  const isToday =
-    candidate.getDate() === now.getDate() &&
-    candidate.getMonth() === now.getMonth() &&
-    candidate.getFullYear() === now.getFullYear();
-
-  const tomorrow = new Date(now);
-  tomorrow.setDate(now.getDate() + 1);
-  const isTomorrow =
-    candidate.getDate() === tomorrow.getDate() &&
-    candidate.getMonth() === tomorrow.getMonth() &&
-    candidate.getFullYear() === tomorrow.getFullYear();
-
-  const timeFormatted = formatTime12h(input.timeOfDay);
-  let plainWords = '';
-  if (isToday) {
-    plainWords = `Today, ${timeFormatted}`;
-  } else if (isTomorrow) {
-    plainWords = `Tomorrow, ${timeFormatted}`;
-  } else {
-    const weekdayName = candidate.toLocaleDateString([], { weekday: 'short' });
-    const monthName = candidate.toLocaleDateString([], { month: 'short' });
-    plainWords = `${weekdayName}, ${monthName} ${candidate.getDate()}, ${timeFormatted}`;
-  }
-
-  // Equivalent cron expression for Advanced view
-  let cron = '';
-  if (input.frequency === 'every_day') cron = `${targetM} ${targetH} * * *`;
-  else if (input.frequency === 'weekdays') cron = `${targetM} ${targetH} * * 1-5`;
-  else if (input.frequency === 'weekly') cron = `${targetM} ${targetH} * * 1`;
-  else if (input.frequency === 'monthly') cron = `${targetM} ${targetH} 1 * *`;
-  else cron = `${targetM} ${targetH} ${candidate.getDate()} ${candidate.getMonth() + 1} *`;
 
   return {
-    nextEpochMs: candidate.getTime(),
-    plainWords,
-    utcIso: candidate.toISOString(),
+    nextEpochMs: slot.epochMs,
+    plainWords: slot.plainWords,
+    utcIso: slot.utcIso,
     cronExpression: cron,
+    timeZone: slot.timeZone,
+    idempotencyKey: slot.idempotencyKey,
   };
 }
 
@@ -1251,15 +1477,23 @@ export interface SleepWakeEvaluationResult {
 }
 
 /**
- * Re-evaluate schedules on system wake (e.g. laptop lid opened or browser tab visible again)
+ * Re-evaluate schedules on system wake (e.g. laptop lid opened or browser tab visible again).
+ * Requirement 10: Default missed-run policy is 'skip' (with optional 'run_when_back' or 'ask_me').
  */
 export function evaluateSleepAndWake(input: {
   lastCheckedEpochMs: number;
   nowEpochMs: number;
   schedules: EverydayScheduleItem[];
   defaultMissedPolicy?: MissedRunPolicy;
+  timeZone?: string;
 }): SleepWakeEvaluationResult {
-  const { lastCheckedEpochMs, nowEpochMs, schedules } = input;
+  const {
+    lastCheckedEpochMs,
+    nowEpochMs,
+    schedules,
+    defaultMissedPolicy = 'skip',
+    timeZone,
+  } = input;
   const elapsedMs = nowEpochMs - lastCheckedEpochMs;
   const sleptDurationMinutes = Math.round(elapsedMs / (60 * 1000));
 
@@ -1277,8 +1511,8 @@ export function evaluateSleepAndWake(input: {
 
     // Check if scheduled time fell between last checked and now
     if (schedule.nextRunEpochMs >= lastCheckedEpochMs && schedule.nextRunEpochMs <= nowEpochMs) {
-      const policy = schedule.missedRunPolicy || 'run_when_back';
-      let actionTaken: 'executed_now' | 'skipped' | 'queued_for_approval' = 'executed_now';
+      const policy = schedule.missedRunPolicy || defaultMissedPolicy;
+      let actionTaken: 'executed_now' | 'skipped' | 'queued_for_approval' = 'skipped';
 
       if (policy === 'skip') {
         actionTaken = 'skipped';
@@ -1303,12 +1537,15 @@ export function evaluateSleepAndWake(input: {
         actionTaken,
       });
 
-      // Recalculate next run from now
+      // Recalculate next run from now in the active IANA timezone
       const nextRun = computeNextScheduleRun({
         frequency: schedule.frequency,
         timeOfDay: schedule.timeOfDay,
         daysOfWeek: schedule.daysOfWeek,
         fromTime: new Date(nowEpochMs),
+        timeZone,
+        customCronExpression: schedule.advancedCron,
+        scheduleId: schedule.id,
       });
 
       updatedSchedules.push({
@@ -1433,60 +1670,82 @@ export function parseNaturalLanguageSchedule(input: string): ParsedScheduleInten
 // 10. INITIAL DEFAULT EVERYDAY SCHEDULES
 // ============================================================================
 
-export const INITIAL_EVERYDAY_SCHEDULES: EverydayScheduleItem[] = [
-  {
-    id: 'sched-morning-briefing',
-    title: 'Morning briefing',
-    prompt: "Summarize today's Kyoto trip agenda, weather forecast, and transport notes.",
+export const INITIAL_EVERYDAY_SCHEDULES: EverydayScheduleItem[] = (() => {
+  const runMorning = computeNextScheduleRun({
     frequency: 'weekdays',
     timeOfDay: '08:00',
-    mode: 'do_for_me',
-    channel: 'toast',
-    missedRunPolicy: 'run_when_back',
-    enabled: true,
-    nextRunLocal: 'Tomorrow, 8:00 AM',
-    nextRunEpochMs: computeNextScheduleRun({ frequency: 'weekdays', timeOfDay: '08:00' }).nextEpochMs,
-    lastRunAt: 'Today, 8:00 AM',
-    lastRunStatus: 'done',
-    advancedCron: '0 8 * * 1-5',
-    templateId: 'tpl-morning-briefing',
-    requiresMoneyOrSensitive: false,
-  },
-  {
-    id: 'sched-daily-plan',
-    title: 'Daily plan',
-    prompt: 'Review active project goals and build a prioritized to-do list for today.',
+    scheduleId: 'sched-morning-briefing',
+  });
+  const runDaily = computeNextScheduleRun({
     frequency: 'every_day',
     timeOfDay: '08:30',
-    mode: 'do_for_me',
-    channel: 'chat',
-    missedRunPolicy: 'run_when_back',
-    enabled: true,
-    nextRunLocal: 'Tomorrow, 8:30 AM',
-    nextRunEpochMs: computeNextScheduleRun({ frequency: 'every_day', timeOfDay: '08:30' }).nextEpochMs,
-    lastRunAt: 'Today, 8:30 AM',
-    lastRunStatus: 'done',
-    advancedCron: '30 8 * * *',
-    templateId: 'tpl-daily-plan',
-    requiresMoneyOrSensitive: false,
-  },
-  {
-    id: 'sched-tidy-downloads',
-    title: 'Tidy my downloads weekly',
-    prompt: 'Check the downloads folder for files older than 30 days and suggest cleanup.',
+    scheduleId: 'sched-daily-plan',
+  });
+  const runTidy = computeNextScheduleRun({
     frequency: 'weekly',
-    daysOfWeek: ['fri'],
     timeOfDay: '17:00',
-    mode: 'do_for_me',
-    channel: 'toast',
-    missedRunPolicy: 'ask_me',
-    enabled: true,
-    nextRunLocal: 'Friday, 5:00 PM',
-    nextRunEpochMs: computeNextScheduleRun({ frequency: 'weekly', timeOfDay: '17:00', daysOfWeek: ['fri'] }).nextEpochMs,
-    lastRunAt: 'Last Friday',
-    lastRunStatus: 'done',
-    advancedCron: '0 17 * * 5',
-    templateId: 'tpl-tidy-downloads',
-    requiresMoneyOrSensitive: false,
-  },
-];
+    daysOfWeek: ['fri'],
+    scheduleId: 'sched-tidy-downloads',
+  });
+
+  return [
+    {
+      id: 'sched-morning-briefing',
+      title: 'Morning briefing',
+      prompt: "Summarize today's Kyoto trip agenda, weather forecast, and transport notes.",
+      frequency: 'weekdays',
+      timeOfDay: '08:00',
+      mode: 'do_for_me',
+      channel: 'toast',
+      missedRunPolicy: 'skip',
+      enabled: true,
+      nextRunLocal: runMorning.plainWords,
+      nextRunEpochMs: runMorning.nextEpochMs,
+      lastRunAt: 'Previous scheduled slot',
+      lastRunStatus: 'done',
+      advancedCron: runMorning.cronExpression,
+      advancedUtcTimestamp: runMorning.utcIso,
+      templateId: 'tpl-morning-briefing',
+      requiresMoneyOrSensitive: false,
+    },
+    {
+      id: 'sched-daily-plan',
+      title: 'Daily plan',
+      prompt: 'Review active project goals and build a prioritized to-do list for today.',
+      frequency: 'every_day',
+      timeOfDay: '08:30',
+      mode: 'do_for_me',
+      channel: 'chat',
+      missedRunPolicy: 'skip',
+      enabled: true,
+      nextRunLocal: runDaily.plainWords,
+      nextRunEpochMs: runDaily.nextEpochMs,
+      lastRunAt: 'Previous scheduled slot',
+      lastRunStatus: 'done',
+      advancedCron: runDaily.cronExpression,
+      advancedUtcTimestamp: runDaily.utcIso,
+      templateId: 'tpl-daily-plan',
+      requiresMoneyOrSensitive: false,
+    },
+    {
+      id: 'sched-tidy-downloads',
+      title: 'Tidy my downloads weekly',
+      prompt: 'Check the downloads folder for files older than 30 days and suggest cleanup.',
+      frequency: 'weekly',
+      daysOfWeek: ['fri'],
+      timeOfDay: '17:00',
+      mode: 'do_for_me',
+      channel: 'toast',
+      missedRunPolicy: 'ask_me',
+      enabled: true,
+      nextRunLocal: runTidy.plainWords,
+      nextRunEpochMs: runTidy.nextEpochMs,
+      lastRunAt: 'Previous scheduled slot',
+      lastRunStatus: 'done',
+      advancedCron: runTidy.cronExpression,
+      advancedUtcTimestamp: runTidy.utcIso,
+      templateId: 'tpl-tidy-downloads',
+      requiresMoneyOrSensitive: false,
+    },
+  ];
+})();

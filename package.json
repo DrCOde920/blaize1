@@ -1,7 +1,7 @@
 {
-  "name": "react-example",
+  "name": "blaize-accountable-desktop",
   "private": true,
-  "version": "0.0.0",
+  "version": "3.0.0",
   "type": "module",
   "main": "dist-electron/main.cjs",
   "scripts": {
@@ -17,13 +17,13 @@
     "desktop:package:linux": "tsx scripts/package-desktop.ts --target=linux",
     "desktop:package:win": "tsx scripts/package-desktop.ts --target=win",
     "desktop:package:mac": "tsx scripts/package-desktop.ts --target=mac",
+    "desktop:lifecycle": "tsx scripts/package-desktop.ts --verify-lifecycle",
     "test:electron": "tsx --test src/packages/platform/electron_desktop.test.ts",
-    "test": "tsx --test src/packages/trust/trust.test.ts src/packages/trust/decoupling.test.ts src/packages/trust/trust_kernel_boundary.test.ts src/packages/trust/durable_security.test.ts src/packages/storage/sqlite_db.test.ts src/packages/platform/electron_desktop.test.ts src/packages/l3xi/l3xi.test.ts src/packages/living/living.test.ts src/packages/workspace/workspace.test.ts src/packages/runtime/runtime.test.ts src/packages/runtime/meta_model_loop.test.ts src/packages/recorder/recorder.test.ts src/packages/character/studio_vault_hermes.test.ts src/packages/hub/index.test.ts src/packages/projects_evals/index.test.ts src/packages/connectors_scheduler/index.test.ts src/packages/browser_ide/index.test.ts src/packages/browser_ide/browser_session.test.ts src/packages/browser_ide/scoped_workspace.test.ts src/packages/recorder/consented_recorder.test.ts src/packages/runtime/skill_replay_engine.test.ts src/packages/runtime/self_extension_manager.test.ts src/packages/pc_operator/index.test.ts src/packages/pc_operator/linux_driver.test.ts src/packages/pc_operator/windows_driver.test.ts src/packages/pc_operator/macos_driver.test.ts src/packages/places/index.test.ts",
+    "test": "tsx --test \"src/**/*.test.ts\"",
     "verify": "tsx scripts/verify.ts",
     "eval": "tsx scripts/run-eval.ts"
   },
   "dependencies": {
-    "@google/genai": "^2.4.0",
     "@tailwindcss/vite": "^4.3.3",
     "@vitejs/plugin-react": "^6.1.1",
     "dotenv": "^17.2.3",

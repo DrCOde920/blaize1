@@ -1478,11 +1478,12 @@ export const PCOperatorView: React.FC<PCOperatorViewProps> = ({
           <div className="bg-[#12161F] border border-[#1E2430] rounded-xl p-4 flex flex-wrap items-center justify-between gap-4">
             <div>
               <h2 className="text-sm font-semibold text-white">
-                64-Task Everyday PC Benchmark Suite — Ladder-On (T1→T4) vs Vision-Only (T4)
+                Honest PC Benchmark Suite — NATIVE LOCAL vs SIMULATED vs PUBLIC
               </h2>
               <p className="text-xs text-[#9BA3B5]">
-                Every task is verified by a deterministic verifier (`element_exists`, `value_matches`, `file_hash`).
-                False successes goal: strictly 0.
+                Strictly separates <span className="font-mono text-emerald-300">NATIVE LOCAL BENCHMARK</span> (real host I/O &amp; SHA-256),{' '}
+                <span className="font-mono text-amber-300">SIMULATED BENCHMARK</span> (64-task deterministic verifier harness), and{' '}
+                <span className="font-mono text-[#9BA3B5]">PUBLIC BENCHMARK</span> (OSWorld-Verified). Synthetic numbers are never compared as empirical native performance.
               </p>
             </div>
             <div className="flex items-center gap-3">
@@ -1501,13 +1502,54 @@ export const PCOperatorView: React.FC<PCOperatorViewProps> = ({
             </div>
           </div>
 
+          {/* 3-Category Truthful Separation Banner */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3" data-testid="benchmark-three-categories">
+            <div className="bg-[#12161F] border border-[#1E2430] rounded-xl p-3 space-y-1">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-mono font-semibold text-emerald-300">NATIVE LOCAL BENCHMARK</span>
+                <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-300">
+                  {benchmarkReport.nativeLocalBenchmark.executionState}
+                </span>
+              </div>
+              <p className="text-xs text-[#C4CAD8] font-mono">
+                {benchmarkReport.nativeLocalBenchmark.totalTasks > 0
+                  ? `${benchmarkReport.nativeLocalBenchmark.passedTasks}/${benchmarkReport.nativeLocalBenchmark.totalTasks} PASS (${benchmarkReport.nativeLocalBenchmark.totalMeasuredLatencyMs} ms measured, costSource=${benchmarkReport.nativeLocalBenchmark.costSource})`
+                  : 'Run `npm run eval` on Node/Desktop host for real local fs/policy/process benchmark'}
+              </p>
+            </div>
+
+            <div className="bg-[#12161F] border border-[#1E2430] rounded-xl p-3 space-y-1">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-mono font-semibold text-amber-300">SIMULATED BENCHMARK</span>
+                <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-amber-500/15 text-amber-300">
+                  {benchmarkReport.executionState} (ESTIMATED)
+                </span>
+              </div>
+              <p className="text-xs text-[#C4CAD8] font-mono">
+                {benchmarkReport.ladderOn.passedTasks}/{benchmarkReport.totalTasks} verifier checks passed (non-empirical fixture harness)
+              </p>
+            </div>
+
+            <div className="bg-[#12161F] border border-[#1E2430] rounded-xl p-3 space-y-1">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-mono font-semibold text-[#9BA3B5]">PUBLIC BENCHMARK</span>
+                <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-red-500/15 text-red-300">
+                  {benchmarkReport.osWorldVerification.executionState}
+                </span>
+              </div>
+              <p className="text-xs text-[#9BA3B5] font-mono">
+                {benchmarkReport.osWorldVerification.benchmarkName}: {benchmarkReport.osWorldVerification.executedTasksCount} tasks executed (KVM unavailable)
+              </p>
+            </div>
+          </div>
+
           {writeResultsStatus.savedPath && (
             <div
               data-testid="evals-write-confirmation"
               className="bg-emerald-500/10 border border-emerald-500/30 rounded-xl px-4 py-3 text-xs font-mono text-emerald-300 flex items-center justify-between"
             >
               <span>
-                Wrote real run `{writeResultsStatus.runId}` ({benchmarkReport.totalTasks} tasks) to{' '}
+                Wrote run `{writeResultsStatus.runId}` ({benchmarkReport.totalTasks} simulated + {benchmarkReport.nativeLocalBenchmark.totalTasks} native tasks) to{' '}
                 <strong>{writeResultsStatus.savedPath}</strong> at {writeResultsStatus.timestamp}
               </span>
               <span>False Successes: 0</span>
@@ -1518,7 +1560,7 @@ export const PCOperatorView: React.FC<PCOperatorViewProps> = ({
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
             <div className="lg:col-span-7 bg-[#12161F] border border-[#1E2430] rounded-xl p-4">
               <h3 className="text-sm font-semibold text-white mb-3">
-                Measured KPI Comparison (64 Tasks)
+                SIMULATED BENCHMARK — Action Ladder vs Vision-Only (64 Tasks, Modeled Estimates)
               </h3>
               <table className="w-full text-left border-collapse text-xs tabular-nums">
                 <thead>
@@ -1668,10 +1710,10 @@ export const PCOperatorView: React.FC<PCOperatorViewProps> = ({
               <div className="bg-[#12161F] border border-[#1E2430] rounded-xl p-4 space-y-1.5 text-xs">
                 <div className="flex items-center justify-between">
                   <h3 className="text-sm font-semibold text-white">
-                    Public Benchmark Setup ({benchmarkReport.osWorldVerification.benchmarkName})
+                    PUBLIC BENCHMARK ({benchmarkReport.osWorldVerification.benchmarkName})
                   </h3>
-                  <span className="font-mono text-[11px] px-2 py-0.5 rounded bg-amber-500/15 text-amber-300">
-                    Setup Verified
+                  <span className="font-mono text-[11px] px-2 py-0.5 rounded bg-red-500/15 text-red-300">
+                    {benchmarkReport.osWorldVerification.executionState}
                   </span>
                 </div>
                 <p className="text-[#9BA3B5] leading-relaxed">

@@ -37,22 +37,51 @@ describe('Connectors SDK & Everyday Scheduler Pure Logic', () => {
     }
   });
 
-  it('honestly handles connection testing: never shows connected without successful test', async () => {
+  it('honestly handles connection testing: fixtures are SIMULATED, live responses are CONNECTED, catalogue entries are NOT_CONFIGURED', async () => {
     const weatherConn = INITIAL_CONNECTOR_MANIFESTS.find((c) => c.id === 'conn-weather')!;
     assert.strictEqual(weatherConn.status, 'needs_setup');
+    assert.strictEqual(weatherConn.adapterImplemented, true);
 
-    // Test connection
-    const testResult = await testConnectorReal({ connector: weatherConn, mode: 'mock' });
-    assert.strictEqual(testResult.ok, true);
-    assert.strictEqual(testResult.status, 'connected');
-    assert.ok(testResult.summary.includes('Open-Meteo'));
+    // 1. Mock fixture mode MUST return 'simulated', never 'connected'
+    const mockResult = await testConnectorReal({ connector: weatherConn, mode: 'mock' });
+    assert.strictEqual(mockResult.ok, true);
+    assert.strictEqual(mockResult.status, 'simulated');
+    assert.strictEqual(mockResult.isSimulated, true);
+    assert.strictEqual(mockResult.evidenceClass, 'SIMULATED');
+    assert.strictEqual(mockResult.connectionTestProvesAllToolsWork, false);
 
-    // Token-based connector without credentials should stay in needs_setup
+    // 2. Live mode with validated provider response returns 'connected'
+    const liveResult = await testConnectorReal({
+      connector: weatherConn,
+      mode: 'live',
+      transport: async () => ({
+        ok: true,
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+        text: JSON.stringify({ current_weather: { temperature: 19.2, windspeed: 6.4 } }),
+        json: { current_weather: { temperature: 19.2, windspeed: 6.4 } },
+      }),
+    });
+    assert.strictEqual(liveResult.ok, true);
+    assert.strictEqual(liveResult.status, 'connected');
+    assert.strictEqual(liveResult.isSimulated, false);
+    assert.strictEqual(liveResult.evidenceClass, 'REAL');
+
+    // 3. Token-based connector without credentials stays in needs_setup
     const githubConn = INITIAL_CONNECTOR_MANIFESTS.find((c) => c.id === 'conn-github')!;
-    const unconfiguredTest = await testConnectorReal({ connector: githubConn, mode: 'mock' });
+    const unconfiguredTest = await testConnectorReal({ connector: githubConn, mode: 'live' });
     assert.strictEqual(unconfiguredTest.ok, false);
     assert.strictEqual(unconfiguredTest.status, 'needs_setup');
     assert.ok(unconfiguredTest.error?.includes('Missing credentials'));
+
+    // 4. Catalogue-only entry returns 'not_configured' in live mode
+    const webSearchConn = INITIAL_CONNECTOR_MANIFESTS.find((c) => c.id === 'conn-web-search')!;
+    assert.strictEqual(webSearchConn.adapterImplemented, false);
+    assert.strictEqual(webSearchConn.status, 'not_configured');
+    const catalogueTest = await testConnectorReal({ connector: webSearchConn, mode: 'live' });
+    assert.strictEqual(catalogueTest.ok, false);
+    assert.strictEqual(catalogueTest.status, 'not_configured');
+    assert.strictEqual(catalogueTest.evidenceClass, 'NOT_CONFIGURED');
   });
 
   it('runs read tools freely and blocks unapproved write tools per Rule Book', () => {

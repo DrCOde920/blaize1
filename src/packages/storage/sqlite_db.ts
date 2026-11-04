@@ -15,7 +15,7 @@
  * - Right-to-delete cascades across records, FTS5, and content stores
  */
 
-import { DatabaseSync } from 'node:sqlite';
+import * as nodeSqlite from 'node:sqlite';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { MIGRATIONS } from './migrations';
@@ -68,7 +68,7 @@ export interface StoredLedgerEventRecord extends CanonicalLedgerFields {
 }
 
 export class DurableSqliteDatabase {
-  private db: DatabaseSync;
+  private db: nodeSqlite.DatabaseSync;
   private dbPath: string;
   private isClosed = false;
 
@@ -81,7 +81,7 @@ export class DurableSqliteDatabase {
       }
     }
 
-    this.db = new DatabaseSync(dbPath);
+    this.db = new nodeSqlite.DatabaseSync(dbPath);
     this.configurePragmas();
     this.runMigrations();
   }
@@ -125,7 +125,7 @@ export class DurableSqliteDatabase {
     }
   }
 
-  public getRawDb(): DatabaseSync {
+  public getRawDb(): nodeSqlite.DatabaseSync {
     return this.db;
   }
 

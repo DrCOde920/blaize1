@@ -576,6 +576,7 @@ export interface ModelRouterOptions {
   proxyBaseUrl?: string;
   maxRequestsPerMinute?: number;
   defaultTimeoutMs?: number;
+  launchToken?: string;
 }
 
 export class ModelRouter {
@@ -585,12 +586,22 @@ export class ModelRouter {
   private maxRequestsPerMinute: number;
   private defaultTimeoutMs: number;
   private requestTimestampsMs: number[] = [];
+  private launchToken?: string;
 
   constructor(initialMode: ModelRouterMode = 'mock', options?: ModelRouterOptions) {
     this.mode = initialMode;
     this.proxyBaseUrl = (options?.proxyBaseUrl ?? '').replace(/\/+$/, '');
     this.maxRequestsPerMinute = options?.maxRequestsPerMinute ?? 30;
     this.defaultTimeoutMs = options?.defaultTimeoutMs ?? 15_000;
+    this.launchToken = options?.launchToken;
+  }
+
+  public setLaunchToken(token: string): void {
+    this.launchToken = token;
+  }
+
+  public getLaunchToken(): string | undefined {
+    return this.launchToken;
   }
 
   public getMode(): ModelRouterMode {
@@ -866,9 +877,24 @@ export class ModelRouter {
 
     try {
       const endpointUrl = `${this.proxyBaseUrl}/api/model`;
+      const token =
+        this.launchToken ||
+        (typeof process !== 'undefined' ? process.env.BLAIZE_LAUNCH_TOKEN : undefined) ||
+        (typeof window !== 'undefined' ? (window as any).__BLAIZE_LAUNCH_TOKEN__ : undefined);
+      const origin =
+        this.proxyBaseUrl && (this.proxyBaseUrl.startsWith('http://') || this.proxyBaseUrl.startsWith('https://'))
+          ? new URL(this.proxyBaseUrl).origin
+          : typeof window !== 'undefined' && window.location
+            ? window.location.origin
+            : 'http://localhost:3000';
+
       const resp = await fetch(endpointUrl, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          Origin: origin,
+          ...(token ? { 'X-Blaize-Launch-Token': token } : {}),
+        },
         body: serializedBody,
         signal: controller.signal,
       });
@@ -1174,9 +1200,24 @@ export class ModelRouter {
     }
 
     try {
+      const token =
+        this.launchToken ||
+        (typeof process !== 'undefined' ? process.env.BLAIZE_LAUNCH_TOKEN : undefined) ||
+        (typeof window !== 'undefined' ? (window as any).__BLAIZE_LAUNCH_TOKEN__ : undefined);
+      const origin =
+        this.proxyBaseUrl && (this.proxyBaseUrl.startsWith('http://') || this.proxyBaseUrl.startsWith('https://'))
+          ? new URL(this.proxyBaseUrl).origin
+          : typeof window !== 'undefined' && window.location
+            ? window.location.origin
+            : 'http://localhost:3000';
+
       const resp = await fetch(`${this.proxyBaseUrl}/api/model/test`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          Origin: origin,
+          ...(token ? { 'X-Blaize-Launch-Token': token } : {}),
+        },
         body: JSON.stringify({ model: modelToProbe }),
       });
       const data = await resp.json();
@@ -4597,5 +4638,9 @@ export const INITIAL_DESKTOP_APP_GRANTS: DesktopAppGrant[] = [
 // Re-export real Skill Replay Engine with drift detection and checkpoints
 export * from './skill_replay_engine';
 
-// Re-export Phase 8 Self-Extension Manager & Dynamic Skill/Plugin Runtime
-export * from './self_extension_manager';
+// Re-export Phase 8 Self-Extension Manager & Dynamic Skill/Plugin Runtime types for browser-safe shared runtime imports
+export type * from './self_extension_manager';
+
+// Re-export Phase 11 Operational Defaults, Mission Management & Observability types for browser-safe shared runtime imports
+export type * from './operations_and_observability';
+

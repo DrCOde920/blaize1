@@ -1118,15 +1118,41 @@ export const PluginsHubView: React.FC<PluginsHubViewProps> = ({
                   const targetPlugin = permissionReviewPlugin;
                   setInstallingPluginId(targetPlugin.id);
                   try {
-                    await fetch('/api/plugins/install', {
+                    const manifestPayload = {
+                      schemaVersion: 1,
+                      id: targetPlugin.id,
+                      name: targetPlugin.name,
+                      version: targetPlugin.version || '1.0.0',
+                      entryPoint: 'index.ts',
+                      publisher: targetPlugin.publisher || 'Blaize Community',
+                      description: (targetPlugin as any).description || targetPlugin.tagline || 'Plugin extension',
+                      capabilities: ['workspace:read'],
+                      riskClasses: targetPlugin.riskClasses || ['read'],
+                      tools: ((targetPlugin as any).tools || (targetPlugin as any).requestedTools || ['main']).map((t: any) => ({
+                        name: typeof t === 'string' ? t : t?.name || 'main',
+                        description: `Tool ${typeof t === 'string' ? t : t?.name || 'main'}`,
+                        inputSchema: { query: 'string' },
+                        outputSchema: { result: 'string' },
+                        riskClass: 'read' as const,
+                      })),
+                    };
+
+                    const prepResp = await fetch('/api/plugins/prepare-install', {
                       method: 'POST',
                       headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({
-                        pluginId: targetPlugin.id,
-                        confirmedByOperator: true,
-                        grantedRiskClasses: targetPlugin.riskClasses || ['read'],
-                      }),
+                      body: JSON.stringify({ manifest: manifestPayload }),
                     }).catch(() => null);
+
+                    const prepData = prepResp ? await prepResp.json().catch(() => null) : null;
+                    const nonce = prepData?.approvalNonce;
+
+                    if (nonce) {
+                      await fetch('/api/plugins/install', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ approvalNonce: nonce }),
+                      }).catch(() => null);
+                    }
 
                     onAddPlugin({
                       ...targetPlugin,

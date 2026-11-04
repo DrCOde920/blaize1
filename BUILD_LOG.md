@@ -1,6 +1,39 @@
 # Blaize Desktop Workspace — Build & Verification Log
 
-## Latest Iteration: ASSISTANT-FIRST AUTONOMY, FILE MAP ('My Places', `Library > Places`) & PC OPERATOR
+## Latest Iteration: SERVER HARDENING, API ACCESS CONTROL, SSRF DEFENSE & CLEAN UP
+
+### 0. Server Hardening & Security Architecture
+- **API Access Control [REAL]**:
+  - Enforces `X-Blaize-Launch-Token` on every `/api/*` route except `/api/health`.
+  - Replaces substring CORS checks with an exact-origin allowlist (`isAllowedOrigin`). Rejects missing origins, unknown domains, and wildcard `.run.app` attempts.
+  - Server-side rate limits (`META_MODEL_RATE_LIMIT_PER_MIN`) and spend caps strictly enforced; client overrides are ignored.
+  - Secret code attempt limiter (`SecretCodeAttemptLimiter`) with exponential backoff and temporary lockout on `/api/vault/unlock` with constant-time execution padding (`normalizeExecutionTiming`).
+- **Connector Proxy & Hardened SSRF Defense [REAL]**:
+  - `ALLOWED_CONNECTOR_HOSTS` enforced per connector (`conn-github` -> `api.github.com`, etc.).
+  - Client headers dropped; server injects credentials from vault by handle.
+  - Server-side DNS resolution with strict SSRF filtering blocking loopback, private, link-local, multicast, cloud metadata (`169.254.169.254`), decimal (`2130706433`), hex (`0x7f000001`), octal (`0177.0.0.1`), and IPv4-mapped IPv6.
+  - Pinned IP execution, manual redirect following (max 3 hops) with per-hop re-validation, 512 KB response cap, and timeout cap. Applied to both connector proxy and `ReaderEngine`.
+- **Plugin Installation without Marketplace [REAL]**:
+  - Deleted `/api/plugins/marketplace` and hardcoded catalog.
+  - `/api/plugins/prepare-install`: Validates manifest with Zod, runs static safety checks, computes permission diff, and issues a single-use approval nonce.
+  - `/api/plugins/install`: Consumes server-issued single-use nonce, persists plugin in durable SQLite storage, and returns true status.
+- **Model Routing & ProviderRouter [REAL]**:
+  - Removed `muse-glimmer-local` and `meta-models/muse-spark-open-1026` from `ALLOWED_META_MODELS`.
+  - Contributor model IDs (`-contributor`) strictly blocked.
+  - `ProviderRouter` with explicit providers (`meta_api`, `local_runtime`, `self_hosted`, `hosted_endpoint`) visible in model manager with NO SILENT SWITCHING.
+- **Repo Structure, Diagnostics & CI [REAL]**:
+  - Modularized `server.ts` into routes (`health`, `vault`, `connectors`, `browser`, `plugins`, `model`, `system`) with shared auth/CORS middleware.
+  - Added `/api/health` minimal unauthenticated endpoint.
+  - `npm test` runs all test suites via glob (`"test": "tsx --test \"src/**/*.test.ts\""`).
+  - Package name set to `blaize-accountable-desktop`, version `3.0.0`.
+  - Removed `@google/genai` dependency.
+  - Untracked `.aistudio/` and temp media files from git.
+  - Real diagnostics: redacted logs with rotation, exportable diagnostics bundle, and `DoctorView` running 6 real subsystem probes.
+  - GitHub Actions CI workflow (`.github/workflows/ci.yml`) and Dependabot (`.github/dependabot.yml`).
+
+---
+
+## Previous Iteration: ASSISTANT-FIRST AUTONOMY, FILE MAP ('My Places', `Library > Places`) & PC OPERATOR
 
 ### 0. Assistant-First Autonomy (`src/packages/pc_operator/index.ts` & `src/components/AssistantChoreBar.tsx`)
 - **Full Strength on Delegated Chores [REAL]**:
