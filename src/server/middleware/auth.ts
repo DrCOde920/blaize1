@@ -10,7 +10,54 @@
  */
 
 import type { Request, Response, NextFunction } from 'express';
-import { getPerLaunchAuthToken, isAllowedOrigin } from '../config';
+import {
+  getPerLaunchAuthToken,
+  isAllowedOrigin,
+  isAllowedHost,
+  isLoopbackAddress,
+} from '../config';
+
+/**
+ * Validates that incoming requests specify an authorized Host header.
+ * Rejects arbitrary or spoofed Host headers (e.g. evil.com) with 403 Forbidden.
+ */
+export function hostValidationMiddleware(req: Request, res: Response, next: NextFunction): void {
+  const host = req.headers.host;
+  if (!host || !isAllowedHost(host)) {
+    res.status(403).json({
+      ok: false,
+      errorCode: 'INVALID_HOST_HEADER',
+      error: `Access denied: Host header '${host || 'none'}' is not allowed.`,
+    });
+    return;
+  }
+  next();
+}
+
+/**
+ * Prevents remote access to privileged desktop APIs from non-loopback network interfaces.
+ */
+export function remoteAccessProtectionMiddleware(req: Request, res: Response, next: NextFunction): void {
+  const normalizedPath = req.path.replace(/\/+$/, '') || '/';
+  if (normalizedPath === '/health') {
+    return next();
+  }
+
+  if (req.method === 'OPTIONS') {
+    return next();
+  }
+
+  const remoteIp = req.socket?.remoteAddress;
+  if (remoteIp && !isLoopbackAddress(remoteIp) && process.env.ALLOW_REMOTE_API_ACCESS !== 'true') {
+    res.status(403).json({
+      ok: false,
+      errorCode: 'REMOTE_ACCESS_DENIED',
+      error: 'Access denied: Desktop server APIs are restricted to local loopback connections.',
+    });
+    return;
+  }
+  next();
+}
 
 /**
  * Exact-origin CORS middleware.
@@ -19,9 +66,14 @@ import { getPerLaunchAuthToken, isAllowedOrigin } from '../config';
  * - Handles pre-flight OPTIONS requests.
  */
 export function corsMiddleware(req: Request, res: Response, next: NextFunction): void {
-  // Unauthenticated health endpoint /api/health is accessible without CORS origin restriction
+  // Unauthenticated health endpoint /api/health and OAuth IdP redirect callback are exempt from CORS origin blocking
   const normalizedPath = req.path.replace(/\/+$/, '') || '/';
-  if (normalizedPath === '/health') {
+  const isHealth = normalizedPath === '/health' || req.originalUrl?.includes('/health');
+  const isOAuthCallback =
+    normalizedPath === '/connectors/oauth/callback' ||
+    req.originalUrl?.includes('/connectors/oauth/callback');
+
+  if (isHealth || isOAuthCallback) {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
     res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -76,12 +128,17 @@ export function corsMiddleware(req: Request, res: Response, next: NextFunction):
 /**
  * Launch token authentication middleware.
  * Enforces that every `/api/*` request must present a valid `X-Blaize-Launch-Token` header,
- * with the sole exception of the minimal health check route `/api/health`.
+ * with the sole exceptions of the minimal health check route `/api/health` and the OAuth callback
+ * endpoint `/api/connectors/oauth/callback` (which is redirected from external OAuth identity providers).
  */
 export function launchTokenMiddleware(req: Request, res: Response, next: NextFunction): void {
-  // Minimal health route is unauthenticated
   const normalizedPath = req.path.replace(/\/+$/, '') || '/';
-  if (normalizedPath === '/health') {
+  const isHealth = normalizedPath === '/health' || req.originalUrl?.includes('/health');
+  const isOAuthCallback =
+    normalizedPath === '/connectors/oauth/callback' ||
+    req.originalUrl?.includes('/connectors/oauth/callback');
+
+  if (isHealth || isOAuthCallback) {
     return next();
   }
 

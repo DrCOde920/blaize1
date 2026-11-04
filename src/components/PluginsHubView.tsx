@@ -9,6 +9,7 @@
  */
 
 import React, { Suspense, lazy, useMemo, useState } from 'react';
+import { apiFetch } from '../utils/api_client';
 import {
   ArrowLeft,
   CalendarClock,
@@ -1137,7 +1138,7 @@ export const PluginsHubView: React.FC<PluginsHubViewProps> = ({
                       })),
                     };
 
-                    const prepResp = await fetch('/api/plugins/prepare-install', {
+                    const prepResp = await apiFetch('/api/plugins/prepare-install', {
                       method: 'POST',
                       headers: { 'Content-Type': 'application/json' },
                       body: JSON.stringify({ manifest: manifestPayload }),
@@ -1147,7 +1148,7 @@ export const PluginsHubView: React.FC<PluginsHubViewProps> = ({
                     const nonce = prepData?.approvalNonce;
 
                     if (nonce) {
-                      await fetch('/api/plugins/install', {
+                      await apiFetch('/api/plugins/install', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ approvalNonce: nonce }),

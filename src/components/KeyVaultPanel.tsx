@@ -12,6 +12,7 @@
  */
 
 import React, { useEffect, useState } from 'react';
+import { apiFetch } from '../utils/api_client';
 import {
   AlertTriangle,
   CheckCircle2,
@@ -75,7 +76,7 @@ export const KeyVaultPanel: React.FC<KeyVaultPanelProps> = ({
 
   const fetchServerVaultStatus = async () => {
     try {
-      const res = await fetch('/api/vault/status');
+      const res = await apiFetch('/api/vault/status');
       const data = await res.json();
       if (data.ok && Array.isArray(data.keys)) {
         setVaultKeys(data.keys);
@@ -116,7 +117,7 @@ export const KeyVaultPanel: React.FC<KeyVaultPanelProps> = ({
     }
 
     try {
-      const response = await fetch('/api/vault/store', {
+      const response = await apiFetch('/api/vault/store', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -163,7 +164,7 @@ export const KeyVaultPanel: React.FC<KeyVaultPanelProps> = ({
   const handleRotateKey = async (keyId: string) => {
     setVaultFeedback(null);
     try {
-      const response = await fetch('/api/vault/rotate', {
+      const response = await apiFetch('/api/vault/rotate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -203,7 +204,7 @@ export const KeyVaultPanel: React.FC<KeyVaultPanelProps> = ({
   const handleDeleteKey = async (keyId: string) => {
     setVaultFeedback(null);
     try {
-      const response = await fetch('/api/vault/delete', {
+      const response = await apiFetch('/api/vault/delete', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -233,14 +234,14 @@ export const KeyVaultPanel: React.FC<KeyVaultPanelProps> = ({
   const handleToggleLock = async () => {
     setVaultFeedback(null);
     if (!vaultLocked) {
-      await fetch('/api/vault/lock', { method: 'POST' });
+      await apiFetch('/api/vault/lock', { method: 'POST' });
       setVaultLocked(true);
       setVaultFeedback({
         type: 'warn',
         text: 'Vault locked. Host cannot resolve keys until unlocked with your secret code.',
       });
     } else {
-      const res = await fetch('/api/vault/unlock', {
+      const res = await apiFetch('/api/vault/unlock', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ secretCode: secretCodeInput }),

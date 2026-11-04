@@ -17,6 +17,7 @@
  */
 
 import React, { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react';
+import { apiFetch } from './utils/api_client';
 import {
   Activity,
   BookOpen,
@@ -196,7 +197,11 @@ import {
   matchSkillsForPrompt,
   parseAndValidateSoulDocument,
   proposeSoulChangeFromNaturalLanguage,
+  previewMemoryPurge,
   purgeMemoryAndCache,
+  restoreFromMemoryPurgeArchive,
+  type MemoryPurgePreview,
+  type MemoryPurgeTarget,
   searchCommandPalette,
   updateWorkspaceProject,
 } from './packages/workspace';
@@ -1048,39 +1053,97 @@ export default function App() {
     purgedThreadsCount: number;
     purgedArtifactsCount: number;
     timestamp: string;
+    archiveId?: string;
   } | null>(null);
 
-  const handleMemoryPurge = () => {
+  const [memoryPurgePreview, setMemoryPurgePreview] = useState<MemoryPurgePreview | null>(null);
+  const [memoryPurgeTarget, setMemoryPurgeTarget] = useState<MemoryPurgeTarget>('all');
+  const [showPurgeModal, setShowPurgeModal] = useState(false);
+  const [lastPurgeArchiveId, setLastPurgeArchiveId] = useState<string | null>(null);
+
+  const handleOpenMemoryPurgeModal = (target: MemoryPurgeTarget = memoryPurgeTarget) => {
+    const preview = previewMemoryPurge({
+      threads,
+      activeThreadId,
+      artifacts,
+      target,
+    });
+    setMemoryPurgePreview(preview);
+    setShowPurgeModal(true);
+  };
+
+  const handleConfirmMemoryPurge = () => {
     const result = purgeMemoryAndCache({
       threads,
       activeThreadId,
       artifacts,
+      target: memoryPurgeTarget,
+      confirmed: true,
+      createRecoveryArchive: true,
     });
 
     setThreads(result.remainingThreads as ConversationThread[]);
     setActiveThreadId(result.newActiveThreadId);
     setArtifacts(result.remainingArtifacts);
+    setShowPurgeModal(false);
+    if (result.archiveId) {
+      setLastPurgeArchiveId(result.archiveId);
+    }
 
     const notice = {
       message: result.summary,
       purgedThreadsCount: result.purgedThreadsCount,
       purgedArtifactsCount: result.purgedArtifactsCount,
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      archiveId: result.archiveId,
     };
     setMemoryPurgeNotice(notice);
 
-    ledger.appendEvent({
-      actor: 'operator',
-      type: 'memory_purge_executed',
-      summary: `Memory Purge: ${result.summary}`,
-      payload: JSON.stringify({
-        purgedThreadsCount: result.purgedThreadsCount,
-        purgedArtifactsCount: result.purgedArtifactsCount,
-      }),
-      trustLevel: 'verified_by_evidence',
-      missionId: 'settings-privacy',
-    });
-    bumpLedger();
+    if (result.deletionVerified) {
+      ledger.appendEvent({
+        actor: 'operator',
+        type: 'memory_purge_executed',
+        summary: `Memory Purge Verified: ${result.summary}`,
+        payload: JSON.stringify({
+          purgedThreadsCount: result.purgedThreadsCount,
+          purgedArtifactsCount: result.purgedArtifactsCount,
+          archiveId: result.archiveId,
+          target: memoryPurgeTarget,
+          deletionVerified: true,
+        }),
+        trustLevel: 'verified_by_evidence',
+        missionId: 'settings-privacy',
+      });
+      bumpLedger();
+    }
+  };
+
+  const handleRestoreMemoryPurge = () => {
+    if (!lastPurgeArchiveId) return;
+    const restored = restoreFromMemoryPurgeArchive(lastPurgeArchiveId, threads);
+    if (restored.success) {
+      setThreads(restored.restoredThreads as ConversationThread[]);
+      setLastPurgeArchiveId(null);
+      setMemoryPurgeNotice({
+        message: `Restored ${restored.restoredThreadsCount} thread(s) from recovery archive.`,
+        purgedThreadsCount: 0,
+        purgedArtifactsCount: 0,
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      });
+      ledger.appendEvent({
+        actor: 'operator',
+        type: 'memory_purge_restored',
+        summary: `Restored ${restored.restoredThreadsCount} threads from backup archive`,
+        payload: JSON.stringify({ archiveId: lastPurgeArchiveId, restoredCount: restored.restoredThreadsCount }),
+        trustLevel: 'verified_by_evidence',
+        missionId: 'settings-privacy',
+      });
+      bumpLedger();
+    }
+  };
+
+  const handleMemoryPurge = () => {
+    handleOpenMemoryPurgeModal('all');
   };
 
   const [soulProfile, setSoulProfile] = useState<SoulProfileConfig>(() => ({
@@ -3941,7 +4004,7 @@ export default function App() {
               }}
               onStoreVaultKey={async (keyId, label, token) => {
                 try {
-                  const res = await fetch('/api/vault/store', {
+                  const res = await apiFetch('/api/vault/store', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ keyId, label, plainKey: token, secretCode: secretCodeInput || undefined }),
@@ -5209,30 +5272,84 @@ export default function App() {
                             <span>Memory &amp; Cache Purge</span>
                           </div>
                           <div className="text-stone-400 text-xs">
-                            Clear non-pinned chat threads and old cached artifact snapshots to reclaim memory and optimize performance. Pinned threads and active project files are preserved.
+                            Clear non-pinned chat threads and old cached artifact snapshots to reclaim memory and optimize performance. Pinned threads and active project files are preserved with reversible backup recovery.
                           </div>
                         </div>
-                        <button
-                          type="button"
-                          data-testid="settings-memory-purge-btn"
-                          onClick={handleMemoryPurge}
-                          className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-semibold text-xs shadow-md transition-colors"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                          <span>Memory Purge</span>
-                        </button>
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            data-testid="settings-memory-purge-btn"
+                            onClick={() => handleOpenMemoryPurgeModal('all')}
+                            className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-semibold text-xs shadow-md transition-colors"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                            <span>Memory Purge</span>
+                          </button>
+                        </div>
                       </div>
+
+                      {/* Purge Confirmation & Preview Modal */}
+                      {showPurgeModal && memoryPurgePreview && (
+                        <div
+                          data-testid="memory-purge-preview-modal"
+                          className="mt-3 p-4 rounded-xl border border-rose-500/40 bg-stone-950/90 space-y-3"
+                        >
+                          <div className="flex items-center justify-between">
+                            <div className="font-semibold text-xs text-rose-300 flex items-center gap-1.5">
+                              <AlertTriangle className="w-4 h-4 text-rose-400" />
+                              <span>Confirm Memory &amp; Cache Purge</span>
+                            </div>
+                            <span className="text-[11px] text-stone-400">Confirmation Required</span>
+                          </div>
+
+                          <div className="text-xs text-stone-300 space-y-1">
+                            <div>• <strong className="text-emerald-400">Preserved:</strong> {memoryPurgePreview.pinnedThreadsToPreserve.length} pinned thread(s) and currently active workspace.</div>
+                            <div>• <strong className="text-rose-400">Purged:</strong> {memoryPurgePreview.threadsToPurge.length} unpinned thread(s) and {memoryPurgePreview.snapshotsToPruneCount} cached snapshot(s).</div>
+                            <div>• <strong className="text-sky-400">Reclaimed:</strong> ~{Math.round(memoryPurgePreview.estimatedBytesReclaimed / 1024)} KB memory.</div>
+                          </div>
+
+                          <div className="flex items-center gap-2 pt-2 border-t border-stone-800">
+                            <button
+                              type="button"
+                              data-testid="confirm-purge-btn"
+                              onClick={handleConfirmMemoryPurge}
+                              className="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white font-semibold text-xs transition-colors"
+                            >
+                              Confirm Permanent Purge
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setShowPurgeModal(false)}
+                              className="px-3 py-1.5 rounded-lg border border-stone-700 hover:bg-stone-800 text-stone-300 text-xs transition-colors"
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        </div>
+                      )}
 
                       {memoryPurgeNotice && (
                         <div
                           data-testid="memory-purge-success-banner"
-                          className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs flex items-center justify-between gap-2"
+                          className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs flex flex-wrap items-center justify-between gap-2"
                         >
                           <div className="flex items-center gap-2">
                             <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
                             <span>{memoryPurgeNotice.message}</span>
                           </div>
-                          <span className="text-[11px] text-emerald-400/80">{memoryPurgeNotice.timestamp}</span>
+                          <div className="flex items-center gap-2">
+                            {lastPurgeArchiveId && (
+                              <button
+                                type="button"
+                                data-testid="memory-purge-restore-btn"
+                                onClick={handleRestoreMemoryPurge}
+                                className="px-2.5 py-1 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-white text-[11px] font-semibold transition-colors"
+                              >
+                                Undo / Restore
+                              </button>
+                            )}
+                            <span className="text-[11px] text-emerald-400/80">{memoryPurgeNotice.timestamp}</span>
+                          </div>
                         </div>
                       )}
                     </div>

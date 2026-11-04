@@ -21,31 +21,39 @@ import {
   type PluginManifestV1,
 } from '../../packages/runtime/self_extension_manager';
 import { getGlobalDurableDb } from '../../packages/storage/index';
+import { globalPolicyEngine } from '../../packages/trust/index';
 
-export const PluginManifestSchema = z.object({
-  id: z.string().min(1),
-  name: z.string().min(1),
-  version: z.string().default('1.0.0'),
-  entryPoint: z.string().default('index.ts'),
-  publisher: z.string().default('Blaize Community'),
-  description: z.string().optional().default(''),
-  capabilities: z.array(z.string()).optional().default([]),
-  requestedCapabilities: z.array(z.string()).optional().default([]),
-  riskClasses: z.array(z.string()).optional().default(['read']),
-  tools: z
-    .array(
-      z.object({
-        name: z.string(),
-        description: z.string().optional().default(''),
-        inputSchema: z.record(z.string(), z.string()).optional().default({ query: 'string' }),
-        outputSchema: z.record(z.string(), z.string()).optional().default({ result: 'string' }),
-        riskClass: z.string().optional().default('read'),
-        requiredCapabilities: z.array(z.string()).optional().default([]),
-      })
-    )
-    .min(1),
-  policyPack: z.any().optional(),
-});
+export const PluginManifestSchema = z
+  .object({
+    schema: z.string().default('blaize.plugin.manifest.v1'),
+    id: z.string().min(1),
+    name: z.string().min(1),
+    version: z.string().default('1.0.0'),
+    entryPoint: z.string().default('index.ts'),
+    publisher: z.string().default('Blaize Community'),
+    origin: z.string().default('created_with_morrow'),
+    description: z.string().optional().default(''),
+    capabilities: z.array(z.string()).optional().default([]),
+    requestedCapabilities: z.array(z.string()).optional().default([]),
+    riskClasses: z.array(z.string()).optional().default(['read']),
+    tools: z
+      .array(
+        z.object({
+          name: z.string(),
+          description: z.string().optional().default(''),
+          inputSchema: z.record(z.string(), z.string()).optional().default({ query: 'string' }),
+          outputSchema: z.record(z.string(), z.string()).optional().default({ result: 'string' }),
+          riskClass: z.string().optional().default('read'),
+          requiredCapabilities: z.array(z.string()).optional().default([]),
+        })
+      )
+      .min(1),
+    declaredDataScopes: z.array(z.string()).optional().default(['read_files']),
+    testCommand: z.string().optional().default('test'),
+    healthCheck: z.object({ method: z.string().default('ping') }).optional().default({ method: 'ping' }),
+    policyPack: z.any().optional(),
+  })
+  .passthrough();
 
 export type PluginManifest = z.infer<typeof PluginManifestSchema>;
 
@@ -54,6 +62,7 @@ interface PendingApprovalNonce {
   pluginId: string;
   manifest: PluginManifest;
   code?: string;
+  contentHash?: string;
   permissionDiff: {
     requestedCapabilities: string[];
     riskClasses: string[];
@@ -117,6 +126,8 @@ export function createPluginsRouter(): Router {
         requiresElevatedApproval: ungrantedCaps.length > 0 || hasElevatedRisks,
       };
 
+      const contentHash = crypto.createHash('sha256').update(code || '').digest('hex');
+
       // Server issues a cryptographically random, single-use approval nonce
       const nonce = `nonce_${crypto.randomBytes(16).toString('hex')}`;
       const now = Date.now();
@@ -127,6 +138,7 @@ export function createPluginsRouter(): Router {
         pluginId: parsedManifest.id,
         manifest: parsedManifest,
         code: code || '',
+        contentHash,
         permissionDiff,
         issuedAt: now,
         expiresAt,
@@ -144,10 +156,11 @@ export function createPluginsRouter(): Router {
         ok: true,
         pluginId: parsedManifest.id,
         approvalNonce: nonce,
+        contentHash,
         expiresInSeconds: 300,
         permissionDiff,
         manifest: parsedManifest,
-        message: 'Manifest validated and approval nonce issued. Present this nonce to complete installation.',
+        message: 'Manifest reviewed and approval nonce issued. Present this nonce to complete installation.',
       });
     } catch (err: any) {
       res.status(400).json({
@@ -157,10 +170,40 @@ export function createPluginsRouter(): Router {
     }
   });
 
-  // 2. Perform Real Plugin Installation (Consumes Single-Use Nonce & Persists to Durable DB)
+  // Separate Manifest Review Route (Owner inspection before issuing approval)
+  router.post('/plugins/review-manifest', (req, res) => {
+    try {
+      const { manifest, code } = req.body || {};
+      if (!manifest) {
+        res.status(400).json({ ok: false, error: 'Plugin manifest is required.' });
+        return;
+      }
+      const validation = validatePluginManifestAndCode(manifest, code || '');
+      const parsedManifest = PluginManifestSchema.parse(manifest);
+      const contentHash = crypto.createHash('sha256').update(code || '').digest('hex');
+
+      res.status(200).json({
+        ok: validation.valid,
+        valid: validation.valid,
+        errorCode: validation.errorCode,
+        reason: validation.reason,
+        contentHash,
+        manifest: parsedManifest,
+        capabilities: parsedManifest.capabilities || [],
+        riskClasses: parsedManifest.riskClasses || ['read'],
+      });
+    } catch (err: any) {
+      res.status(400).json({
+        ok: false,
+        error: `Manifest review failed: ${err?.message || 'Invalid payload'}`,
+      });
+    }
+  });
+
+  // 2. Perform Real Plugin Installation (Consumes Nonce, Tests Code, Persists Code & ContentHash)
   router.post('/plugins/install', (req, res) => {
     try {
-      const { approvalNonce } = req.body || {};
+      const { approvalNonce, escalatedCapabilities } = req.body || {};
 
       if (!approvalNonce || typeof approvalNonce !== 'string') {
         res.status(403).json({
@@ -201,14 +244,86 @@ export function createPluginsRouter(): Router {
         return;
       }
 
+      // PROMPT 6: Reject capability escalation (client cannot widen capabilities beyond approved nonce)
+      if (Array.isArray(escalatedCapabilities) && escalatedCapabilities.length > 0) {
+        const approvedCaps = new Set(pendingRecord.permissionDiff.requestedCapabilities);
+        const hasUnapprovedEscalation = escalatedCapabilities.some((cap) => !approvedCaps.has(cap));
+        if (hasUnapprovedEscalation) {
+          pendingApprovalNonces.delete(approvalNonce.trim());
+          res.status(403).json({
+            ok: false,
+            errorCode: 'CAPABILITY_ESCALATION_REJECTED',
+            error:
+              'Installation rejected: plugin requested capabilities beyond the approved permission set.',
+          });
+          return;
+        }
+      }
+
       // Immediately consume the nonce (single-use anti-replay)
       pendingRecord.consumed = true;
       pendingApprovalNonces.delete(approvalNonce.trim());
 
       const manifest = pendingRecord.manifest;
+      const code = pendingRecord.code;
+      const contentHash = pendingRecord.contentHash;
       const installedAt = new Date().toISOString();
 
-      // Perform REAL work: persist to durable SQLite storage
+      // PROMPT 5: Mandatory PolicyEngine authorization boundary for plugin installation
+      const callerId = (req.headers['x-caller-id'] as string) || req.ip || 'plugin-manager';
+      const policyDecision = globalPolicyEngine.evaluateAction({
+        id: `plugin-install-${manifest.id}-${Date.now()}`,
+        kind: 'plugin_install',
+        target: manifest.id,
+        riskClass: 'scoped_write',
+        profileId: (req.headers['x-blaize-profile'] as any) || 'personal',
+        callerId,
+      });
+
+      if (!policyDecision.allowed) {
+        res.status(403).json({
+          ok: false,
+          errorCode: 'POLICY_VIOLATION',
+          error: `PolicyEngine blocked plugin installation: ${policyDecision.reason || 'Action denied by policy.'}`,
+          policyDecision,
+        });
+        return;
+      }
+
+      // PROMPT 6: Test inside restricted worker sandbox before activating
+      const testResult = validatePluginManifestAndCode(manifest as any, code || '');
+      if (!testResult.valid) {
+        // Record failure in durable DB and fail closed without activating
+        const failedRecord = {
+          id: manifest.id,
+          name: manifest.name,
+          version: manifest.version,
+          contentHash,
+          installedAt,
+          status: 'failed_verification',
+          errorCode: testResult.errorCode || 'WORKER_TEST_FAILED',
+        };
+        db.setRecord('installed_plugins', manifest.id, failedRecord);
+
+        res.status(422).json({
+          ok: false,
+          installed: false,
+          status: 'failed_verification',
+          errorCode: testResult.errorCode || 'WORKER_TEST_FAILED',
+          error: `Restricted worker validation test failed: ${testResult.reason || 'Code test rejected.'}`,
+        });
+        return;
+      }
+
+      // Perform REAL work: persist actual plugin code, content hash, and metadata to durable storage
+      const pluginCodeRecord = {
+        id: manifest.id,
+        contentHash,
+        code,
+        installedAt,
+      };
+      db.setRecord('installed_plugins_code', manifest.id, pluginCodeRecord);
+
       const pluginRecord = {
         id: manifest.id,
         name: manifest.name,
@@ -218,11 +333,11 @@ export function createPluginsRouter(): Router {
         tools: manifest.tools.map((t) => t.name),
         riskClasses: manifest.riskClasses,
         capabilities: manifest.capabilities,
+        contentHash,
         installedAt,
         status: 'active',
         policyPackActivated: Boolean(manifest.policyPack),
       };
-
       db.setRecord('installed_plugins', manifest.id, pluginRecord);
 
       res.status(200).json({
@@ -230,12 +345,14 @@ export function createPluginsRouter(): Router {
         installed: true,
         pluginId: manifest.id,
         version: manifest.version,
+        contentHash,
         installedAt,
         status: 'active',
+        toolsRegistered: manifest.tools.map((t) => t.name),
         permissionDiff: pendingRecord.permissionDiff,
         policyPackActivated: Boolean(manifest.policyPack),
         storageKey: `installed_plugin_${manifest.id}`,
-        message: `Plugin '${manifest.name}' installed and verified in durable storage.`,
+        message: `Plugin '${manifest.name}' verified inside worker, tools registered, and activated in durable storage.`,
       });
     } catch (err: any) {
       res.status(500).json({

@@ -124,18 +124,30 @@ export function validateCanonicalLedgerFields(raw: any): LedgerValidationResult 
   const redactedSummary = raw.redactedSummary ?? raw.summary ?? '';
   const payloadReference = raw.payloadReference ?? raw.contentRef ?? '';
 
+  const isLegacy = Boolean(raw.isLegacyUnverified || raw.legacyMigrated);
   const payloadDigest = String(raw.payloadDigest || raw.evidenceHash || '').toLowerCase().trim();
-  if (!/^[0-9a-f]{64}$/.test(payloadDigest) && !/^[0-9a-f]{16,64}$/.test(payloadDigest)) {
-    errors.push(`Invalid payloadDigest: expected hex hash, got '${payloadDigest}'`);
+
+  // PROMPT 4: Tighten validation to full-length SHA-256 digests (64 hex characters)
+  // Legacy short hashes (FNV/Murmur) are rejected for cryptographic verification unless explicitly flagged as unverified legacy
+  if (!/^[0-9a-f]{64}$/.test(payloadDigest)) {
+    if (isLegacy && /^[0-9a-f]{16,64}$/.test(payloadDigest)) {
+      // Allowed only for explicitly migrated legacy records
+    } else {
+      errors.push(`Invalid payloadDigest: expected full-length 64-hex SHA-256 digest, got '${payloadDigest}' (legacy short hashes rejected)`);
+    }
   }
 
   const previousHash = String(raw.previousHash || '').toLowerCase().trim();
   if (sequence === 0) {
-    if (previousHash !== GENESIS_PREVIOUS_HASH && previousHash !== '0'.repeat(previousHash.length || 64)) {
-      errors.push(`Genesis event must have previousHash of zeroes, got '${previousHash}'`);
+    if (previousHash !== GENESIS_PREVIOUS_HASH && previousHash !== '0'.repeat(64)) {
+      errors.push(`Genesis event must have previousHash of 64 zeroes, got '${previousHash}'`);
     }
-  } else if (!/^[0-9a-f]{64}$/.test(previousHash) && !/^[0-9a-f]{16,64}$/.test(previousHash)) {
-    errors.push(`Invalid previousHash: expected hex hash, got '${previousHash}'`);
+  } else if (!/^[0-9a-f]{64}$/.test(previousHash)) {
+    if (isLegacy && /^[0-9a-f]{16,64}$/.test(previousHash)) {
+      // Allowed only for explicitly migrated legacy records
+    } else {
+      errors.push(`Invalid previousHash: expected full-length 64-hex SHA-256 digest, got '${previousHash}' (legacy short hashes rejected)`);
+    }
   }
 
   if (errors.length > 0) {
@@ -159,6 +171,47 @@ export function validateCanonicalLedgerFields(raw: any): LedgerValidationResult 
       schemaVersion,
     },
   };
+}
+
+/**
+ * Explicit migration utility for legacy ledger records.
+ * Identifies historical records using legacy hash schemes (e.g. FNV/Murmur 16-hex digests)
+ * and marks them honestly as unverifiable legacy records while preserving their sequence and data.
+ */
+export function migrateLegacyLedgerRecords(records: any[]): {
+  migrated: any[];
+  legacyUnverifiableCount: number;
+} {
+  let legacyUnverifiableCount = 0;
+  const migrated = records.map((record, index) => {
+    const rawDigest = String(record.payloadDigest || record.evidenceHash || '').trim();
+    const rawPrev = String(record.previousHash || '').trim();
+    const isLegacyDigest = rawDigest.length < 64 && /^[0-9a-f]{16,63}$/i.test(rawDigest);
+    const isLegacyPrev = index > 0 && rawPrev.length < 64 && /^[0-9a-f]{16,63}$/i.test(rawPrev);
+
+    if (isLegacyDigest || isLegacyPrev || record.schemaVersion === 1) {
+      legacyUnverifiableCount++;
+      return {
+        ...record,
+        sequence: record.sequence ?? record.index ?? index,
+        schemaVersion: CANONICAL_LEDGER_SCHEMA_VERSION,
+        isLegacyUnverified: true,
+        legacyMigrated: true,
+        verificationState: 'unverified_legacy',
+        trustLevel: 'unverified',
+        migrationNotice: 'Historical record migrated from legacy hash format; not cryptographically verifiable via SHA-256.',
+      };
+    }
+
+    return {
+      ...record,
+      sequence: record.sequence ?? record.index ?? index,
+      schemaVersion: CANONICAL_LEDGER_SCHEMA_VERSION,
+      isLegacyUnverified: false,
+    };
+  });
+
+  return { migrated, legacyUnverifiableCount };
 }
 
 /**

@@ -935,10 +935,12 @@ export class MacOSDesktopDriver implements DesktopDriver {
       }
     }
 
-    if (!actionSuccess && probe.axBackend === 'unsupported') {
+    if (!actionSuccess) {
+      const isMacOSHost = getSafePlatform() === 'darwin';
+      const isUnsupported = probe.axBackend === 'unsupported' || !isMacOSHost;
       return {
         ok: false,
-        executionState: 'UNSUPPORTED',
+        executionState: isUnsupported ? 'UNSUPPORTED' : 'FAILED',
         isSimulated: false,
         tierUsed: tier,
         driverName: this.driverName,
@@ -948,8 +950,9 @@ export class MacOSDesktopDriver implements DesktopDriver {
         latencyMs: Math.max(1, Date.now() - startMs),
         tokensConsumed: beforeSnapshot.estimatedDigestTokens,
         resultingSnapshot: beforeSnapshot,
-        logMessage:
-          'UNSUPPORTED: No live macOS AX bridge, osascript, or Accessibility API is reachable in this environment.',
+        logMessage: isUnsupported
+          ? 'UNSUPPORTED: No live macOS AX bridge, osascript, or Accessibility API is reachable in this environment.'
+          : `[MacOSDesktopDriver] Action failed: ${actionDetail || 'Could not verify execution with fresh OS observation.'}`,
       };
     }
 

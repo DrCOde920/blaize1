@@ -2392,10 +2392,29 @@ export interface ConversationThreadSummary {
   messages: any[];
 }
 
+export type MemoryPurgeTarget = 'all' | 'cache_only' | 'memory_only';
+
 export interface MemoryPurgeOptions {
   threads: ConversationThreadSummary[];
   activeThreadId: string;
   artifacts: WorkspaceArtifact[];
+  target?: MemoryPurgeTarget;
+  confirmed?: boolean;
+  durableDb?: any;
+  createRecoveryArchive?: boolean;
+}
+
+export interface MemoryPurgePreview {
+  target: MemoryPurgeTarget;
+  totalThreads: number;
+  pinnedThreadsToPreserve: ConversationThreadSummary[];
+  activeThreadToPreserve: string;
+  threadsToPurge: ConversationThreadSummary[];
+  totalArtifacts: number;
+  snapshotsToPruneCount: number;
+  estimatedBytesReclaimed: number;
+  confirmationRequired: boolean;
+  summary: string;
 }
 
 export interface MemoryPurgeResult {
@@ -2405,24 +2424,98 @@ export interface MemoryPurgeResult {
   remainingArtifacts: WorkspaceArtifact[];
   purgedArtifactsCount: number;
   summary: string;
+  archiveId?: string;
+  deletionVerified: boolean;
+  recoveryAvailable: boolean;
+}
+
+const memoryPurgeArchiveStore = new Map<
+  string,
+  {
+    archiveId: string;
+    createdAt: string;
+    purgedThreads: ConversationThreadSummary[];
+    purgedArtifacts: any[];
+  }
+>();
+
+export function clearMemoryPurgeArchivesForTesting(): void {
+  memoryPurgeArchiveStore.clear();
+}
+
+/**
+ * Preview memory purge before execution.
+ * Allows user to review what will be permanently deleted vs preserved.
+ */
+export function previewMemoryPurge(options: MemoryPurgeOptions): MemoryPurgePreview {
+  const target: MemoryPurgeTarget = options.target || 'all';
+  const { threads, activeThreadId, artifacts } = options;
+
+  let pinned = threads.filter((t) => t.pinned === true);
+  if (pinned.length === 0 && threads.length > 0) {
+    pinned = [{ ...threads[0], pinned: true }];
+  }
+
+  const threadsToPurge =
+    target === 'cache_only'
+      ? []
+      : threads.filter((t) => !pinned.some((p) => p.id === t.id));
+
+  let snapshotsToPruneCount = 0;
+  if (target !== 'memory_only') {
+    for (const art of artifacts) {
+      if (art.versions && art.versions.length > 1) {
+        snapshotsToPruneCount += art.versions.length - 1;
+      }
+    }
+  }
+
+  const estimatedBytesReclaimed =
+    threadsToPurge.reduce((acc, t) => acc + JSON.stringify(t).length, 0) +
+    snapshotsToPruneCount * 1024;
+
+  return {
+    target,
+    totalThreads: threads.length,
+    pinnedThreadsToPreserve: pinned,
+    activeThreadToPreserve: activeThreadId,
+    threadsToPurge,
+    totalArtifacts: artifacts.length,
+    snapshotsToPruneCount,
+    estimatedBytesReclaimed,
+    confirmationRequired: true,
+    summary: `Ready to purge ${threadsToPurge.length} unpinned thread(s) and prune ${snapshotsToPruneCount} cached snapshot(s). ${pinned.length} pinned thread(s) will be preserved.`,
+  };
 }
 
 /**
  * Memory Purge: Clears non-pinned chat threads and old cached artifact snapshots
  * while preserving pinned threads and active workspace artifacts.
+ * Supports reversible recovery archive and persistent store synchronization.
  */
 export function purgeMemoryAndCache(options: MemoryPurgeOptions): MemoryPurgeResult {
-  const { threads, activeThreadId, artifacts } = options;
+  const { threads, activeThreadId, artifacts, durableDb } = options;
+  const target: MemoryPurgeTarget = options.target || 'all';
 
-  // 1. Identify non-pinned threads vs pinned threads
-  let remainingThreads = threads.filter((t) => t.pinned === true);
-
-  // If no threads are pinned, preserve at least the first thread (or fallback) so UI is never empty
-  if (remainingThreads.length === 0 && threads.length > 0) {
-    remainingThreads = [{ ...threads[0], pinned: true }];
+  if (options.confirmed === false) {
+    throw new Error('Confirmation required: User must confirm memory purge preview before permanent deletion.');
   }
 
-  const purgedThreadsCount = Math.max(0, threads.length - remainingThreads.length);
+  // 1. Identify non-pinned threads vs pinned threads
+  let remainingThreads: ConversationThreadSummary[];
+  let purgedThreads: ConversationThreadSummary[] = [];
+
+  if (target === 'cache_only') {
+    remainingThreads = [...threads];
+  } else {
+    remainingThreads = threads.filter((t) => t.pinned === true);
+    if (remainingThreads.length === 0 && threads.length > 0) {
+      remainingThreads = [{ ...threads[0], pinned: true }];
+    }
+    purgedThreads = threads.filter((t) => !remainingThreads.some((r) => r.id === t.id));
+  }
+
+  const purgedThreadsCount = purgedThreads.length;
 
   // Determine active thread id
   const newActiveThreadId = remainingThreads.some((t) => t.id === activeThreadId)
@@ -2431,10 +2524,12 @@ export function purgeMemoryAndCache(options: MemoryPurgeOptions): MemoryPurgeRes
 
   // 2. Prune old cached artifact versions down to latest active version
   let purgedArtifactsCount = 0;
+  const prunedArtifactSnapshots: any[] = [];
   const remainingArtifacts = artifacts.map((art) => {
-    if (art.versions && art.versions.length > 1) {
-      const prunedCount = art.versions.length - 1;
-      purgedArtifactsCount += prunedCount;
+    if (target !== 'memory_only' && art.versions && art.versions.length > 1) {
+      const pruned = art.versions.slice(0, -1);
+      purgedArtifactsCount += pruned.length;
+      prunedArtifactSnapshots.push({ artifactId: art.id, versions: pruned });
       return {
         ...art,
         versions: art.versions.slice(-1),
@@ -2443,6 +2538,47 @@ export function purgeMemoryAndCache(options: MemoryPurgeOptions): MemoryPurgeRes
     }
     return art;
   });
+
+  // 3. Create reversible recovery archive
+  let archiveId: string | undefined;
+  if (options.createRecoveryArchive !== false && (purgedThreadsCount > 0 || purgedArtifactsCount > 0)) {
+    archiveId = `archive_purge_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const archiveRecord = {
+      archiveId,
+      createdAt: new Date().toISOString(),
+      purgedThreads,
+      purgedArtifacts: prunedArtifactSnapshots,
+    };
+    memoryPurgeArchiveStore.set(archiveId, archiveRecord);
+    if (durableDb?.setRecord) {
+      try {
+        durableDb.setRecord('memory_purge_archives', archiveId, archiveRecord);
+      } catch {
+        // memory archive preserved
+      }
+    }
+  }
+
+  // 4. Update persistent durable storage and verify deletion
+  let deletionVerified = true;
+  if (durableDb) {
+    try {
+      for (const t of purgedThreads) {
+        if (typeof durableDb.deleteRecord === 'function') {
+          durableDb.deleteRecord('conversation_threads', t.id);
+          const stillThere = durableDb.getRecord?.('conversation_threads', t.id);
+          if (stillThere) {
+            deletionVerified = false;
+          }
+        }
+        if (typeof durableDb.deleteThread === 'function') {
+          durableDb.deleteThread(t.id);
+        }
+      }
+    } catch {
+      deletionVerified = false;
+    }
+  }
 
   const summary = `Purged ${purgedThreadsCount} non-pinned chat thread${
     purgedThreadsCount === 1 ? '' : 's'
@@ -2457,6 +2593,56 @@ export function purgeMemoryAndCache(options: MemoryPurgeOptions): MemoryPurgeRes
     remainingArtifacts,
     purgedArtifactsCount,
     summary,
+    archiveId,
+    deletionVerified,
+    recoveryAvailable: Boolean(archiveId),
+  };
+}
+
+/**
+ * Reversible Recovery: Restores purged threads and artifact snapshots from a backup archive.
+ */
+export function restoreFromMemoryPurgeArchive(
+  archiveId: string,
+  currentThreads: ConversationThreadSummary[],
+  durableDb?: any
+): {
+  restoredThreads: ConversationThreadSummary[];
+  restoredThreadsCount: number;
+  success: boolean;
+} {
+  let archive = memoryPurgeArchiveStore.get(archiveId);
+  if (!archive && durableDb?.getRecord) {
+    archive = durableDb.getRecord('memory_purge_archives', archiveId);
+  }
+
+  if (!archive) {
+    return {
+      restoredThreads: currentThreads,
+      restoredThreadsCount: 0,
+      success: false,
+    };
+  }
+
+  const restoredThreadsMap = new Map<string, ConversationThreadSummary>();
+  for (const t of currentThreads) {
+    restoredThreadsMap.set(t.id, t);
+  }
+  for (const t of archive.purgedThreads) {
+    restoredThreadsMap.set(t.id, t);
+    if (durableDb?.setRecord) {
+      try {
+        durableDb.setRecord('conversation_threads', t.id, t);
+      } catch {
+        // memory map updated
+      }
+    }
+  }
+
+  return {
+    restoredThreads: Array.from(restoredThreadsMap.values()),
+    restoredThreadsCount: archive.purgedThreads.length,
+    success: true,
   };
 }
 

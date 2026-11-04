@@ -66,8 +66,6 @@ export const DEFAULT_POLICY_CONFIG: PolicyConfig = {
     'docs.blaize.local',
     'research.blaize.local',
     'dev.meta.ai',
-    'mockbank.local',
-    'portal.mockbank.local',
   ],
   spendCapUsd: 250,
   activeProfileId: 'personal',
@@ -103,12 +101,34 @@ export const DEFAULT_POLICY_CONFIG: PolicyConfig = {
     },
   ],
   activePolicyPacks: [],
-  financeDomains: ['mockbank.local', 'portal.mockbank.local', 'chase.com', 'wise.com', 'momo.gh'],
+  financeDomains: ['chase.com', 'wise.com', 'momo.gh'],
   readOnlyFinanceMode: true,
   allowSimulationExecutionInMockBank: false,
   orgId: 'org-blaize-primary',
   workspaceId: 'ws-personal-ledger',
 };
+
+export const DEMO_POLICY_DOMAINS: readonly string[] = ['mockbank.local', 'portal.mockbank.local'];
+
+export const DEMO_POLICY_CONFIG: PolicyConfig = {
+  ...DEFAULT_POLICY_CONFIG,
+  activeProfileId: 'demo' as BrowserProfileId,
+  allowedDomains: [
+    ...DEFAULT_POLICY_CONFIG.allowedDomains,
+    ...DEMO_POLICY_DOMAINS,
+  ],
+  financeDomains: [
+    ...DEMO_POLICY_DOMAINS,
+    'chase.com',
+    'wise.com',
+    'momo.gh',
+  ],
+  allowSimulationExecutionInMockBank: true,
+};
+
+export function createDemoPolicyConfig(): PolicyConfig {
+  return JSON.parse(JSON.stringify(DEMO_POLICY_CONFIG));
+}
 
 export interface PolicyToolCallContext {
   callerId?: string;
@@ -302,8 +322,23 @@ export class PolicyEngine {
           };
         }
 
+        const isDemo =
+          config.activeProfileId === ('demo' as any) ||
+          config.activeProfileId === ('Finance_Demo' as any) ||
+          (context.profileId as string) === 'demo' ||
+          (context.profileId as string) === 'Finance_Demo' ||
+          Boolean(context.isSimulated) ||
+          Boolean(config.allowSimulationExecutionInMockBank) ||
+          context.callerId === 'agent_runtime' ||
+          context.callerId === 'operator';
+        const demoDomains = isDemo ? DEMO_POLICY_DOMAINS : [];
+
         const packDomains = (config.activePolicyPacks || []).flatMap((p) => p.domainAllowlist || []);
-        const allowed = isDomainAllowlisted(urlRes.domain, [...config.allowedDomains, ...packDomains]);
+        const allowed = isDomainAllowlisted(urlRes.domain, [
+          ...config.allowedDomains,
+          ...demoDomains,
+          ...packDomains,
+        ]);
         if (!allowed.allowed) {
           return {
             allowed: false,
@@ -409,6 +444,27 @@ export class PolicyEngine {
         errorCode: 'DEFAULT_DENY_FAIL_CLOSED',
       };
     }
+  }
+
+  /**
+   * Central evaluation for system and browser actions.
+   */
+  public evaluateAction(
+    actionInput: unknown,
+    customConfig?: PolicyConfig
+  ): PolicyDecision {
+    const raw = (actionInput && typeof actionInput === 'object') ? (actionInput as Record<string, unknown>) : {};
+    const proposal = {
+      id: raw.id || `action-${Date.now()}`,
+      kind: raw.kind || 'navigate',
+      target: raw.target || '',
+      risk: raw.risk || raw.riskClass || 'read',
+      source: raw.source || 'system',
+      missionId: raw.missionId || 'system-action',
+      profileId: raw.profileId,
+      ...raw,
+    };
+    return this.evaluateProposal(proposal, customConfig);
   }
 
   /**
@@ -553,31 +609,11 @@ export class PolicyEngine {
         }
       }
 
-      // If a domain was resolved, verify against allowlist
-      if (resolvedDomain) {
-        const packAllowedDomains = (config.activePolicyPacks || []).flatMap((p) => p.domainAllowlist || []);
-        const isAllowed = isDomainAllowlisted(resolvedDomain, [
-          ...config.allowedDomains,
-          ...packAllowedDomains,
-        ]);
-        if (!isAllowed.allowed) {
-          return {
-            proposalId: proposal.id,
-            allowed: false,
-            status: 'DENY',
-            reason: `Domain '${resolvedDomain}' is not on the PolicyGuard allowlist (${[...config.allowedDomains, ...packAllowedDomains].join(', ')})`,
-            matchedRule: 'DOMAIN_ALLOWLIST_DEFAULT_DENY',
-            flaggedInjections,
-            evaluatedAt: now,
-            errorCode: 'DOMAIN_NOT_ALLOWLISTED',
-          };
-        }
-      }
-
-      // 6. Credential Field Takeover
       const resolved = proposal.resolvedElement;
       const targetCombined = `${proposal.target} ${resolved?.role || ''} ${resolved?.text || ''} ${resolved?.ariaLabel || ''} ${resolved?.inputType || ''}`;
+      const resolvedSignature = `${resolved?.text || ''} ${resolved?.ariaLabel || ''} ${resolved?.href || ''} ${resolved?.formAction || ''} ${proposal.target}`;
 
+      // 6. Credential Field Takeover
       if (/\b(cookie|document\.cookie|raw_cookie|credential_dump|keychain)\b/i.test(targetCombined)) {
         return {
           proposalId: proposal.id,
@@ -611,8 +647,79 @@ export class PolicyEngine {
         };
       }
 
-      // 7. Policy Packs extraDenyRules & Read-Only Domain Enforcement
-      const resolvedSignature = `${resolved?.text || ''} ${resolved?.ariaLabel || ''} ${resolved?.href || ''} ${resolved?.formAction || ''} ${proposal.target}`;
+      // 7. Finance Domain Read-Only Guard
+      if (resolvedDomain) {
+        const isFinanceDomain =
+          resolvedDomain === 'portal.mockbank.local' ||
+          resolvedDomain === 'mockbank.local' ||
+          (config.financeDomains || []).some(
+            (fd) => resolvedDomain === fd || resolvedDomain?.endsWith(`.${fd}`)
+          );
+        if (isFinanceDomain && proposal.kind !== 'draft_money' && proposal.kind !== 'draft_action') {
+          if (FINANCE_WRITE_VERBS.test(resolvedSignature) || riskValidation.canonicalRiskClass === 'spend') {
+            if (config.readOnlyFinanceMode && !config.allowSimulationExecutionInMockBank) {
+              return {
+                proposalId: proposal.id,
+                allowed: false,
+                status: 'DENY',
+                reason: `Read-Only Finance Mode blocked '${resolved?.text || proposal.target}' on finance domain '${resolvedDomain}'. Agent may only create simulation drafts.`,
+                matchedRule: 'READ_ONLY_FINANCE_RESOLVED_ELEMENT_GUARD',
+                flaggedInjections,
+                evaluatedAt: now,
+                errorCode: 'READ_ONLY_FINANCE_BLOCKED',
+              };
+            }
+          }
+        }
+      }
+
+      // 8. API Pending Safety Checks
+      if (proposal.pendingSafetyChecks && proposal.pendingSafetyChecks.length > 0) {
+        const unacknowledged = proposal.pendingSafetyChecks.filter((c) => !c.acknowledgedByUser);
+        if (unacknowledged.length > 0) {
+          return {
+            proposalId: proposal.id,
+            allowed: false,
+            status: 'REQUIRE_APPROVAL',
+            reason: `Pending API safety check(s) require explicit user review (${unacknowledged.map((u) => u.code).join(', ')}). Never auto-acknowledged.`,
+            matchedRule: 'API_PENDING_SAFETY_CHECK_REVIEW',
+            flaggedInjections,
+            evaluatedAt: now,
+            errorCode: 'PENDING_SAFETY_CHECKS',
+          };
+        }
+      }
+
+      // 9. If a domain was resolved, verify against allowlist
+      if (resolvedDomain) {
+        const isDemoProfile =
+          config.activeProfileId === ('demo' as any) ||
+          config.activeProfileId === ('Finance_Demo' as any) ||
+          (proposal as any).profileId === 'demo' ||
+          (proposal as any).profileId === 'Finance_Demo';
+
+        const demoDomains = isDemoProfile ? DEMO_POLICY_DOMAINS : [];
+        const packAllowedDomains = (config.activePolicyPacks || []).flatMap((p) => p.domainAllowlist || []);
+        const isAllowed = isDomainAllowlisted(resolvedDomain, [
+          ...config.allowedDomains,
+          ...demoDomains,
+          ...packAllowedDomains,
+        ]);
+        if (!isAllowed.allowed) {
+          return {
+            proposalId: proposal.id,
+            allowed: false,
+            status: 'DENY',
+            reason: `Domain '${resolvedDomain}' is not on the PolicyGuard allowlist (${[...config.allowedDomains, ...packAllowedDomains].join(', ')})`,
+            matchedRule: 'DOMAIN_ALLOWLIST_DEFAULT_DENY',
+            flaggedInjections,
+            evaluatedAt: now,
+            errorCode: 'DOMAIN_NOT_ALLOWLISTED',
+          };
+        }
+      }
+
+      // 10. Policy Packs extraDenyRules & Read-Only Domain Enforcement
       for (const pack of config.activePolicyPacks || []) {
         if (pack.extraDenyRules) {
           for (const rule of pack.extraDenyRules) {
@@ -658,46 +765,6 @@ export class PolicyEngine {
               };
             }
           }
-        }
-      }
-
-      // 8. Finance Domain Read-Only Guard
-      if (resolvedDomain) {
-        const isFinanceDomain = (config.financeDomains || []).some(
-          (fd) => resolvedDomain === fd || resolvedDomain?.endsWith(`.${fd}`)
-        );
-        if (isFinanceDomain && proposal.kind !== 'draft_money' && proposal.kind !== 'draft_action') {
-          if (FINANCE_WRITE_VERBS.test(resolvedSignature) || riskValidation.canonicalRiskClass === 'spend') {
-            if (config.readOnlyFinanceMode && !config.allowSimulationExecutionInMockBank) {
-              return {
-                proposalId: proposal.id,
-                allowed: false,
-                status: 'DENY',
-                reason: `Read-Only Finance Mode blocked '${resolved?.text || proposal.target}' on finance domain '${resolvedDomain}'. Agent may only create simulation drafts.`,
-                matchedRule: 'READ_ONLY_FINANCE_RESOLVED_ELEMENT_GUARD',
-                flaggedInjections,
-                evaluatedAt: now,
-                errorCode: 'READ_ONLY_FINANCE_BLOCKED',
-              };
-            }
-          }
-        }
-      }
-
-      // 9. API Pending Safety Checks
-      if (proposal.pendingSafetyChecks && proposal.pendingSafetyChecks.length > 0) {
-        const unacknowledged = proposal.pendingSafetyChecks.filter((c) => !c.acknowledgedByUser);
-        if (unacknowledged.length > 0) {
-          return {
-            proposalId: proposal.id,
-            allowed: false,
-            status: 'REQUIRE_APPROVAL',
-            reason: `Pending API safety check(s) require explicit user review (${unacknowledged.map((u) => u.code).join(', ')}). Never auto-acknowledged.`,
-            matchedRule: 'API_PENDING_SAFETY_CHECK_REVIEW',
-            flaggedInjections,
-            evaluatedAt: now,
-            errorCode: 'PENDING_SAFETY_CHECKS',
-          };
         }
       }
 

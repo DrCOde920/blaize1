@@ -16,6 +16,7 @@ import {
   runBrowserSelfTest,
   searchOpenVsxRegistry,
 } from '../../packages/browser_ide/index';
+import { globalPolicyEngine } from '../../packages/trust/index';
 
 export function createBrowserRouter(): Router {
   const router = Router();
@@ -51,6 +52,25 @@ export function createBrowserRouter(): Router {
         res.status(403).json({
           ok: false,
           error: `Forbidden protocol '${parsed.protocol}'. Only http/https supported.`,
+        });
+        return;
+      }
+
+      // PROMPT 5: Mandatory PolicyEngine authorization boundary for browser actions
+      const policyDecision = globalPolicyEngine.evaluateAction({
+        id: `browser-read-${Date.now()}`,
+        kind: 'navigate',
+        target: parsed.toString(),
+        riskClass: 'read',
+        profileId: (req.headers['x-blaize-profile'] as any) || 'personal',
+      });
+
+      if (!policyDecision.allowed) {
+        res.status(403).json({
+          ok: false,
+          errorCode: 'POLICY_VIOLATION',
+          error: `PolicyEngine denied browser read for '${parsed.hostname}': ${policyDecision.reason || 'Domain not permitted under current policy.'}`,
+          policyDecision,
         });
         return;
       }

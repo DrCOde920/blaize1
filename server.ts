@@ -36,9 +36,17 @@ import {
   getPerLaunchAuthToken,
   setPerLaunchAuthTokenForTesting,
   isAllowedOrigin,
+  isAllowedHost,
+  isLoopbackAddress,
+  shouldInjectLaunchToken,
   SERVER_DEFAULTS,
 } from './src/server/config';
-import { corsMiddleware, launchTokenMiddleware } from './src/server/middleware/auth';
+import {
+  corsMiddleware,
+  launchTokenMiddleware,
+  hostValidationMiddleware,
+  remoteAccessProtectionMiddleware,
+} from './src/server/middleware/auth';
 import { createHealthRouter } from './src/server/routes/health';
 import { createVaultRouter } from './src/server/routes/vault';
 import { createConnectorsRouter } from './src/server/routes/connectors';
@@ -63,6 +71,9 @@ export {
   getPerLaunchAuthToken,
   setPerLaunchAuthTokenForTesting,
   isAllowedOrigin,
+  isAllowedHost,
+  isLoopbackAddress,
+  shouldInjectLaunchToken,
   ALLOWED_META_MODELS,
   validateMetaModelProxyRequest,
   globalProviderRouter,
@@ -86,7 +97,11 @@ export async function createBlaizeServer(options?: CreateServerOptions) {
   const app = express();
   app.use(express.json({ limit: `${SERVER_DEFAULTS.maxPayloadSizeBytes}b` }));
 
+  // Global Host Header Validation
+  app.use(hostValidationMiddleware);
+
   // Shared Middlewares on all /api/* routes
+  app.use('/api', remoteAccessProtectionMiddleware);
   app.use('/api', corsMiddleware);
   app.use('/api', launchTokenMiddleware);
 
@@ -104,34 +119,56 @@ export async function createBlaizeServer(options?: CreateServerOptions) {
 
   // Helper to inject per-launch token into same-origin HTML page load
   function injectLaunchTokenHtml(htmlContent: string): string {
-    const metaTag = `<meta name="blaize-launch-token" content="${launchToken}">\n    <script>window.__BLAIZE_LAUNCH_TOKEN__ = "${launchToken}";</script>`;
+    const metaTag = `<meta name="blaize-launch-token" content="${launchToken}">\n    <script>window.__BLAIZE_LAUNCH_TOKEN__ = "${launchToken}";(function(){try{if(typeof window!=="undefined"&&typeof window.fetch==="function"&&!window.__BLAIZE_INTERCEPTOR_INITIALIZED__){var origFetch=window.fetch.bind(window);window.fetch=function(input,init){var u=typeof input==="string"?input:(input instanceof URL?input.toString():(input&&input.url?input.url:""));if(u.indexOf("/api")===0||u.indexOf("/api/")!==-1){var t=window.__BLAIZE_LAUNCH_TOKEN__;var h=new Headers((init&&init.headers)||(input instanceof Request?input.headers:undefined));if(t&&!h.has("x-blaize-launch-token")){h.set("X-Blaize-Launch-Token",t);}var m=Object.assign({},init,{headers:h});return input instanceof Request?origFetch(new Request(input,m)):origFetch(input,m);}return origFetch(input,init);};window.__BLAIZE_INTERCEPTOR_INITIALIZED__=true;}}catch(e){}})();</script>`;
     if (htmlContent.includes('<head>')) {
       return htmlContent.replace('<head>', `<head>\n    ${metaTag}`);
     }
     return `${metaTag}\n${htmlContent}`;
   }
 
+  // Guard all non-API HTML requests against unauthorized cross-origin scraping/embedding
+  app.use((req, res, next) => {
+    if (req.path.startsWith('/api')) {
+      return next();
+    }
+    const originHeader = req.headers.origin;
+    if (originHeader && !isAllowedOrigin(originHeader)) {
+      res.status(403).json({
+        ok: false,
+        errorCode: 'CORS_ORIGIN_DENIED',
+        error: 'Cross-origin HTML request denied.',
+      });
+      return;
+    }
+    next();
+  });
+
   if (!options?.skipVite) {
     if (!isProd) {
       const { createServer: createViteServer } = await import('vite');
       const vite = await createViteServer({
         server: { middlewareMode: true },
-        appType: 'spa',
+        appType: 'custom',
       });
 
-      // Intercept HTML requests in dev to inject launch token safely
+      app.use(vite.middlewares);
+
+      // Serve SPA HTML after Vite middlewares so /@vite/client and extensionless module imports resolve as JS
       app.use(async (req, res, next) => {
         if (
           req.method === 'GET' &&
-          (req.path === '/' || req.path.endsWith('.html') || !req.path.includes('.')) &&
-          !req.path.startsWith('/api')
+          !req.path.startsWith('/api') &&
+          !req.path.startsWith('/@') &&
+          !req.path.startsWith('/src/') &&
+          !req.path.startsWith('/node_modules/')
         ) {
           try {
             const indexHtmlPath = path.resolve(__dirname, 'index.html');
             const template = fs.readFileSync(indexHtmlPath, 'utf8');
             const transformed = await vite.transformIndexHtml(req.originalUrl, template);
-            const injected = injectLaunchTokenHtml(transformed);
-            res.status(200).set({ 'Content-Type': 'text/html' }).end(injected);
+            const canInject = shouldInjectLaunchToken(req);
+            const body = canInject ? injectLaunchTokenHtml(transformed) : transformed;
+            res.status(200).set({ 'Content-Type': 'text/html' }).end(body);
             return;
           } catch (e) {
             vite.ssrFixStacktrace(e as Error);
@@ -141,21 +178,32 @@ export async function createBlaizeServer(options?: CreateServerOptions) {
         }
         next();
       });
-
-      app.use(vite.middlewares);
     } else {
       const distPath = path.resolve(__dirname, 'dist');
       app.use(express.static(distPath, { index: false }));
-      app.get('*', (_req, res) => {
+      app.get('*', (req, res) => {
         const indexFile = path.join(distPath, 'index.html');
         if (fs.existsSync(indexFile)) {
           const raw = fs.readFileSync(indexFile, 'utf8');
-          res.status(200).set({ 'Content-Type': 'text/html' }).send(injectLaunchTokenHtml(raw));
+          const canInject = shouldInjectLaunchToken(req);
+          const body = canInject ? injectLaunchTokenHtml(raw) : raw;
+          res.status(200).set({ 'Content-Type': 'text/html' }).send(body);
         } else {
           res.status(404).send('Not Found');
         }
       });
     }
+  } else {
+    // When skipVite is enabled (e.g. testing), provide baseline HTML root handler
+    app.get('/', (req, res) => {
+      const indexFile = path.resolve(__dirname, 'index.html');
+      const raw = fs.existsSync(indexFile)
+        ? fs.readFileSync(indexFile, 'utf8')
+        : '<!DOCTYPE html><html><head><title>Blaize</title></head><body><div id="root"></div></body></html>';
+      const canInject = shouldInjectLaunchToken(req);
+      const body = canInject ? injectLaunchTokenHtml(raw) : raw;
+      res.status(200).set({ 'Content-Type': 'text/html' }).send(body);
+    });
   }
 
   return app;
@@ -163,10 +211,12 @@ export async function createBlaizeServer(options?: CreateServerOptions) {
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
   const port = Number(process.env.APP_PORT) || Number(process.env.DEFAULT_APP_PORT) || Number(process.env.PORT) || 3000;
+  const host = process.env.BLAIZE_SERVER_HOST || process.env.HOST || '127.0.0.1';
   createBlaizeServer().then((app) => {
-    app.listen(port, '0.0.0.0', () => {
-      console.log(`Blaize hardened desktop server listening on http://0.0.0.0:${port}`);
+    app.listen(port, host, () => {
+      console.log(`Blaize hardened desktop server listening on http://${host}:${port}`);
       console.log(`Per-launch authentication active. Launch token: ••••${getPerLaunchAuthToken().slice(-4)}`);
     });
   });
 }
+

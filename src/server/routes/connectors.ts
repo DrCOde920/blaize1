@@ -22,6 +22,18 @@ import {
   globalSecretCodeAttemptLimiter,
   normalizeExecutionTiming,
 } from '../middleware/lockout';
+import { isAllowedOrigin, isAllowedHost } from '../config';
+import { globalPolicyEngine } from '../../packages/trust/index';
+
+function escapeHtml(str: unknown): string {
+  if (typeof str !== 'string') return '';
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
 
 export const CONNECTOR_ALLOWED_HOSTS: Record<string, string[]> = {
   'conn-github': ['api.github.com'],
@@ -58,8 +70,12 @@ export function createConnectorsRouter(vaultInstance?: PassphraseWrapVault): Rou
       provider: string;
       clientId: string;
       redirectUri: string;
+      clientOrigin: string;
       requestedScopes: string[];
       createdAt: number;
+      callbackReceived: boolean;
+      receivedCode?: string;
+      codeReceivedAt?: number;
     }
   >();
 
@@ -103,6 +119,25 @@ export function createConnectorsRouter(vaultInstance?: PassphraseWrapVault): Rou
         res.status(403).json({
           ok: false,
           error: `Host '${targetHost}' is not in the verified allowlist for connector '${connectorId}'. Connector may only access: [${allowedHosts.join(', ')}].`,
+        });
+        return;
+      }
+
+      // PROMPT 5: Mandatory PolicyEngine authorization boundary for side-effects
+      const policyDecision = globalPolicyEngine.evaluateToolCall({
+        callerId: (req.headers['x-caller-id'] as string) || req.ip || 'connector-client',
+        toolName: `connector_${connectorId}`,
+        target: url,
+        riskClass: method === 'GET' ? 'read' : 'external_send',
+        profileId: (req.headers['x-blaize-profile'] as any) || 'personal',
+      });
+
+      if (!policyDecision.allowed) {
+        res.status(403).json({
+          ok: false,
+          errorCode: 'POLICY_VIOLATION',
+          error: `PolicyEngine blocked connector request: ${policyDecision.reason || 'Action denied by policy.'}`,
+          policyDecision,
         });
         return;
       }
@@ -173,31 +208,85 @@ export function createConnectorsRouter(vaultInstance?: PassphraseWrapVault): Rou
   // OAuth PKCE Flow Handlers
   router.post('/connectors/oauth/start', (req, res) => {
     const { provider, clientId, scopes = [], redirectUri } = req.body || {};
-    if (!clientId || typeof clientId !== 'string') {
+    if (!clientId || typeof clientId !== 'string' || !clientId.trim() || clientId.length > 256) {
       res.status(400).json({ ok: false, error: 'User Client ID is required for OAuth setup.' });
       return;
     }
 
-    const effectiveRedirectUri =
-      redirectUri || `${req.protocol}://${req.get('host')}/api/connectors/oauth/callback`;
-
-    let parsedRedirect: URL;
-    try {
-      parsedRedirect = new URL(effectiveRedirectUri);
-    } catch {
-      res.status(400).json({ ok: false, error: 'Invalid redirectUri format.' });
+    const validProvider = String(provider || 'google').trim().toLowerCase();
+    if (!/^[a-z0-9_-]{1,64}$/.test(validProvider)) {
+      res.status(400).json({ ok: false, error: 'Invalid OAuth provider.' });
       return;
     }
 
-    const rHost = parsedRedirect.hostname.toLowerCase();
-    if (
-      parsedRedirect.protocol !== 'https:' &&
-      !(parsedRedirect.protocol === 'http:' && (rHost === 'localhost' || rHost === '127.0.0.1'))
-    ) {
-      res.status(400).json({
+    // PROMPT 5: Mandatory PolicyEngine authorization boundary for OAuth operations
+    const callerId = (req.headers['x-caller-id'] as string) || req.ip || 'oauth-client';
+    const policyDecision = globalPolicyEngine.evaluateAction({
+      id: `oauth-start-${validProvider}-${Date.now()}`,
+      kind: 'oauth_start',
+      target: validProvider,
+      riskClass: 'read',
+      profileId: (req.headers['x-blaize-profile'] as any) || 'personal',
+      callerId,
+    });
+
+    if (!policyDecision.allowed) {
+      res.status(403).json({
         ok: false,
-        error: 'OAuth redirectUri must use HTTPS or localhost loopback.',
+        errorCode: 'POLICY_VIOLATION',
+        error: `PolicyEngine blocked OAuth start: ${policyDecision.reason || 'Action denied by policy.'}`,
+        policyDecision,
       });
+      return;
+    }
+
+    let effectiveRedirectUri = '';
+    if (redirectUri && typeof redirectUri === 'string' && redirectUri.trim()) {
+      let parsedRedirect: URL;
+      try {
+        parsedRedirect = new URL(redirectUri.trim());
+      } catch {
+        res.status(400).json({ ok: false, error: 'Invalid redirectUri format.' });
+        return;
+      }
+
+      const rHost = parsedRedirect.hostname.toLowerCase();
+      const isLoopback = rHost === 'localhost' || rHost === '127.0.0.1' || rHost === '[::1]';
+      if (
+        parsedRedirect.protocol !== 'https:' &&
+        !(parsedRedirect.protocol === 'http:' && isLoopback)
+      ) {
+        res.status(400).json({
+          ok: false,
+          error: 'OAuth redirectUri must use HTTPS or localhost loopback.',
+        });
+        return;
+      }
+
+      if (!isAllowedOrigin(parsedRedirect.origin) && !isLoopback) {
+        res.status(400).json({
+          ok: false,
+          error: 'OAuth redirectUri origin is not in the allowed origins allowlist.',
+        });
+        return;
+      }
+
+      effectiveRedirectUri = parsedRedirect.toString();
+    } else {
+      const host = req.get('host') || '127.0.0.1:3000';
+      if (!isAllowedHost(host)) {
+        res.status(400).json({ ok: false, error: 'Host header is not in the allowed host allowlist.' });
+        return;
+      }
+      const proto = req.secure || req.headers['x-forwarded-proto'] === 'https' ? 'https' : 'http';
+      effectiveRedirectUri = `${proto}://${host}/api/connectors/oauth/callback`;
+    }
+
+    let clientOrigin: string;
+    try {
+      clientOrigin = new URL(effectiveRedirectUri).origin;
+    } catch {
+      res.status(400).json({ ok: false, error: 'Invalid redirectUri origin.' });
       return;
     }
 
@@ -211,11 +300,13 @@ export function createConnectorsRouter(vaultInstance?: PassphraseWrapVault): Rou
       state,
       codeVerifier,
       codeChallenge,
-      provider: String(provider || 'google'),
+      provider: validProvider,
       clientId: clientId.trim(),
       redirectUri: effectiveRedirectUri,
+      clientOrigin,
       requestedScopes,
       createdAt: Date.now(),
+      callbackReceived: false,
     });
 
     // Prune stale sessions older than 15 minutes
@@ -226,7 +317,7 @@ export function createConnectorsRouter(vaultInstance?: PassphraseWrapVault): Rou
     }
 
     let authUrl = '';
-    if (provider === 'google') {
+    if (validProvider === 'google') {
       const scopeStr = encodeURIComponent(
         (requestedScopes.length > 0 ? requestedScopes : ['https://www.googleapis.com/auth/drive.readonly']).join(' ')
       );
@@ -235,7 +326,7 @@ export function createConnectorsRouter(vaultInstance?: PassphraseWrapVault): Rou
       )}&redirect_uri=${encodeURIComponent(
         effectiveRedirectUri
       )}&scope=${scopeStr}&state=${state}&code_challenge=${codeChallenge}&code_challenge_method=S256&access_type=offline&prompt=consent`;
-    } else if (provider === 'microsoft') {
+    } else if (validProvider === 'microsoft') {
       const scopeStr = encodeURIComponent(
         (requestedScopes.length > 0 ? requestedScopes : ['Files.Read', 'Calendars.Read', 'Mail.Read']).join(' ')
       );
@@ -248,7 +339,7 @@ export function createConnectorsRouter(vaultInstance?: PassphraseWrapVault): Rou
 
     res.status(200).json({
       ok: true,
-      provider,
+      provider: validProvider,
       state,
       authUrl,
       redirectUri: effectiveRedirectUri,
@@ -257,17 +348,91 @@ export function createConnectorsRouter(vaultInstance?: PassphraseWrapVault): Rou
   });
 
   router.get('/connectors/oauth/callback', (req, res) => {
+    const cspNonce = crypto.randomBytes(16).toString('base64');
+    res.setHeader(
+      'Content-Security-Policy',
+      `default-src 'none'; script-src 'nonce-${cspNonce}'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`
+    );
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+
     const { state, code, error } = req.query;
-    if (error) {
-      res.send(`<html><body><h3>OAuth Authorization Failed: ${error}</h3><p>You may close this tab.</p></body></html>`);
+
+    // Validate state parameter format (32 hex characters)
+    if (!state || typeof state !== 'string' || !/^[a-f0-9]{32}$/i.test(state.trim())) {
+      res.status(400).send(`<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>OAuth Error</title></head><body><h3>OAuth Authorization Failed</h3><p>Invalid or missing OAuth state parameter.</p></body></html>`);
       return;
     }
-    res.send(`<html><body><script>
-      if (window.opener) {
-        window.opener.postMessage({ type: 'blaize:oauth_code', state: '${state}', code: '${code}' }, '*');
-        window.close();
+
+    const stateKey = state.trim();
+    const session = oauthSessions.get(stateKey);
+    if (!session) {
+      res.status(400).send(`<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>OAuth Error</title></head><body><h3>OAuth Authorization Failed</h3><p>Invalid, forged, or expired OAuth state.</p></body></html>`);
+      return;
+    }
+
+    // Replay attack prevention: single callback receipt allowed per state
+    if (session.callbackReceived) {
+      res.status(400).send(`<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>OAuth Error</title></head><body><h3>OAuth Authorization Failed</h3><p>OAuth state has already been used (replay detected).</p></body></html>`);
+      return;
+    }
+
+    session.callbackReceived = true;
+
+    // Handle upstream OAuth error response safely without reflection
+    if (error) {
+      oauthSessions.delete(stateKey);
+      const safeError = escapeHtml(String(error).slice(0, 100));
+      res.status(400).send(`<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>OAuth Failed</title></head><body><h3>OAuth Authorization Failed</h3><p>${safeError}</p><p>You may close this tab.</p></body></html>`);
+      return;
+    }
+
+    // Validate code parameter (safe format, max length, no script injection characters)
+    if (!code || typeof code !== 'string' || !code.trim() || code.length > 1024 || /[\r\n<>"']/.test(code)) {
+      oauthSessions.delete(stateKey);
+      res.status(400).send(`<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>OAuth Error</title></head><body><h3>OAuth Authorization Failed</h3><p>Invalid authorization code format.</p></body></html>`);
+      return;
+    }
+
+    const safeCode = code.trim();
+    session.receivedCode = safeCode;
+    session.codeReceivedAt = Date.now();
+
+    // Determine target origin: NEVER wildcard '*', always verified client origin
+    const targetOrigin = session.clientOrigin;
+    const safeTargetOrigin = isAllowedOrigin(targetOrigin) ? targetOrigin : 'http://127.0.0.1:3000';
+
+    // Safely encode JSON payload preventing script closing tag breakout
+    const payloadJson = JSON.stringify({
+      type: 'blaize:oauth_code',
+      state: session.state,
+      code: safeCode,
+    }).replace(/</g, '\\u003c');
+
+    res.status(200).send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Authorization Succeeded</title>
+</head>
+<body>
+  <h3>Authorization Succeeded</h3>
+  <p>Returning to Blaize Desktop...</p>
+  <script nonce="${cspNonce}">
+    (function() {
+      try {
+        if (window.opener && window.opener !== window) {
+          window.opener.postMessage(${payloadJson}, ${JSON.stringify(safeTargetOrigin)});
+          window.close();
+        }
+      } catch (e) {
+        console.error('Failed to notify opener window:', e);
       }
-    </script><h3>Authorization Succeeded</h3><p>Returning to Blaize Desktop...</p></body></html>`);
+    })();
+  </script>
+</body>
+</html>`);
   });
 
   router.post('/connectors/oauth/exchange', async (req, res) => {
@@ -291,11 +456,18 @@ export function createConnectorsRouter(vaultInstance?: PassphraseWrapVault): Rou
       return;
     }
 
+    if (session.receivedCode && session.receivedCode !== code.trim()) {
+      await normalizeExecutionTiming(startMs, null);
+      res.status(400).json({ ok: false, error: 'OAuth authorization code mismatch.' });
+      return;
+    }
+
     if (redirectUri && redirectUri !== session.redirectUri) {
       await normalizeExecutionTiming(startMs, null);
       res.status(400).json({ ok: false, error: 'OAuth redirectUri mismatch.' });
       return;
     }
+
 
     // If secretCode provided, verify lockout
     if (secretCode) {
@@ -309,6 +481,55 @@ export function createConnectorsRouter(vaultInstance?: PassphraseWrapVault): Rou
         });
         return;
       }
+    }
+
+    // PROMPT 5: Mandatory PolicyEngine authorization boundary for OAuth exchange
+    const exchangeCallerId = (req.headers['x-caller-id'] as string) || req.ip || 'oauth-client';
+    const exchangePolicy = globalPolicyEngine.evaluateAction({
+      id: `oauth-exchange-${session.provider}-${Date.now()}`,
+      kind: 'oauth_exchange',
+      target: session.provider,
+      riskClass: 'read',
+      profileId: (req.headers['x-blaize-profile'] as any) || 'personal',
+      callerId: exchangeCallerId,
+    });
+
+    if (!exchangePolicy.allowed) {
+      await normalizeExecutionTiming(startMs, null);
+      res.status(403).json({
+        ok: false,
+        errorCode: 'POLICY_VIOLATION',
+        error: `PolicyEngine blocked OAuth exchange: ${exchangePolicy.reason || 'Action denied by policy.'}`,
+        policyDecision: exchangePolicy,
+      });
+      return;
+    }
+
+    // PROMPT 3: Require genuinely verified owner-authenticated vault unlock before exchanging or saving OAuth credentials
+    let verifiedPassphrase = '';
+    if (!serverVault.isLocked()) {
+      verifiedPassphrase = (serverVault as any).getUnlockedPassphrase?.() || '';
+    }
+
+    if (!verifiedPassphrase && typeof secretCode === 'string' && secretCode.trim()) {
+      const unlocked = await serverVault.unlock(secretCode.trim());
+      if (unlocked) {
+        verifiedPassphrase = secretCode.trim();
+      }
+    }
+
+    if (!verifiedPassphrase) {
+      if (secretCode) {
+        globalSecretCodeAttemptLimiter.recordFailure(clientIp);
+      }
+      await normalizeExecutionTiming(startMs, null);
+      res.status(401).json({
+        ok: false,
+        errorCode: 'VAULT_AUTHENTICATION_REQUIRED',
+        error:
+          'Vault must be unlocked by the verified owner before saving OAuth credentials. Provide a valid secret code.',
+      });
+      return;
     }
 
     const tokenEndpoint =
@@ -353,11 +574,6 @@ export function createConnectorsRouter(vaultInstance?: PassphraseWrapVault): Rou
         return;
       }
 
-      const vaultPassphrase =
-        typeof secretCode === 'string' && secretCode.trim()
-          ? secretCode.trim()
-          : 'blaize-default-server-vault-passphrase';
-
       await serverVault.store(
         {
           keyId: `oauth_access_${session.provider}`,
@@ -365,7 +581,7 @@ export function createConnectorsRouter(vaultInstance?: PassphraseWrapVault): Rou
           provider: session.provider,
           plainKey: accessToken,
         },
-        vaultPassphrase
+        verifiedPassphrase
       );
 
       if (tokenJson && typeof tokenJson.refresh_token === 'string' && tokenJson.refresh_token.trim()) {
@@ -376,7 +592,7 @@ export function createConnectorsRouter(vaultInstance?: PassphraseWrapVault): Rou
             provider: session.provider,
             plainKey: tokenJson.refresh_token.trim(),
           },
-          vaultPassphrase
+          verifiedPassphrase
         );
       }
 

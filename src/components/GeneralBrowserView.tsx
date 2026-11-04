@@ -13,6 +13,7 @@
  */
 
 import React, { useState, useEffect } from 'react';
+import { apiFetch } from '../utils/api_client';
 import {
   ArrowLeft,
   ArrowRight,
@@ -200,7 +201,7 @@ export const GeneralBrowserView: React.FC<GeneralBrowserViewProps> = ({
     });
 
     try {
-      const resp = await fetch('/api/browser/read', {
+      const resp = await apiFetch('/api/browser/read', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url: validUrl }),
@@ -328,7 +329,7 @@ export const GeneralBrowserView: React.FC<GeneralBrowserViewProps> = ({
     setIsSelfTesting(true);
     setShowSelfTestModal(true);
     try {
-      const resp = await fetch('/api/browser/self-test');
+      const resp = await apiFetch('/api/browser/self-test');
       if (resp.ok) {
         const data = await resp.json();
         setSelfTestResult(data.result);

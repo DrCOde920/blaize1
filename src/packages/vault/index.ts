@@ -477,12 +477,20 @@ export class PassphraseWrapVault implements SecretVault {
     return this.isLocked();
   }
 
+  private ownerCanaryEnvelope: EncryptedSecretEnvelope | null = null;
+
+  getUnlockedPassphrase(): string | null {
+    if (this.isLocked()) return null;
+    return this.unlockedPassphrase;
+  }
+
   async unlock(secretCode: string): Promise<boolean> {
     if (!secretCode || secretCode.trim().length < 4) {
       return false;
     }
+    const candidateCode = secretCode.trim();
 
-    // If records are empty in cache, attempt to populate from durable database
+    // 1. Populate from durable database if cache is empty
     if (this.records.size === 0 && this.durableDb) {
       try {
         const masked = this.durableDb.listVaultMasked();
@@ -501,21 +509,53 @@ export class PassphraseWrapVault implements SecretVault {
             });
           }
         }
+        const savedCanary = this.durableDb.getRecord?.('vault_owner_auth', 'canary');
+        if (savedCanary) {
+          this.ownerCanaryEnvelope = savedCanary;
+        }
       } catch {
         // Fall back to memory records
       }
     }
 
-    // If there are existing records, verify the secretCode can decrypt the first record
-    const first = this.records.values().next().value as StoredVaultRecord | undefined;
-    if (first) {
+    // 2. If an owner canary exists, verify secretCode can decrypt it
+    if (this.ownerCanaryEnvelope) {
       try {
-        await decryptWithPassphraseAesGcm(first.envelope, secretCode);
+        const plain = await decryptWithPassphraseAesGcm(this.ownerCanaryEnvelope, candidateCode);
+        if (plain !== 'BLAIZE_VAULT_OWNER_CANARY_V1') {
+          return false;
+        }
       } catch {
         return false;
       }
     }
-    this.unlockedPassphrase = secretCode;
+
+    // 3. If there are stored secret records, verify secretCode can decrypt the first record
+    const first = this.records.values().next().value as StoredVaultRecord | undefined;
+    if (first) {
+      try {
+        await decryptWithPassphraseAesGcm(first.envelope, candidateCode);
+      } catch {
+        return false;
+      }
+    }
+
+    // 4. If neither canary nor records existed yet, establish initial owner canary
+    if (!this.ownerCanaryEnvelope && this.records.size === 0) {
+      this.ownerCanaryEnvelope = await encryptWithPassphraseAesGcm(
+        'BLAIZE_VAULT_OWNER_CANARY_V1',
+        candidateCode
+      );
+      if (this.durableDb?.setRecord) {
+        try {
+          this.durableDb.setRecord('vault_owner_auth', 'canary', this.ownerCanaryEnvelope);
+        } catch {
+          // memory fallback
+        }
+      }
+    }
+
+    this.unlockedPassphrase = candidateCode;
     this.lastActivityMs = Date.now();
     return true;
   }
@@ -530,9 +570,24 @@ export class PassphraseWrapVault implements SecretVault {
       }
     }
 
-    const code = secretCode || this.unlockedPassphrase;
+    let code = this.unlockedPassphrase;
+    if (secretCode && secretCode.trim().length >= 4) {
+      const candidate = secretCode.trim();
+      // If vault already has established credentials, verify candidate secret code
+      if (this.ownerCanaryEnvelope || this.records.size > 0) {
+        const verified = await this.unlock(candidate);
+        if (!verified) {
+          throw new Error('Authentication failed: provided secret code is invalid.');
+        }
+        code = candidate;
+      } else {
+        await this.unlock(candidate);
+        code = candidate;
+      }
+    }
+
     if (!code || code.trim().length < 4) {
-      throw new Error('A secret code (at least 4 characters) is required to encrypt and store a key.');
+      throw new Error('Vault is locked. Genuine owner-authenticated secret code is required to store credentials.');
     }
 
     const trimmedKey = input.plainKey.trim();

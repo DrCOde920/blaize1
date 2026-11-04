@@ -15,6 +15,7 @@
  */
 
 import React, { useState, useEffect } from 'react';
+import { apiFetch } from '../utils/api_client';
 import {
   CheckCircle2,
   XCircle,
@@ -59,7 +60,7 @@ export const DoctorView: React.FC = () => {
     setLoading(true);
     setError(null);
     try {
-      const resp = await fetch('/api/system/doctor');
+      const resp = await apiFetch('/api/system/doctor');
       if (!resp.ok) {
         throw new Error(`Doctor API returned HTTP ${resp.status}`);
       }
@@ -79,7 +80,7 @@ export const DoctorView: React.FC = () => {
   const downloadDiagnosticsBundle = async () => {
     setDownloading(true);
     try {
-      const resp = await fetch('/api/system/diagnostics-bundle');
+      const resp = await apiFetch('/api/system/diagnostics-bundle');
       if (!resp.ok) {
         throw new Error(`Failed to download bundle (HTTP ${resp.status})`);
       }

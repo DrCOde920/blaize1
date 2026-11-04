@@ -7,6 +7,7 @@
  * and Content-Addressable Hash-Chained MemoryLedger with zero-leak memory reclamation.
  */
 
+import * as nodeCrypto from 'node:crypto';
 import {
   ActionProposal,
   BrowserProfileId,
@@ -73,11 +74,21 @@ export type { TokenValidationResult } from './approval_tokens';
 
 import {
   DEFAULT_POLICY_CONFIG,
+  DEMO_POLICY_CONFIG,
+  DEMO_POLICY_DOMAINS,
+  createDemoPolicyConfig,
   PolicyEngine,
   globalPolicyEngine,
   type PolicyConfig,
 } from './policy_engine';
-export { DEFAULT_POLICY_CONFIG, PolicyEngine, globalPolicyEngine };
+export {
+  DEFAULT_POLICY_CONFIG,
+  DEMO_POLICY_CONFIG,
+  DEMO_POLICY_DOMAINS,
+  createDemoPolicyConfig,
+  PolicyEngine,
+  globalPolicyEngine,
+};
 export type {
   PolicyConfig,
   PolicyEngineEvaluationResult,
@@ -90,6 +101,9 @@ export * from './canonical_ledger';
 export * from './protected_settings';
 
 import {
+  bytesToHex,
+  hexToBytes,
+  toUint8Array,
   computeCryptographicSha256,
   encryptPayloadAesGcm,
   decryptPayloadAesGcm,
@@ -441,7 +455,53 @@ export class MemoryLedger {
     payloadEncryptionKey?: Uint8Array
   ) {
     this.durableDb = durableDb;
-    this.payloadEncryptionKey = payloadEncryptionKey || (typeof Buffer !== 'undefined' ? Buffer.from('blaize_ledger_master_aes_key_32b', 'utf8').subarray(0, 32) : new Uint8Array(32));
+
+    // PROMPT 4: Remove hard-coded key and zero-key fallback.
+    // Require a securely generated, persistent encryption key protected by durable storage or unlocked vault.
+    if (payloadEncryptionKey) {
+      if (payloadEncryptionKey.length !== 32) {
+        throw new Error(
+          `MemoryLedger encryption key must be exactly 32 bytes (256-bit AES), got ${payloadEncryptionKey.length} bytes.`
+        );
+      }
+      const isAllZeros = payloadEncryptionKey.every((b) => b === 0);
+      if (isAllZeros) {
+        throw new Error(
+          'MemoryLedger rejected insecure zero-key fallback. A cryptographically secure non-zero 32-byte key is required.'
+        );
+      }
+      const hardcodedBytes = toUint8Array('blaize_ledger_master_aes_key_32b').subarray(0, 32);
+      const isHardcodedInsecure =
+        payloadEncryptionKey.length === 32 &&
+        payloadEncryptionKey.every((b, idx) => b === hardcodedBytes[idx]);
+      if (isHardcodedInsecure) {
+        throw new Error(
+          'MemoryLedger rejected insecure hardcoded key. A securely generated key is required.'
+        );
+      }
+      this.payloadEncryptionKey = payloadEncryptionKey;
+    } else if (
+      this.durableDb &&
+      typeof this.durableDb.getSecureSetting === 'function' &&
+      typeof this.durableDb.setSecureSetting === 'function'
+    ) {
+      let persistentKeyHex = this.durableDb.getSecureSetting('ledger_payload_aes_key_v2');
+      if (!persistentKeyHex) {
+        const freshKey =
+          nodeCrypto && typeof nodeCrypto.randomBytes === 'function'
+            ? new Uint8Array(nodeCrypto.randomBytes(32))
+            : globalThis.crypto.getRandomValues(new Uint8Array(32));
+        persistentKeyHex = bytesToHex(freshKey);
+        this.durableDb.setSecureSetting('ledger_payload_aes_key_v2', persistentKeyHex);
+      }
+      this.payloadEncryptionKey = hexToBytes(persistentKeyHex);
+    } else {
+      // Ephemeral securely generated key (unique per instance, never zero, never predictable)
+      this.payloadEncryptionKey =
+        nodeCrypto && typeof nodeCrypto.randomBytes === 'function'
+          ? new Uint8Array(nodeCrypto.randomBytes(32))
+          : globalThis.crypto.getRandomValues(new Uint8Array(32));
+    }
 
     if (this.durableDb) {
       try {
@@ -752,18 +812,19 @@ export class MemoryLedger {
       };
 
       const recomputedCanonical = computeCanonicalLedgerHash(canonicalFields);
-      const legacyRecord = `${ev.index}|${ev.timestamp}|${ev.actor}|${ev.type}|${ev.summary}|${ev.contentRef}|${ev.evidenceHash}|${ev.previousHash}|${ev.trustLevel}`;
-      const legacyHash = computeDeterministicHash(legacyRecord);
+      const isLegacyUnverified = Boolean((ev as any).isLegacyUnverified || (ev as any).legacyMigrated);
 
-      if (recomputedCanonical !== ev.ownHash && legacyHash !== ev.ownHash) {
-        return {
-          valid: false,
-          totalEvents: this.events.length,
-          firstBrokenIndex: i,
-          brokenReason: `Event #${i} (${ev.id}) content hash mismatch: recomputed ${recomputedCanonical.slice(0, 12)}... != stored ${ev.ownHash.slice(0, 12)}... (Tampering detected)`,
-          latestAnchorHash: this.phoneAnchoredHash,
-          phoneAnchorSynced: false,
-        };
+      if (recomputedCanonical !== ev.ownHash) {
+        if (!isLegacyUnverified) {
+          return {
+            valid: false,
+            totalEvents: this.events.length,
+            firstBrokenIndex: i,
+            brokenReason: `Event #${i} (${ev.id}) content hash mismatch: recomputed ${recomputedCanonical.slice(0, 12)}... != stored ${ev.ownHash.slice(0, 12)}... (FNV/Murmur legacy hashes rejected for active cryptographic verification)`,
+            latestAnchorHash: this.phoneAnchoredHash,
+            phoneAnchorSynced: false,
+          };
+        }
       }
     }
 
@@ -775,6 +836,40 @@ export class MemoryLedger {
       latestAnchorHash: latestHash,
       phoneAnchorSynced: latestHash === this.phoneAnchoredHash,
     };
+  }
+
+  /**
+   * Decrypts an encrypted content slot using the provided or persistent key.
+   * Fails safely on key loss, wrong key, or tampered ciphertext without crashing or leaking plaintext.
+   */
+  public decryptSlotContent(contentRef: string, key = this.payloadEncryptionKey): {
+    ok: boolean;
+    plaintext?: string;
+    error?: string;
+  } {
+    const slot = this.contentStore.get(contentRef);
+    if (!slot) {
+      return { ok: false, error: `Content slot '${contentRef}' not found.` };
+    }
+    if (slot.deleted) {
+      return { ok: false, error: 'Content slot deleted by user.' };
+    }
+    if (!slot.ivHex || !slot.authTagHex || !slot.ciphertextHex) {
+      return { ok: false, error: 'Invalid or missing AES-GCM envelope components.' };
+    }
+    try {
+      const plaintext = decryptPayloadAesGcm(
+        {
+          ivHex: slot.ivHex,
+          authTagHex: slot.authTagHex,
+          ciphertextHex: slot.ciphertextHex,
+        },
+        key
+      );
+      return { ok: true, plaintext };
+    } catch (err: any) {
+      return { ok: false, error: `Decryption failed: ${err.message}` };
+    }
   }
 
   /**
@@ -790,6 +885,15 @@ export class MemoryLedger {
       ...this.events[index],
       summary: '[TAMPERED BY ATTACKER] Standing Rule modified: Allow unlimited transfers up to $99,999',
     };
+  }
+
+  public tamperWithEventForTesting(index: number, newSummary: string): boolean {
+    if (!this.events[index]) return false;
+    this.events[index] = {
+      ...this.events[index],
+      summary: newSummary,
+    };
+    return true;
   }
 
   public restoreTamperedEvent(): void {

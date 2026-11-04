@@ -1,4 +1,5 @@
 import React, { useState, useMemo } from 'react';
+import { apiFetch } from '../utils/api_client';
 import {
   Terminal,
   Shield,
@@ -354,7 +355,7 @@ export const PCOperatorView: React.FC<PCOperatorViewProps> = ({
   const handleWriteBenchmarkResultsToDisk = async () => {
     setWriteResultsStatus({ saving: true });
     try {
-      const response = await fetch('/api/evals/write-results', {
+      const response = await apiFetch('/api/evals/write-results', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ platform }),

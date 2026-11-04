@@ -617,6 +617,22 @@ export function createWindow(): any {
       });
     });
 
+    // Secure Electron session authentication mechanism:
+    // Attaches X-Blaize-Launch-Token on all internal requests from the renderer session to local server
+    if (session.defaultSession.webRequest?.onBeforeSendHeaders) {
+      session.defaultSession.webRequest.onBeforeSendHeaders(
+        { urls: ['http://localhost:*/*', 'http://127.0.0.1:*/*', 'http://[::1]:*/*'] },
+        (details: any, callback: any) => {
+          const requestHeaders = { ...details.requestHeaders };
+          const token = process.env.BLAIZE_LAUNCH_TOKEN;
+          if (token) {
+            requestHeaders['X-Blaize-Launch-Token'] = token;
+          }
+          callback({ requestHeaders });
+        }
+      );
+    }
+
     session.defaultSession.setPermissionRequestHandler(
       (webContents: any, permission: string, callback: (granted: boolean) => void) => {
         const reqUrl = typeof webContents?.getURL === 'function' ? webContents.getURL() : '';
