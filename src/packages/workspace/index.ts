@@ -2383,4 +2383,82 @@ export function searchCommandPalette(
   return scored.map((s) => s.item);
 }
 
+export interface ConversationThreadSummary {
+  id: string;
+  projectId?: string;
+  title: string;
+  updatedAt: string;
+  pinned?: boolean;
+  messages: any[];
+}
+
+export interface MemoryPurgeOptions {
+  threads: ConversationThreadSummary[];
+  activeThreadId: string;
+  artifacts: WorkspaceArtifact[];
+}
+
+export interface MemoryPurgeResult {
+  remainingThreads: ConversationThreadSummary[];
+  newActiveThreadId: string;
+  purgedThreadsCount: number;
+  remainingArtifacts: WorkspaceArtifact[];
+  purgedArtifactsCount: number;
+  summary: string;
+}
+
+/**
+ * Memory Purge: Clears non-pinned chat threads and old cached artifact snapshots
+ * while preserving pinned threads and active workspace artifacts.
+ */
+export function purgeMemoryAndCache(options: MemoryPurgeOptions): MemoryPurgeResult {
+  const { threads, activeThreadId, artifacts } = options;
+
+  // 1. Identify non-pinned threads vs pinned threads
+  let remainingThreads = threads.filter((t) => t.pinned === true);
+
+  // If no threads are pinned, preserve at least the first thread (or fallback) so UI is never empty
+  if (remainingThreads.length === 0 && threads.length > 0) {
+    remainingThreads = [{ ...threads[0], pinned: true }];
+  }
+
+  const purgedThreadsCount = Math.max(0, threads.length - remainingThreads.length);
+
+  // Determine active thread id
+  const newActiveThreadId = remainingThreads.some((t) => t.id === activeThreadId)
+    ? activeThreadId
+    : remainingThreads[0]?.id || activeThreadId;
+
+  // 2. Prune old cached artifact versions down to latest active version
+  let purgedArtifactsCount = 0;
+  const remainingArtifacts = artifacts.map((art) => {
+    if (art.versions && art.versions.length > 1) {
+      const prunedCount = art.versions.length - 1;
+      purgedArtifactsCount += prunedCount;
+      return {
+        ...art,
+        versions: art.versions.slice(-1),
+        currentVersion: 1,
+      };
+    }
+    return art;
+  });
+
+  const summary = `Purged ${purgedThreadsCount} non-pinned chat thread${
+    purgedThreadsCount === 1 ? '' : 's'
+  } and ${purgedArtifactsCount} cached artifact snapshot${
+    purgedArtifactsCount === 1 ? '' : 's'
+  }. Performance optimized.`;
+
+  return {
+    remainingThreads,
+    newActiveThreadId,
+    purgedThreadsCount,
+    remainingArtifacts,
+    purgedArtifactsCount,
+    summary,
+  };
+}
+
 export * from './soul_self_management';
+

@@ -337,6 +337,7 @@ export const UnifiedMemoryPageView: React.FC<{
   onForgetActiveChat: () => number;
   onExportMarkdown: (target: 'MEMORY.md' | 'USER.md') => string;
   onOpenReviewPage: () => void;
+  onMemoryPurge?: () => void;
 }> = ({
   items,
   pauseSaving,
@@ -351,6 +352,7 @@ export const UnifiedMemoryPageView: React.FC<{
   onForgetActiveChat,
   onExportMarkdown,
   onOpenReviewPage,
+  onMemoryPurge,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<UnifiedMemoryCategory | 'All'>('All');
@@ -485,6 +487,18 @@ export const UnifiedMemoryPageView: React.FC<{
             >
               Forget this chat
             </button>
+
+            {onMemoryPurge && (
+              <button
+                type="button"
+                data-testid="memory-purge-header-btn"
+                onClick={onMemoryPurge}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-rose-500/30 bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 font-medium transition-colors"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>Memory Purge</span>
+              </button>
+            )}
 
             <button
               type="button"

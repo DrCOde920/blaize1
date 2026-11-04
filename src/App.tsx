@@ -63,6 +63,7 @@ import {
   KeyRound,
   UserCheck,
   Pencil,
+  Trash2,
 } from 'lucide-react';
 import { MorrowCompanion } from './components/MorrowCompanion';
 import { SkillRecorderStudio } from './components/SkillRecorderStudio';
@@ -195,6 +196,7 @@ import {
   matchSkillsForPrompt,
   parseAndValidateSoulDocument,
   proposeSoulChangeFromNaturalLanguage,
+  purgeMemoryAndCache,
   searchCommandPalette,
   updateWorkspaceProject,
 } from './packages/workspace';
@@ -1039,6 +1041,47 @@ export default function App() {
     unifiedMemoryStoreRef.current!.getItems()
   );
   const [pauseMemorySaving, setPauseMemorySaving] = useState<boolean>(false);
+
+  // Memory & Cache Purge Notice
+  const [memoryPurgeNotice, setMemoryPurgeNotice] = useState<{
+    message: string;
+    purgedThreadsCount: number;
+    purgedArtifactsCount: number;
+    timestamp: string;
+  } | null>(null);
+
+  const handleMemoryPurge = () => {
+    const result = purgeMemoryAndCache({
+      threads,
+      activeThreadId,
+      artifacts,
+    });
+
+    setThreads(result.remainingThreads as ConversationThread[]);
+    setActiveThreadId(result.newActiveThreadId);
+    setArtifacts(result.remainingArtifacts);
+
+    const notice = {
+      message: result.summary,
+      purgedThreadsCount: result.purgedThreadsCount,
+      purgedArtifactsCount: result.purgedArtifactsCount,
+      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+    };
+    setMemoryPurgeNotice(notice);
+
+    ledger.appendEvent({
+      actor: 'operator',
+      type: 'memory_purge_executed',
+      summary: `Memory Purge: ${result.summary}`,
+      payload: JSON.stringify({
+        purgedThreadsCount: result.purgedThreadsCount,
+        purgedArtifactsCount: result.purgedArtifactsCount,
+      }),
+      trustLevel: 'verified_by_evidence',
+      missionId: 'settings-privacy',
+    });
+    bumpLedger();
+  };
 
   const [soulProfile, setSoulProfile] = useState<SoulProfileConfig>(() => ({
     ...DEFAULT_SOUL_PROFILE_CONFIG,
@@ -5152,6 +5195,46 @@ export default function App() {
                           </button>
                         </div>
                       ))}
+                    </div>
+
+                    {/* Memory Purge Card */}
+                    <div
+                      data-testid="settings-memory-purge-card"
+                      className="p-4 rounded-2xl border border-stone-800 bg-stone-900/40 space-y-3"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div className="space-y-0.5">
+                          <div className="font-semibold text-sm text-stone-100 flex items-center gap-2">
+                            <Trash2 className="w-4 h-4 text-rose-400" />
+                            <span>Memory &amp; Cache Purge</span>
+                          </div>
+                          <div className="text-stone-400 text-xs">
+                            Clear non-pinned chat threads and old cached artifact snapshots to reclaim memory and optimize performance. Pinned threads and active project files are preserved.
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          data-testid="settings-memory-purge-btn"
+                          onClick={handleMemoryPurge}
+                          className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-semibold text-xs shadow-md transition-colors"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          <span>Memory Purge</span>
+                        </button>
+                      </div>
+
+                      {memoryPurgeNotice && (
+                        <div
+                          data-testid="memory-purge-success-banner"
+                          className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs flex items-center justify-between gap-2"
+                        >
+                          <div className="flex items-center gap-2">
+                            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                            <span>{memoryPurgeNotice.message}</span>
+                          </div>
+                          <span className="text-[11px] text-emerald-400/80">{memoryPurgeNotice.timestamp}</span>
+                        </div>
+                      )}
                     </div>
 
                     <div className="pt-3 border-t border-stone-800/60 flex flex-wrap items-center justify-between gap-2">

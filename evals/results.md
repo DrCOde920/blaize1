@@ -1,7 +1,7 @@
 # Blaize PC Operator — Measured Benchmark & KPI Report
 
-- **Run ID**: `pcbench_mw1jx1ju`
-- **Executed At**: `2026-11-04T03:22:45.402Z`
+- **Run ID**: `pcbench_mw1k8xgw`
+- **Executed At**: `2026-11-04T03:31:59.984Z`
 - **Commit SHA**: `657984d4d182`
 - **Host OS / Runtime**: `linux-4.19.0-gvisor-x64`
 - **Target Driver Profile**: `macos`
@@ -17,18 +17,18 @@
 - **Total Native Host Tasks Executed**: **8**
 - **Passed / Failed**: **8 PASS** / **0 FAIL** (100%)
 - **False Successes**: **0**
-- **Measured Wall-Clock Latency**: **12.65 ms** total (avg **1.58 ms/task**)
+- **Measured Wall-Clock Latency**: **13.98 ms** total (avg **1.75 ms/task**)
 - **Cost Source**: `NONE` (local deterministic execution — $0.0000)
 
 | Task ID | Category | Native Host Task | State | Verifier | Measured Latency | Retries | Cost Source |
 | :--- | :--- | :--- | :--- | :--- | ---: | ---: | :--- |
-| `native_01_fs_sort_by_ext` | `files` | Sort real files by extension into folders and verify SHA-256 manifest on host | `EXECUTED` / `VERIFIED` | `file_hash` | 2.03 ms | 0 | `NONE` |
-| `native_02_batch_iso_rename` | `files` | Batch rename invoice files to ISO YYYY-MM-DD prefix and verify index hash | `EXECUTED` / `VERIFIED` | `file_hash` | 1.04 ms | 0 | `NONE` |
+| `native_01_fs_sort_by_ext` | `files` | Sort real files by extension into folders and verify SHA-256 manifest on host | `EXECUTED` / `VERIFIED` | `file_hash` | 1.71 ms | 0 | `NONE` |
+| `native_02_batch_iso_rename` | `files` | Batch rename invoice files to ISO YYYY-MM-DD prefix and verify index hash | `EXECUTED` / `VERIFIED` | `file_hash` | 1 ms | 0 | `NONE` |
 | `native_03_utf16_to_utf8_lf` | `files` | Convert UTF-16LE CRLF legacy log file to UTF-8 with normalized LF line endings | `EXECUTED` / `VERIFIED` | `file_hash` | 1 ms | 0 | `NONE` |
-| `native_04_dedup_reversible_trash` | `files` | Detect duplicate files by SHA-256 and move extras to reversible .blaize-trash with restore verification | `EXECUTED` / `VERIFIED` | `file_hash` | 1.38 ms | 0 | `NONE` |
-| `native_05_csv_sum_verification` | `documents` | Parse Q4 CSV ledger, compute department totals, and verify exact SHA-256 output | `EXECUTED` / `VERIFIED` | `file_hash` | 1 ms | 0 | `NONE` |
-| `native_06_policy_gate_enforcement` | `settings` | Enforce PolicyEngine & AutonomyEnvelope block/approval on out-of-scope destructive path | `EXECUTED` / `VERIFIED` | `file_hash` | 1 ms | 0 | `NONE` |
-| `native_07_linux_host_probe` | `settings` | Probe real host OS environment and enumerate live processes with truthful state | `EXECUTED` / `VERIFIED` | `file_hash` | 4.2 ms | 0 | `NONE` |
+| `native_04_dedup_reversible_trash` | `files` | Detect duplicate files by SHA-256 and move extras to reversible .blaize-trash with restore verification | `EXECUTED` / `VERIFIED` | `file_hash` | 1.55 ms | 0 | `NONE` |
+| `native_05_csv_sum_verification` | `documents` | Parse Q4 CSV ledger, compute department totals, and verify exact SHA-256 output | `EXECUTED` / `VERIFIED` | `file_hash` | 1.04 ms | 0 | `NONE` |
+| `native_06_policy_gate_enforcement` | `settings` | Enforce PolicyEngine & AutonomyEnvelope block/approval on out-of-scope destructive path | `EXECUTED` / `VERIFIED` | `file_hash` | 1.07 ms | 0 | `NONE` |
+| `native_07_linux_host_probe` | `settings` | Probe real host OS environment and enumerate live processes with truthful state | `EXECUTED` / `VERIFIED` | `file_hash` | 5.61 ms | 0 | `NONE` |
 | `native_08_audit_hash_chain` | `multi_app` | Append 5 workflow audit events to SHA-256 hash chain and verify 100% chain integrity | `EXECUTED` / `VERIFIED` | `file_hash` | 1 ms | 0 | `NONE` |
 
 ---

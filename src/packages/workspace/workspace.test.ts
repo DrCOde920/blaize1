@@ -14,6 +14,7 @@ import {
   searchVSCodeMarketplace,
   formatCodeWithPrettierAddon,
   analyzeCodeWithESLintAddon,
+  purgeMemoryAndCache,
 } from './index';
 
 test('createWorkspaceProject validates name and produces deterministic slug', () => {
@@ -426,6 +427,82 @@ test('searchCommandPalette searches across chats, skills, plugins, rules, settin
   assert.equal(helpOnly.length, 1);
   assert.equal(helpOnly[0].id, 'help-shortcuts');
 });
+
+test('purgeMemoryAndCache removes unpinned threads and prunes old artifact version snapshots', () => {
+  const threads = [
+    { id: 't-1', title: 'Pinned Thread', updatedAt: 'Today', pinned: true, messages: [] },
+    { id: 't-2', title: 'Unpinned Chat 1', updatedAt: 'Yesterday', pinned: false, messages: [] },
+    { id: 't-3', title: 'Unpinned Chat 2', updatedAt: '2 days ago', pinned: false, messages: [] },
+  ];
+
+  const artifacts = [
+    {
+      id: 'art-1',
+      projectId: 'proj-1',
+      title: 'Report with history',
+      kind: 'markdown_doc' as const,
+      language: 'markdown',
+      content: 'v3 content',
+      versions: [
+        { version: 1, content: 'v1', CreatedAt: '2026-01-01', summary: 'v1' },
+        { version: 2, content: 'v2', CreatedAt: '2026-01-02', summary: 'v2' },
+        { version: 3, content: 'v3 content', CreatedAt: '2026-01-03', summary: 'v3' },
+      ],
+      currentVersion: 3,
+      updatedAt: '2026-01-03',
+    },
+    {
+      id: 'art-2',
+      projectId: 'proj-1',
+      title: 'Single version artifact',
+      kind: 'html_preview' as const,
+      language: 'html',
+      content: '<div>v1</div>',
+      versions: [{ version: 1, content: '<div>v1</div>', CreatedAt: '2026-01-01', summary: 'v1' }],
+      currentVersion: 1,
+      updatedAt: '2026-01-01',
+    },
+  ];
+
+  const result = purgeMemoryAndCache({
+    threads,
+    activeThreadId: 't-2',
+    artifacts,
+  });
+
+  // Verify threads: pinned thread preserved, unpinned threads removed
+  assert.equal(result.purgedThreadsCount, 2);
+  assert.equal(result.remainingThreads.length, 1);
+  assert.equal(result.remainingThreads[0].id, 't-1');
+  assert.equal(result.newActiveThreadId, 't-1');
+
+  // Verify artifacts: 2 old version snapshots pruned from art-1
+  assert.equal(result.purgedArtifactsCount, 2);
+  assert.equal(result.remainingArtifacts.length, 2);
+  assert.equal(result.remainingArtifacts[0].versions.length, 1);
+  assert.equal(result.remainingArtifacts[0].versions[0].content, 'v3 content');
+
+  assert.ok(result.summary.includes('Purged 2 non-pinned chat threads'));
+  assert.ok(result.summary.includes('2 cached artifact snapshots'));
+});
+
+test('purgeMemoryAndCache provides safe fallback when zero threads are pinned', () => {
+  const threads = [
+    { id: 't-10', title: 'Only Unpinned Chat', updatedAt: 'Today', pinned: false, messages: [] },
+  ];
+
+  const result = purgeMemoryAndCache({
+    threads,
+    activeThreadId: 't-10',
+    artifacts: [],
+  });
+
+  // Safe fallback keeps 1 thread as pinned so UI remains valid
+  assert.equal(result.remainingThreads.length, 1);
+  assert.equal(result.remainingThreads[0].pinned, true);
+  assert.equal(result.purgedThreadsCount, 0);
+});
+
 
 
 
