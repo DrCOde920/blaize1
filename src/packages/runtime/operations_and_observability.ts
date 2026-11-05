@@ -2047,8 +2047,24 @@ export class ResourceLimiterAndWorkerSupervisor {
     return new Promise((resolve) => {
       let child: childProcess.ChildProcess;
       try {
+        let nodeBin = process.execPath;
+        if (process.versions?.bun || process.execPath.toLowerCase().includes('bun')) {
+          if (fs.existsSync('/usr/local/bin/node')) nodeBin = '/usr/local/bin/node';
+          else if (fs.existsSync('/usr/bin/node')) nodeBin = '/usr/bin/node';
+          else {
+            try {
+              const found = childProcess
+                .execSync('which node', { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+                .trim();
+              if (found && fs.existsSync(found)) nodeBin = found;
+            } catch {
+              // fallback
+            }
+          }
+        }
+
         child = childProcess.spawn(
-          process.execPath,
+          nodeBin,
           [`--max-old-space-size=${maxHeapMb}`, '-e', params.scriptCode],
           {
             stdio: ['ignore', 'pipe', 'pipe'],

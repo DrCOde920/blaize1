@@ -843,6 +843,22 @@ function ensureWorkerScriptOnDisk(): string {
   return filePath;
 }
 
+function getNodeExecutable(): string {
+  if (process.versions?.bun || process.execPath.toLowerCase().includes('bun')) {
+    if (fs.existsSync('/usr/local/bin/node')) return '/usr/local/bin/node';
+    if (fs.existsSync('/usr/bin/node')) return '/usr/bin/node';
+    try {
+      const found = childProcess
+        .execSync('which node', { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+        .trim();
+      if (found && fs.existsSync(found)) return found;
+    } catch {
+      // fallback
+    }
+  }
+  return process.execPath;
+}
+
 function isLinuxPrlimitAvailable(): boolean {
   if (cachedPrlimitAvailable !== null) return cachedPrlimitAvailable;
   if (process.platform !== 'linux') {
@@ -885,27 +901,40 @@ export async function runInRestrictedPluginWorker(params: {
 
   const workerScriptPath = ensureWorkerScriptOnDisk();
   const workerDir = path.dirname(workerScriptPath);
+  const targetNodeBin = getNodeExecutable();
+
+  const allowReadPaths = new Set<string>([workerDir, os.tmpdir(), process.cwd()]);
+  const pluginCodePath =
+    (params.plugin as any).entryFilePath ||
+    (params.plugin as any).codeFilePath ||
+    (params.plugin as any).filePath;
+  if (pluginCodePath && typeof pluginCodePath === 'string') {
+    allowReadPaths.add(path.dirname(pluginCodePath));
+  }
+
+  const allowFsReadFlags = Array.from(allowReadPaths).map(
+    (p) => `--allow-fs-read=${path.resolve(p)}`
+  );
 
   const nodeArgs = [
     `--max-old-space-size=${limits.maxMemoryMb}`,
     '--permission',
-    `--allow-fs-read=${workerDir}`,
+    ...allowFsReadFlags,
     workerScriptPath,
   ];
 
-  let spawnCmd = process.execPath;
+  let spawnCmd = targetNodeBin;
   let spawnArgs = nodeArgs;
 
   if (isLinuxPrlimitAvailable()) {
     spawnCmd = 'prlimit';
     spawnArgs = [
       `--cpu=${limits.cpuLimitSeconds}`,
-      '--nproc=32',
-      '--nofile=128',
-      process.execPath,
+      '--nofile=256',
+      targetNodeBin,
       ...nodeArgs,
     ];
-    isolationMechanismsUsed.unshift('linux_prlimit_rlimit_cpu_nproc_nofile');
+    isolationMechanismsUsed.unshift('linux_prlimit_rlimit_cpu_nofile');
   }
 
   return new Promise<PluginWorkerExecutionResult>((resolve) => {
