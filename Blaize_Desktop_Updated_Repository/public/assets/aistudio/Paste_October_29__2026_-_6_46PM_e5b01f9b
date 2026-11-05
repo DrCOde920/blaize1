@@ -1,0 +1,453 @@
+Argon Master Prompt — Blaize UI/UX Redesign and End-to-End Feature Integration
+
+Your role
+
+Act as a principal product designer, senior React/TypeScript engineer, desktop-agent architect, and QA engineer. Improve the existing Blaize project in place. The goal is a clean, polished, low-clutter UI and a product where its distinctive features work together through real workflows.
+
+This is not a request to remove complexity by deleting features, produce a visual-only mockup, or rebuild Blaize from scratch. First inspect the existing project and map the current implementation. Preserve working code, state, contracts, assets, tests, and important product behaviour. Refactor components only when there is a clear benefit. Implement the design and wiring, run the available checks, and report what genuinely works.
+
+The project contains React/Vite UI code and feature modules such as MorrowCompanion.tsx, MorrowLive2DRig.tsx, LivingDesktopStudioPanel.tsx, SoulMdEditorPanel.tsx, SkillsConnectorsSchedulerView.tsx, BlaizeBrowserView.tsx, VSCodeIdeView.tsx, PluginsHubView.tsx, ProjectsAndArtifactsView.tsx, ArtifactSplitDrawer.tsx, MissionControlView.tsx, L3xiFinanceView.tsx, TrustAndLedgerView.tsx, and EvalsAndSleepView.tsx. Inspect their actual code and existing tests before deciding what is missing.
+
+The current package.json uses React, Vite, TypeScript, Motion, and Express, but does not itself declare an Electron runtime. The build log also identifies some platform behaviours as simulated. Do not represent a Vite/browser simulation as a real native desktop feature. Preserve the current browser preview where necessary, clearly label simulation, and define a platform adapter for native desktop functions. If implementing the Electron runtime is possible in this environment, make a real main/preload/IPC layer and test it; if not, document the exact native gaps and keep the UI/API boundary ready without fabricating support.
+
+Do not make live Meta API calls, consume paid credits, or require API keys for this pass. Keep model-provider integration contracts intact and use the existing labelled demo/mock provider for UI testing. Never make a mock response look like a verified live action.
+
+1. Product principles
+
+Blaize is a living, modular AI desktop environment. Morrow is its one built-in companion. The core coordinates missions, the Soul defines Morrow's user-editable identity, skills encode reusable workflows, the AI Browser and IDE are tools she can use, plugins extend her abilities, and the Trust Kernel decides what she may actually do.
+
+Follow these rules:
+
+Simplify the visible interface, not the product. Do not remove or permanently bury unique functionality.
+
+Progressive disclosure. Default views are calm and concise; advanced configuration, logs, raw JSON, policy details and evidence are available one click deeper.
+
+One coherent system. Shared navigation, project context, task history, artifacts, status language and design tokens across all modules.
+
+Real wiring over decorative UI. Every primary control must call a working handler and persist or change real state. If something is simulated, mark it as simulated.
+
+Morrow stays central. She is an animated 2D anime companion, not an AssistiveTouch dot, a generic orb, or a static dashboard illustration.
+
+Trust is visible but not noisy. Show compact state and verification first; expose full evidence and audit history on demand.
+
+Efficient by design. Animation, scheduling, local file operations, basic search, and simple state changes must not require model calls.
+
+2. Redesign Morrow's placement — replace the oversized top-centre chair stage
+
+The current large top-centre chair stage consumes valuable chat height and makes the character feel like a decoration anchored to a chair. Improve this without discarding the existing rig, animation actions, grounded anchor logic, or click-to-chat interaction.
+
+Preferred solution: “Morrow's Nook” plus a floating desktop companion
+
+Inside Chat:
+
+Replace the tall permanent top-centre chair stage with a compact, elegant Morrow Nook aligned to the right side of the Chat header or conversation column.
+
+Make it a small transparent, borderless companion scene with an unobtrusive ground/desk edge, subtle contact shadow, and the full-body 2D character. Do not require a giant executive chair. A small stool, desk edge, window ledge or simple grounded floor can be used contextually; sitting is one pose, not the permanent product identity.
+
+Target a compact default height of roughly 110–160 px, responsive to available width. The character must remain recognisable and must not overlap the composer or messages.
+
+On narrow windows, collapse the Nook to a small character presence/peek and open the chat popover when clicked. Persist the user's expand/collapse preference.
+
+The chat stream should begin near the top and keep its vertical space. Do not force users to scroll past a large character stage to reach the conversation.
+
+Outside Chat:
+
+Keep Morrow as a transparent, always-on-top desktop companion only when the native shell actually supports it. Anchor her to a safe screen edge/corner, with draggable repositioning and size controls.
+
+In the web preview, simulate this clearly as an in-app overlay and label native features that are not available. Never claim it is a true system desktop overlay unless verified in an Electron build.
+
+Clicking Morrow or pressing the supported hotkey opens the same compact chat popover and shared conversation history.
+
+On Browser and IDE pages, keep her subtle and moveable. She must not cover code, browser controls, permission warnings, important page content, or task status. Provide hide/show and focus-mode behaviour.
+
+Character behaviour
+
+Preserve existing actions and add/fix transitions where needed: stand_idle, blink/breathe, glance/look-at-cursor, sit_down, sit_idle, rest, sleep, wake, stand_up, walk_left/right, run, dance, listen, think, work, verify, speak, celebrate, concerned, waiting_approval, peek_left/right, carried, fall, and land where supported by the rig.
+
+Idle behaviour should feel organic but low-key; no looping attention-grabbing animation.
+
+Sitting/resting/sleeping should happen naturally based on an idle ladder and user rules, not only via manual buttons.
+
+Mission events should map to meaningful expressions/poses. Celebration only follows important, genuinely verified success.
+
+Natural-language commands such as “sit”, “run over here”, “dance”, or “go rest” map to validated local animation commands. The animation controller executes them without model calls per frame.
+
+Model activity may request an animation, but local code validates the request and duration. The model must not control arbitrary screen coordinates or run unbounded animation loops.
+
+Music-aware dancing uses local playback state and optional local beat analysis; do not call the model for every beat.
+
+Keep reduced-motion, “never sit”, “never sleep”, focus mode, and other existing controls.
+
+3. Visual design system
+
+Refine the current UI so it feels premium, warm, modern, and easy to scan rather than like a dense developer console.
+
+Keep dark and light themes, but improve contrast and consistency.
+
+Use a restrained palette: warm neutral/graphite surfaces with one primary accent and limited semantic colours. Keep amber for meaningful active/approval emphasis, not every border/button.
+
+Reduce excessive borders, nested cards, tiny monospace labels, all-caps section captions, and status badges that repeat nearby text.
+
+Increase readability: fewer micro-fonts, sensible line-height, consistent body size, clear headings and readable controls.
+
+Use a spacing scale and reusable tokens for colour, typography, radius, elevation, focus, and layout.
+
+Avoid giant blank preview areas; put real content, contextual empty states or a useful compact tool layout in them.
+
+Use one primary action per section where possible. Move secondary options to menus, tooltips or drawers.
+
+Keep pages visually different where their task needs it: the IDE should look like an IDE, the Browser like a browser, and the Trust Ledger like an audit tool—but all share the same design system.
+
+Ensure responsive resizing, keyboard access, focus visibility, accessible labels, reduced motion, and no clipped controls.
+
+Do not add decorative charts, onboarding paragraphs, placeholder stats, or fake “connected” badges.
+
+Interaction density rule
+
+For each page, the first screen should answer: Where am I? What can I do here? What needs my attention? Use concise labels and status summaries. Put explanations, raw schemas, parameters, execution logs and evidence behind expanders/drawers. Never delete advanced functionality merely to reduce text.
+
+4. Navigation and information architecture
+
+Keep the active project switcher and current features. Organise navigation into understandable groups and allow the sidebar to collapse.
+
+Suggested groups:
+
+Workspace: Chat, Projects & Artifacts, Code IDE.
+
+Tools: AI Browser, Skills, Connectors, Scheduler, Plugins & Tools.
+
+Companion & System: Morrow/Soul, Living Desktop Studio, Trust & Ledger, Evaluations & Sleep Cycle, Settings.
+
+Keep recent chats and standalone plugin workspaces available but collapsible/searchable. Preserve direct access to L3xi Finance, AI Browser Navigator, Pulse Music & BPM, Chronos Scheduler, Trust & Audit Ledger and other installed workspaces. Counts should be useful and derived from state, not decorative.
+
+Do not create a second disconnected Morrow chat. The popover, Chat view, and mission discussion must share the same conversation/task context.
+
+5. Soul (SOUL.md) and editable Morrow identity
+
+The Soul is a first-class feature, not merely a button in the Chat header.
+
+Keep Morrow as the only built-in personality.
+
+Provide an understandable Soul editor with a short summary first and the raw SOUL.md/structured fields in an advanced edit view.
+
+Allow the user to describe personality changes in natural language, then preview exactly what will change before applying them.
+
+Preserve personality template download/import, schema validation, diff preview, export, reset-to-Morrow-default, and removal of user-imported templates where supported.
+
+Store versions and allow restoring a previous version.
+
+Keep behavioural preferences distinct from the Trust Kernel. A Soul/personality edit must never grant permissions, remove mandatory credential protection, or override code-level security.
+
+When the user corrects Morrow (e.g. “be less verbose”), offer a proposed Soul/rule change rather than silently rewriting behaviour.
+
+Reduce the current long labels and implementation jargon. Example user-facing labels: Morrow's Soul, Describe a change, Preview changes, Apply, Restore default, Download template, Import template. Keep technical fields and provenance in an expandable details panel.
+
+6. Mission engine and Mission Control
+
+Make the existing mission system feel simple to use but complete under the surface.
+
+User asks for a goal; Core creates a plan whose number of steps depends on the actual task, uncertainty, dependencies, available tools and permissions. Never force a fixed step count.
+
+Provide objective, success criteria, current step, next action, task state, relevant tool activity, checkpoint/resume, retry history, cancellation and verification outcome.
+
+Compact progress display by default; detailed step/event timeline expands on demand.
+
+Support CREATED, PLANNING, RUNNING, WAITING_FOR_USER, WAITING_FOR_EXTERNAL, COMPLETED, FAILED, and CANCELLED with correct transitions.
+
+Stop when complete; wait when a user choice/dependency is needed; do not retry forever.
+
+Provide pause, resume, cancel and emergency stop with real handlers.
+
+Never show “completed” because the model merely said it was done. Run deterministic post-condition checks and use the verifier when required.
+
+Keep action history and evidence attached to the relevant mission.
+
+7. Skills: creation, reuse, and learning
+
+Make reusable skills a working system rather than a template gallery alone.
+
+Browse/search/filter existing skills.
+
+Create a skill from natural language or from a user demonstration.
+
+Download/import/export a versioned Skill template (including metadata, parameters, permission needs, steps, expected postconditions, retry policy, tests and README).
+
+Validate and preview every imported skill before adding it.
+
+Show typed parameters with defaults, constraints, validation, and a compact compiled-plan preview.
+
+Run skills against the approved tool set; save output as a versioned artifact and optionally open it in Chat or IDE.
+
+Support version history, duplicate, edit, disable, delete, test, and rollback where feasible.
+
+Capture real outcomes and user corrections. Morrow may propose a reusable skill from repeated work, but must show it for review before saving/activating it.
+
+Run candidate skills in a sandbox or dry-run mode before approving higher-risk workflows.
+
+A skill must declare required tools and permissions. It cannot elevate its own privileges.
+
+Tests must prove that skill execution uses Mission Engine, PolicyGuard, ledger, and verifier rather than bypassing them.
+
+8. Plugins: create, import, enable and remove
+
+Keep a dedicated Plugins & Tools page with a simple installed-plugin list and deeper details on demand.
+
+Import a plugin package/file.
+
+Download a plugin SDK template with a manifest, typed schemas, example implementation, permission declaration, tests and README.
+
+Create a plugin by describing the job to Morrow; generate a draft, explain permissions, run static checks/tests, preview changes, and require approval before install/enable.
+
+Show publisher/source, version, compatibility, requested permissions, dependencies, last use, errors, and status (Enabled, Disabled, Needs review, Failed, or accurately labelled Simulated).
+
+Enable/disable, update, inspect, export, uninstall, and rollback where possible.
+
+Support plugin-scoped storage and least-privilege tool access.
+
+Third-party code must run in a restricted process/sandbox, not privileged renderer/main context. Plugin output is untrusted input.
+
+Load plugin tool schemas on demand, not all at every model call.
+
+Keep the sample malicious evil-test plugin as a security regression test if present; verify attempts to access out-of-scope files or inject instructions are blocked.
+
+9. AI Browser
+
+Preserve the actual browser feature and make it a first-class, usable workspace.
+
+Real navigation surface, tabs, address bar, back/forward/reload, bookmarks/history, downloads, page search and profile selection.
+
+AI-assisted mode and manual takeover, easily switchable.
+
+Persistent isolated profiles (e.g. Personal, Work, Testing) where the native runtime supports them.
+
+Use accessibility tree/DOM/readable text before screenshots when possible; capture only the needed viewport at a stable, reduced size when visual interpretation is necessary.
+
+“Ask Morrow about this page” passes only relevant permitted page context to the shared Chat/Mission system.
+
+Protect password, OTP, PIN and other credential entry: user takeover, no credential screenshots/DOM or raw cookies to the model, then hand the authenticated session back under explicit control.
+
+Untrusted webpage text is data, not instructions. It must not change Soul, rules, install plugins, disclose secrets or bypass approvals.
+
+Enforce the allowlist/PolicyGuard and verify browser actions against fresh observed state.
+
+Make it clear which capabilities are native and real versus simulated in the current web preview. Do not claim browser cookies survive restarts if there is no persistent native session implementation.
+
+10. IDE for Morrow and the user
+
+Preserve the existing IDE workspace and make its visible controls functional.
+
+Monaco editor, tabs, file explorer, code search, Git/source-control view, diffs, terminal, problems, extension host status, tests, and live preview where implemented.
+
+Morrow can read/edit permitted project files, propose patches, run allowed checks, explain results, and create artifacts.
+
+Show proposed diffs before applying material changes; support checkpoints and rollback for supported file operations.
+
+Route commands through a controlled task runner with workspace boundaries, timeout/resource limits, and approval for risky commands.
+
+Preserve Prettier, ESLint, themes, snippets and marketplace/OpenVSX features only to the extent they are truly implemented and supported. Do not pretend that a button performs a real extension install if it only changes local demo state.
+
+Make the editor dominant; use resizable/collapsible side and bottom panels. Keep advanced extension and terminal details accessible without cluttering the initial view.
+
+11. Projects, Artifacts, and Connectors
+
+Projects & Artifacts
+
+Preserve active project scoping for chats, files, skills, connectors, artifacts and schedules.
+
+Keep project instructions/guardrails editable and versioned.
+
+Show concise project summary and counts of linked resources.
+
+Preserve artifact preview, source/code view, history/versioning, rollback, and Open in IDE.
+
+Use a resizable side drawer rather than a rigid width. Reflow the chat/workspace correctly.
+
+Connectors
+
+Preserve GitHub, Google Drive/Docs, database, Slack, MockBank, Linear and other existing connector types where present.
+
+Display real status clearly (Connected, Disconnected, Simulated Sandbox, Needs authentication, Error).
+
+Preserve per-project binding, exact scopes and read/write approval gates.
+
+Put OAuth scopes, endpoint/config and diagnostic details inside the connector detail panel.
+
+Do not label a mock connector as connected to the real service.
+
+12. Scheduler and Sleep Cycle
+
+Scheduler
+
+Support natural-language request -> validated schedule/mission preview -> explicit save/activation.
+
+Preserve recurrence rules, time-zone handling, next-five-run preview, active/paused state, Run Now, failure policy, run history and report artifacts.
+
+Display upcoming times in the user's local time; show UTC/raw cron under details.
+
+Scheduled runs use the same Mission Engine, PolicyGuard, ledger and verifier as manual missions.
+
+Do not allow a schedule to bypass approval requirements for payments, deletion, external messaging or other sensitive work.
+
+Define what happens when the machine is asleep/offline: skip, run once when available, or ask. Never imply a task can run on a powered-off computer.
+
+Sleep Cycle / Evaluations
+
+Preserve the wake/consolidate/dream/evaluate/review cycle, idle/resource gates, pause/cancel, budgets, hypotheses, baseline/candidate comparisons, evidence, journal and rollback.
+
+Default to conservative/paused unless configured.
+
+Reflection can propose new skills/rules/workflows but cannot silently change active Soul, permissions, plugins or code.
+
+Show a compact outcome summary; full metrics and logs expand on demand.
+
+13. L3xi Finance, Trust & Audit Ledger, and proof
+
+Do not remove the L3xi flagship feature or the Trust Kernel to make the UI simpler.
+
+L3xi Finance
+
+Preserve manual import plus supported PDF/CSV/SMS/image inputs as implemented.
+
+Preserve structured extraction, locale-aware normalisation, duplicate detection and the integer-cent/decimal-safe reconciliation pipeline.
+
+The closing-balance calculation must be deterministic code. Keep verified/unverified/mismatch states and never silently “correct” a mismatch.
+
+Insights should use computed data, show relevant inputs/formula on demand, and avoid inventing arithmetic.
+
+Real financial portals remain read-only by default; money actions are drafts, and mock-bank execution is clearly labelled SIMULATION.
+
+Preserve synthetic fixtures and corrupted twins for repeatable tests.
+
+Trust & Audit Ledger
+
+Keep PolicyGuard, approvals, verification receipts and tamper-evident/hash-chained event log.
+
+Show a concise status in the default UI; expose event details, hashes, source refs, verification checks and chain report in a detail panel.
+
+Keep operational audit events separate from private conversation content.
+
+Verify that rejected/blocked actions actually cannot reach an executor.
+
+14. Music and Morrow animation integration
+
+If the current code has Pulse Music & BPM, local .m3u8 playlists, music assets, or animation/audio utilities, preserve and connect them rather than creating a duplicate music page.
+
+Keep playback controls and playlist selection in the Music workspace.
+
+Let Morrow respond to natural language and selected playlist/track state.
+
+Dance animation runs locally; no model call per beat/frame.
+
+Do not claim streaming-provider support without an actual authorised integration.
+
+If current audio is only a generated tone or demo asset, label it accurately. Do not pretend it is the user's actual playlist.
+
+15. Data, state, and runtime integration
+
+Before redesigning, create a feature wiring inventory with these columns:
+
+Feature | Current implementation | Real / local / simulated / missing | UI entry point | State/data source | Handler/service | Test | Work required
+
+Inspect the existing modules and identify buttons that only change decorative state, dummy data, missing persistence, unconnected views, or simulated native interfaces. Then wire the features to the correct shared state/service. Do not duplicate independent state stores for the same Morrow conversation, mission, active project, or plugin.
+
+Use typed contracts and validate inputs at boundaries. Keep UI components thin; route meaningful work through the relevant package/service. Use existing architecture unless a concrete defect requires a refactor.
+
+Important: the archive currently appears to be a Vite/React project rather than a complete Electron package. Maintain a working web preview, but define clear capability boundaries:
+
+WebPreviewPlatformAdapter: features that can genuinely run in the browser; simulated native capabilities must be labelled.
+
+ElectronDesktopPlatformAdapter: real global shortcut, transparent always-on-top window, OS app discovery, native file access, persistent Chromium sessions, native notifications and approved desktop automation when implemented.
+
+Do not access OS APIs from renderer code. Use validated IPC and a narrow preload bridge. If the current environment cannot run Electron, implement/test renderer and service logic, add the adapter contract, and list exactly what still needs native runtime testing. Do not fake a native desktop feature as complete.
+
+16. Token efficiency and model readiness
+
+No new live Meta API calls in this task. Preserve existing model-router interfaces and keep mock/demo mode clearly labelled.
+
+Deterministic rules, simple lookups, scheduler ticks, animation, file handling, music playback and arithmetic must not use an LLM.
+
+Retrieve a small relevant memory subset instead of sending full conversation/project history.
+
+Lazy-load model/tool/plugin schemas.
+
+Prefer accessibility tree/readable text to screenshots; use downscaled screenshots only when needed.
+
+Cache stable outputs and summaries; compact memory incrementally.
+
+Do not run unbounded agent loops or duplicate identical verification calls.
+
+Record estimates separately from actual usage.
+
+No silent fallback from local to paid cloud inference.
+
+17. Performance and accessibility
+
+Lazy-load heavy views and plugin workspaces.
+
+Keep Morrow at 0 FPS or a low-cost timer/event-driven loop while resting; avoid polling/animation loops that waste CPU.
+
+Stop idle animations when reduced motion is enabled or the companion is sleeping/resting.
+
+Keep one active browser renderer where the existing performance design requires it; do not mount every tab's renderer at once without justification.
+
+Use lists/virtualisation for growing logs, messages and histories.
+
+Persist safe UI preferences such as theme, collapsed panels, stage visibility and active workspace.
+
+Provide keyboard access, visible focus, sensible screen-reader labels, contrast, tooltips for icon-only controls, and reduced-motion support.
+
+18. Testing and acceptance criteria
+
+Run existing tests first to establish a baseline. Then implement and test changes. Do not report a clean test suite if there were pre-existing failures; distinguish old failures from regressions introduced here.
+
+Acceptance requires:
+
+The default Chat screen is materially cleaner: fewer competing cards, less text, clear message/composer hierarchy, and no tall chair stage consuming the page.
+
+Morrow remains a recognisable full-body animated companion in a compact Morrow Nook in Chat and a safe floating presence in other views. Click-to-chat and existing animation states work.
+
+Morrow's natural idle ladder, focus mode, mission-event expressions and direct sit/run/dance/rest commands continue to work without per-frame model calls.
+
+Soul is editable, versioned and persists. Personality template import/export/reset still works, with Morrow as the sole built-in personality.
+
+Skills can be created, validated, reused, executed, versioned, tested, disabled and removed; output artifacts and mission/guard/verifier paths are correctly wired.
+
+Plugins can be imported, reviewed, sandboxed/isolated where supported, enabled/disabled and removed. Untrusted plugin output cannot bypass rules.
+
+AI Browser manual/AI modes, profile selection, safe credential takeover and page-context handoff remain available. Any missing native persistence is clearly reported.
+
+IDE file editing, test/lint actions, Git diff, artifact handoff and extension actions accurately reflect what is real versus simulated.
+
+Connectors preserve project bindings and scope/write gates. No fake connection states.
+
+Scheduler preview, Run Now, execution history, pause/resume and failure policies work through the mission engine.
+
+Sleep/Evals and Trust/Ledger views retain their distinctive functionality and are not replaced by decorative dashboard cards.
+
+L3xi's corrupted statement tests still detect mismatches; money actions remain draft-only outside the clearly labelled mock bank.
+
+Visible buttons and form controls work; long details are collapsed by default but remain accessible.
+
+Build/type check/lint and relevant unit/integration/E2E tests run; all outcomes are reported honestly.
+
+Every feature is tagged internally in the audit inventory as real, local, simulated, or missing.
+
+19. Deliverables and work sequence
+
+Deliver in this order:
+
+Audit: list existing routes/modules, current implementation status, test baseline, and the most important UI problems.
+
+Design system: tokens, typography, surfaces, buttons, drawers, lists, states, empty/loading/error patterns.
+
+Core shell and Chat: navigation hierarchy, compact Morrow Nook, conversation and composer, contextual popover, artifact drawer.
+
+Feature wiring: Soul, missions, skills, plugins, browser, IDE, projects/artifacts, connectors, scheduler, L3xi, Trust/Ledger, Sleep/Evals, and music.
+
+Regression fixes and tests.
+
+Report: modified files, screenshots/recording if available, tests/results, real vs simulated features, known gaps, and exact local run/build commands.
+
+Do not stop after the audit or a mockup. Implement each slice before advancing. Do not delete capabilities to meet a design deadline. If a feature is broken or native support cannot be delivered in this environment, preserve its entry point where appropriate, label it honestly, and provide the precise missing implementation rather than a fake working state.
+
+Final guiding principle: The interface should feel calm and obvious at first glance, while the powerful system remains available one level deeper. Make Blaize easier to use without making it less capable.

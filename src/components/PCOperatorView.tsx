@@ -2,6 +2,7 @@ import React, { useState, useMemo } from 'react';
 import { apiFetch } from '../utils/api_client';
 import { NativeDesktopHostPanel } from './NativeDesktopHostPanel';
 import { getPlatformBridge } from '../packages/platform';
+import type { ModelRouter, RuntimeToolCall } from '../packages/runtime';
 import {
   Terminal,
   Shield,
@@ -73,6 +74,7 @@ export interface PCOperatorViewProps {
   onChangeHowMuchShouldIAsk?: (pref: HowMuchShouldIAskPreference) => void;
   onRecordAuditEvent?: (summary: string, details: Record<string, unknown>) => void;
   onSendPatchToReview?: (patch: SkillPatchProposal) => void;
+  modelRouter?: ModelRouter;
 }
 
 export const PCOperatorView: React.FC<PCOperatorViewProps> = ({
@@ -81,6 +83,7 @@ export const PCOperatorView: React.FC<PCOperatorViewProps> = ({
   onChangeHowMuchShouldIAsk,
   onRecordAuditEvent,
   onSendPatchToReview,
+  modelRouter,
 }) => {
   const platformBridge = getPlatformBridge();
   const initialPlatform: DesktopOSPlatform = platformBridge.isElectron
@@ -88,6 +91,14 @@ export const PCOperatorView: React.FC<PCOperatorViewProps> = ({
     : 'linux';
   const [activeTab, setActiveTab] = useState<PCOperatorTabId>(initialTab);
   const [platform, setPlatform] = useState<DesktopOSPlatform>(initialPlatform);
+  const [nativeTaskPrompt, setNativeTaskPrompt] = useState('');
+  const [nativeTaskBusy, setNativeTaskBusy] = useState(false);
+  const [nativeTaskNotice, setNativeTaskNotice] = useState('');
+  const [nativeTaskPlan, setNativeTaskPlan] = useState<RuntimeToolCall | null>(null);
+  const [nativeTaskTarget, setNativeTaskTarget] = useState<{ title: string; elementName: string } | null>(null);
+  const [nativeTaskTranscript, setNativeTaskTranscript] = useState<Array<{ role: 'system' | 'user' | 'assistant' | 'tool'; content: string; name?: string; call_id?: string }>>([]);
+  const [nativeTaskSteps, setNativeTaskSteps] = useState(0);
+  const [nativeTaskLog, setNativeTaskLog] = useState<string[]>([]);
   const [localHowMuch, setLocalHowMuch] = useState<HowMuchShouldIAskPreference>(
     DEFAULT_HOW_MUCH_SHOULD_I_ASK
   );
@@ -314,6 +325,180 @@ export const PCOperatorView: React.FC<PCOperatorViewProps> = ({
     ]);
   }, [stuckDemoMode]);
 
+  const nativeDesktopTool = {
+    type: 'function' as const,
+    name: 'desktop.perform_action',
+    description: 'Propose exactly one visible desktop action. The human must approve it before it is executed. Never enter secrets, PINs, OTPs, financial data, or submit payments.',
+    parameters: {
+      type: 'object' as const,
+      properties: {
+        type: { type: 'string', description: 'One of click, type, scroll, or key.' },
+        targetWindowId: { type: 'string', description: 'Exact id of an available desktop window.' },
+        targetElementId: { type: 'string', description: 'Exact id of a visible accessibility element for click, type, or scroll.' },
+        text: { type: 'string', description: 'Text to enter into an explicitly identified non-sensitive field.' },
+        key: { type: 'string', description: 'Keyboard key or shortcut.' },
+        deltaY: { type: 'number', description: 'Scroll amount.' },
+        rationale: { type: 'string', description: 'Why this action is needed for the user goal.' },
+      },
+      required: ['type', 'targetWindowId'],
+      additionalProperties: false,
+    },
+  };
+
+  const nativeSystemPrompt = (windows: Awaited<ReturnType<typeof platformBridge.listWindows>>) =>
+    `You are Morrow operating a user's real desktop through a consented, visible native automation bridge.
+` +
+    `You may call desktop.perform_action only. Produce exactly one action per turn, grounded in the supplied window and accessibility element IDs.
+` +
+    `Never use shell commands, arbitrary code, scripts, terminal commands, file deletion, payment, financial transfers, credential entry, passwords, PINs, OTPs, API keys, secrets, or security setting changes. Do not click a button if its meaning is unclear or may commit a purchase/payment/delete/send action.
+` +
+    `Every click, type, and scroll must use an exact accessibility element id from the supplied snapshot. Keyboard shortcuts are permitted only when the selected window is focused. Do not invent targets. Ask the user in plain text when you cannot act safely. Limit the mission to five approved actions.
+
+` +
+    `CURRENT WINDOWS AND ACCESSIBILITY TARGETS:
+${JSON.stringify(windows.map((w) => ({ id: w.id, title: w.title, processName: w.processName, isFocused: w.isFocused, elements: w.elements || [] })))}`;
+
+  const prepareNextNativeAction = async (transcript: typeof nativeTaskTranscript, windows: Awaited<ReturnType<typeof platformBridge.listWindows>>) => {
+    if (!modelRouter || modelRouter.getMode() !== 'live') {
+      setNativeTaskNotice('Set the model connection to Live and configure a valid model API key before starting native AI execution. No desktop action was run.');
+      return;
+    }
+    const response = await modelRouter.respond({
+      input: transcript,
+      tools: [nativeDesktopTool],
+      maxOutputTokens: 700,
+      temperature: 0.1,
+      timeoutMs: 25000,
+    });
+    if (!response.ok) throw new Error(response.errorMessage || response.errorCode || 'Model planning failed.');
+    if (response.proposedToolCalls.length === 0) {
+      setNativeTaskPlan(null);
+      setNativeTaskTarget(null);
+      setNativeTaskNotice(response.outputText || 'Morrow has no further safe desktop actions to propose.');
+      return;
+    }
+    if (response.proposedToolCalls.length > 1) throw new Error('Morrow proposed multiple desktop actions. Blaize requires one separately approved action at a time.');
+    const proposed = response.proposedToolCalls[0];
+    if (proposed.tool !== 'desktop.perform_action') throw new Error(`Unsupported desktop tool proposal: ${proposed.tool}`);
+    const args = proposed.args || {};
+    const type = String(args.type || '');
+    const windowId = String(args.targetWindowId || '');
+    const targetWindow = windows.find((w) => w.id === windowId);
+    const targetElementId = String(args.targetElementId || '');
+    const targetElement = targetWindow?.elements?.find((el) => el.id === targetElementId);
+    if (!targetWindow || !['click', 'type', 'scroll', 'key'].includes(type)) {
+      throw new Error('The proposed action is not grounded in an available window or supported action type.');
+    }
+    if (type === 'type' && (!targetElement || typeof args.text !== 'string' || !args.text.trim())) {
+      throw new Error('Typing requires an exact, visible accessibility element and non-empty text.');
+    }
+    if ((type === 'click' || type === 'scroll') && !targetElement) {
+      throw new Error(`${type} requires an exact, visible accessibility element id.`);
+    }
+    const requiredCapability = type === 'click' ? 'invoke' : type === 'type' ? 'set_value' : type === 'scroll' ? 'scroll' : undefined;
+    if (requiredCapability && !targetElement?.supportedActions?.includes(requiredCapability)) {
+      throw new Error(`The selected accessibility target does not expose ${requiredCapability}; choose a different visible control.`);
+    }
+    if (targetElement && /(pay|payment|transfer|send money|purchase|checkout|delete|remove account|confirm|approve|submit|sign in|log in|password|credential|security settings)/i.test(targetElement.name)) {
+      throw new Error('Blaize blocked this control because it could commit a payment, delete data, submit a form, or modify security settings.');
+    }
+    if (type === 'key' && !targetWindow.isFocused) {
+      throw new Error('Keyboard shortcuts require the target window to be focused. Focus it and plan again.');
+    }
+    const safeShortcuts = new Set([
+      'escape', 'tab', 'shift+tab', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright',
+      'home', 'end', 'pageup', 'pagedown', 'ctrl+f', 'ctrl+s', 'ctrl+a', 'ctrl+c',
+      'ctrl+z', 'ctrl+y', 'ctrl+tab', 'ctrl+shift+tab', 'ctrl+shift+s', 'alt+tab',
+      'cmd+f', 'cmd+s', 'cmd+a', 'cmd+c', 'cmd+z', 'cmd+shift+z', 'cmd+tab',
+    ]);
+    if (type === 'key' && !safeShortcuts.has(String(args.key || '').toLowerCase().replace(/\s+/g, ''))) {
+      throw new Error('That keyboard shortcut is outside Blaize’s safety allowlist. Use a visible accessibility control.');
+    }
+    if (targetWindow && /(password manager|1password|bitwarden|keepass|keychain|credential manager|banking|online bank|brokerage|trading|tax portal|medical record|health portal|payroll)/i.test(`${targetWindow.title} ${targetWindow.processName}`)) {
+      throw new Error('Blaize blocks autonomous execution in password, banking, brokerage, tax, payroll, and medical applications.');
+    }
+    if (type === 'scroll' && args.deltaY !== undefined && (!Number.isFinite(Number(args.deltaY)) || Math.abs(Number(args.deltaY)) > 100)) {
+      throw new Error('Scroll amount must be between -100 and 100.');
+    }
+    if (args.text && /(password|passcode|one.?time.?code|otp|\bpin\b|api.?key|secret|bearer\s+)/i.test(String(args.text))) {
+      throw new Error('The proposed text appears to contain sensitive material. Blaize refused to type it.');
+    }
+    setNativeTaskPlan(proposed);
+    setNativeTaskTarget({ title: targetWindow.title, elementName: targetElement?.name || 'Window keyboard focus' });
+    setNativeTaskNotice(String(args.rationale || proposed.rationale || 'Review this action before execution.'));
+    setNativeTaskTranscript(transcript);
+  };
+
+  const handlePlanNativeTask = async () => {
+    setNativeTaskBusy(true);
+    setNativeTaskNotice('Inspecting visible desktop windows…');
+    setNativeTaskPlan(null);
+    setNativeTaskTarget(null);
+    setNativeTaskSteps(0);
+    setNativeTaskLog([]);
+    try {
+      if (!platformBridge.isElectron) throw new Error('Native desktop task execution is available only in the installed Electron desktop app. Browser preview remains read-only.');
+      if (!nativeTaskPrompt.trim()) throw new Error('Describe the desktop task first.');
+      const windows = await platformBridge.listWindows();
+      const usable = windows.filter((w) => (w.elements?.length || 0) > 0);
+      if (!usable.length) throw new Error(platformBridge.platform === 'linux'
+        ? 'No accessible desktop controls were returned. On Debian/Ubuntu, enable desktop accessibility and install at-spi2-core plus python3-pyatspi, then restart Blaize. Keep the target application open and visible.'
+        : 'No accessible desktop controls were returned. Enable the operating system accessibility permission/bridge and keep the target application visible.');
+      const transcript = [
+        { role: 'system' as const, content: nativeSystemPrompt(usable) },
+        { role: 'user' as const, content: nativeTaskPrompt.trim() },
+      ];
+      setNativeTaskTranscript(transcript);
+      await prepareNextNativeAction(transcript, usable);
+    } catch (err: any) {
+      setNativeTaskNotice(err?.message || 'Unable to prepare a native desktop action.');
+    } finally { setNativeTaskBusy(false); }
+  };
+
+  const handleApproveNativeAction = async () => {
+    if (!nativeTaskPlan || !nativeTaskTarget) return;
+    setNativeTaskBusy(true);
+    setNativeTaskNotice('Executing the action you approved…');
+    try {
+      const args = nativeTaskPlan.args;
+      const result = await platformBridge.executeAction({
+        actionId: nativeTaskPlan.id,
+        type: String(args.type) as 'click' | 'type' | 'scroll' | 'key',
+        targetWindowId: String(args.targetWindowId),
+        targetElementId: args.targetElementId ? String(args.targetElementId) : undefined,
+        text: args.text ? String(args.text) : undefined,
+        key: args.key ? String(args.key) : undefined,
+        deltaY: Number.isFinite(Number(args.deltaY)) ? Number(args.deltaY) : undefined,
+        requiresConfirmation: true,
+      });
+      const receipt = `${result.executionState || (result.success ? 'EXECUTED' : 'FAILED')}: ${result.message || 'No execution receipt returned.'}`;
+      setNativeTaskLog((items) => [...items, `${String(args.type)} → ${nativeTaskTarget.elementName} (${nativeTaskTarget.title}): ${receipt}`]);
+      setNativeTaskPlan(null);
+      setNativeTaskTarget(null);
+      if (!result.success || result.isSimulated || !result.targetWindowVerified) {
+        setNativeTaskNotice(`Stopped. The OS driver did not verify a real, successful action. ${receipt}`);
+        return;
+      }
+      const nextSteps = nativeTaskSteps + 1;
+      setNativeTaskSteps(nextSteps);
+      if (nextSteps >= 5) {
+        setNativeTaskNotice('Stopped at the five-action safety limit. Review the result before starting another task.');
+        return;
+      }
+      const transcript = [
+        ...nativeTaskTranscript,
+        { role: 'assistant' as const, content: `I proposed and the user approved: ${JSON.stringify(args)}.` },
+        { role: 'tool' as const, name: 'desktop.perform_action', call_id: nativeTaskPlan.id, content: JSON.stringify({ success: result.success, executionState: result.executionState, isSimulated: result.isSimulated, targetWindowVerified: result.targetWindowVerified, observation: result.message }) },
+        { role: 'user' as const, content: 'Based on the verified observation, propose the next single safe action required to complete my original task, or explain that the task is complete.' },
+      ];
+      setNativeTaskTranscript(transcript);
+      const windows = await platformBridge.listWindows();
+      await prepareNextNativeAction(transcript, windows.filter((w) => (w.elements?.length || 0) > 0));
+    } catch (err: any) {
+      setNativeTaskNotice(err?.message || 'Native desktop action failed.');
+    } finally { setNativeTaskBusy(false); }
+  };
+
   const handleRunExecutionLoop = () => {
     const res = runDesktopExecutionLoop({
       driver,
@@ -464,6 +649,32 @@ export const PCOperatorView: React.FC<PCOperatorViewProps> = ({
       </div>
 
       <NativeDesktopHostPanel />
+
+      <section className="rounded-xl border border-amber-500/25 bg-[#12161F] p-4 space-y-3" data-testid="native-ai-task-runner">
+        <div className="flex flex-wrap items-start justify-between gap-2">
+          <div>
+            <div className="text-sm font-semibold text-white">Morrow · Native desktop task execution</div>
+            <p className="mt-1 text-xs text-[#9BA3B5]">Live model planning over real accessibility targets. Every individual OS action is shown for your approval before execution.</p>
+          </div>
+          <span className="text-[10px] uppercase tracking-wider rounded-md border border-amber-500/30 px-2 py-1 text-amber-300">Human approval required</span>
+        </div>
+        <textarea value={nativeTaskPrompt} onChange={(e) => setNativeTaskPrompt(e.target.value)} rows={2} placeholder="Example: Open the visible text editor and create a short note titled Meeting notes…" className="w-full rounded-lg border border-[#30384A] bg-[#0B0D11] px-3 py-2 text-sm text-white placeholder:text-[#687386]" />
+        <div className="flex flex-wrap items-center gap-2">
+          <button type="button" onClick={handlePlanNativeTask} disabled={nativeTaskBusy || !nativeTaskPrompt.trim()} className="rounded-lg bg-amber-500 px-3 py-2 text-xs font-semibold text-black disabled:opacity-50">{nativeTaskBusy ? 'Working…' : 'Plan native task'}</button>
+          {nativeTaskPlan && <button type="button" onClick={handleApproveNativeAction} disabled={nativeTaskBusy} className="rounded-lg bg-emerald-600 px-3 py-2 text-xs font-semibold text-white disabled:opacity-50">Approve & execute this action</button>}
+          {nativeTaskPlan && <button type="button" onClick={() => { setNativeTaskPlan(null); setNativeTaskTarget(null); setNativeTaskNotice('Action rejected by user. No OS input was sent.'); }} disabled={nativeTaskBusy} className="rounded-lg border border-[#3A4252] px-3 py-2 text-xs text-white">Reject</button>}
+        </div>
+        {nativeTaskPlan && <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-xs">
+          <div className="font-semibold text-amber-200">Proposed: {String(nativeTaskPlan.args.type)} on {nativeTaskTarget?.elementName}</div>
+          <div className="mt-1 text-[#C8CED9]">Window: {nativeTaskTarget?.title}</div>
+          {Boolean(nativeTaskPlan.args.text) && <div className="mt-1 text-[#C8CED9]">Text: “{String(nativeTaskPlan.args.text).slice(0, 200)}”</div>}
+          {Boolean(nativeTaskPlan.args.key) && <div className="mt-1 text-[#C8CED9]">Key: {String(nativeTaskPlan.args.key)}</div>}
+          <div className="mt-1 text-[#AEB7C8]">{nativeTaskNotice}</div>
+        </div>}
+        {nativeTaskNotice && !nativeTaskPlan && <div className="text-xs text-[#B6C0D0]" role="status">{nativeTaskNotice}</div>}
+        {nativeTaskLog.length > 0 && <ol className="space-y-1 text-[11px] text-[#AEB7C8]">{nativeTaskLog.map((entry, index) => <li key={index}>{index + 1}. {entry}</li>)}</ol>}
+        <p className="text-[10px] leading-relaxed text-[#7F899B]">Native execution is unavailable in browser preview and headless CI. Credential entry, payments, destructive actions, shell/code execution, and unreviewed multi-action runs are blocked.</p>
+      </section>
 
       {/* Navigation Tabs */}
       <div className="flex flex-wrap items-center gap-1.5 border-b border-[#1E2430] pb-3">

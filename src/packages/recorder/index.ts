@@ -56,7 +56,7 @@ export type RecorderSourceKind = 'screen_capture' | 'in_app' | 'native_input';
 export type RecorderSourceType = 'screen' | 'in_app' | 'native_stub';
 
 export type RecorderSourceUiLabel =
-  | 'Screen view only'
+  | 'Selected display video + keyframes'
   | 'In-app events'
   | 'Full desktop (not available in this preview)';
 
@@ -74,6 +74,8 @@ export interface RecordedKeyframe {
   annotation?: string;
   inferredFromPixelsOnly?: boolean;
   deleted?: boolean;
+  blobHash?: string;
+  storageBackend?: 'sqlite' | 'indexeddb' | 'memory';
 }
 
 export interface RecordedInteractionEvent {
@@ -95,6 +97,19 @@ export interface RecordedNarrationSegment {
   mode: 'typed_note' | 'push_to_talk_mock' | 'muse_voice_live';
 }
 
+export interface RecordingMediaSegmentMeta {
+  id: string;
+  sessionId: string;
+  sequence: number;
+  timestampMs: number;
+  durationMs: number;
+  mimeType: string;
+  byteSize: number;
+  sha256Hash: string;
+  blobHash: string;
+  storageBackend: 'sqlite' | 'indexeddb';
+}
+
 export interface RecordingSession {
   id: string;
   startedAt: string;
@@ -104,6 +119,7 @@ export interface RecordingSession {
   retentionPolicy: 'delete_after_compile' | 'keep_24h' | 'keep_until_deleted';
   encryptedLocal: boolean;
   keyframes: RecordedKeyframe[];
+  mediaSegments?: RecordingMediaSegmentMeta[];
   events: RecordedInteractionEvent[];
   narration: RecordedNarrationSegment[];
   autoPausedCount: number;
@@ -126,7 +142,7 @@ export interface StoredKeyframeMeta {
   elapsedSeconds: number;
   width: number;
   height: number;
-  mimeType: 'image/jpeg';
+  mimeType: 'image/jpeg' | 'image/png' | 'image/webp';
   byteSize: number;
   sha256Hash: string;
   pixelDiffPct: number;
@@ -136,6 +152,8 @@ export interface StoredKeyframeMeta {
   approvedForCompile: boolean;
   storedInIndexedDb: boolean;
   previewDataUrl?: string; // Lightweight downscaled thumbnail URL fetched on demand for Review UI
+  blobHash?: string;
+  storageBackend?: 'sqlite' | 'indexeddb' | 'memory';
 }
 
 export interface CapturedActionEvent {
@@ -163,7 +181,7 @@ export interface RecorderConsentRecord {
   consentId: string;
   grantedAtIso: string;
   selectedSource: RecorderSourceKind;
-  retentionPolicy: 'delete_after_compile' | 'keep_7_days' | 'keep_until_deleted';
+  retentionPolicy: 'delete_after_compile' | 'keep_24h' | 'keep_7_days' | 'keep_until_deleted';
   credentialAutoPauseEnabled: boolean;
   blockedAppCategories: string[];
   narrationMode: 'off' | 'push_to_talk' | 'typed_notes';
@@ -172,7 +190,10 @@ export interface RecorderConsentRecord {
 export interface RecorderSourceStatus {
   kind: RecorderSourceKind;
   uiLabel: RecorderSourceUiLabel;
-  realOrSimulatedBadge: 'REAL (Web API)' | 'REAL (In-App DOM)' | 'STUB (Desktop Shell Only)';
+  realOrSimulatedBadge: 'REAL (User-Consented Display Capture)' | 'REAL (In-App DOM)' | 'STUB (Desktop Shell Only)';
+  videoRecordingActive?: boolean;
+  mediaSegmentsCaptured?: number;
+  mediaRecordingError?: string;
   active: boolean;
   paused: boolean;
   blockedByIframePermission?: boolean;
@@ -200,6 +221,143 @@ export interface RecorderSource {
 
 const IDB_DB_NAME = 'blaize_skill_recorder_idb_v1';
 const IDB_STORE_NAME = 'keyframes';
+const IDB_MEDIA_STORE_NAME = 'media_segments';
+const IDB_DB_VERSION = 2;
+
+function encodeBytesBase64(bytes: Uint8Array): string {
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, Math.min(offset + chunkSize, bytes.length)));
+  }
+  return btoa(binary);
+}
+
+export async function saveRecordingMediaSegment(
+  sessionId: string,
+  sequence: number,
+  chunk: Blob,
+  timestampMs: number,
+  durationMs: number
+): Promise<RecordingMediaSegmentMeta> {
+  if (!chunk || chunk.size < 1) throw new Error('MEDIA_SEGMENT_EMPTY: no video bytes were produced.');
+  // The current IPC transport has a bounded payload size; MediaRecorder emits short one-second chunks.
+  if (chunk.size > 8 * 1024 * 1024) throw new Error('MEDIA_SEGMENT_TOO_LARGE: video segment exceeded the 8 MiB safety limit.');
+  const bytes = new Uint8Array(await chunk.arrayBuffer());
+  const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes);
+  const blobHash = Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, '0')).join('');
+  const mimeType = chunk.type || 'video/webm';
+  const id = `${sessionId}-segment-${String(sequence).padStart(6, '0')}`;
+  const base: Omit<RecordingMediaSegmentMeta, 'storageBackend'> = {
+    id, sessionId, sequence, timestampMs, durationMs, mimeType,
+    byteSize: bytes.byteLength, sha256Hash: blobHash, blobHash,
+  };
+
+  if (typeof window !== 'undefined' && window.electronAPI?.isElectron) {
+    await window.electronAPI.storage.saveBlob(blobHash, encodeBytesBase64(bytes), mimeType);
+    await window.electronAPI.storage.putRecord('recorder_media_segments', {
+      id, collection: 'recorder_media_segments', data: { ...base, storageBackend: 'sqlite' },
+      createdAt: timestampMs, updatedAt: Date.now(),
+    });
+    return { ...base, storageBackend: 'sqlite' };
+  }
+
+  if (typeof window !== 'undefined' && window.indexedDB) {
+    await new Promise<void>((resolve, reject) => {
+      const request = window.indexedDB.open(IDB_DB_NAME, IDB_DB_VERSION);
+      request.onupgradeneeded = () => {
+        const db = request.result;
+        if (!db.objectStoreNames.contains(IDB_STORE_NAME)) db.createObjectStore(IDB_STORE_NAME, { keyPath: 'id' });
+        if (!db.objectStoreNames.contains(IDB_MEDIA_STORE_NAME)) db.createObjectStore(IDB_MEDIA_STORE_NAME, { keyPath: 'id' });
+      };
+      request.onsuccess = () => {
+        const db = request.result;
+        const tx = db.transaction(IDB_MEDIA_STORE_NAME, 'readwrite');
+        tx.objectStore(IDB_MEDIA_STORE_NAME).put({ id, meta: { ...base, storageBackend: 'indexeddb' }, blob: chunk });
+        tx.oncomplete = () => { db.close(); resolve(); };
+        tx.onerror = () => { db.close(); reject(tx.error || new Error('IndexedDB media write failed.')); };
+        tx.onabort = () => { db.close(); reject(tx.error || new Error('IndexedDB media write aborted.')); };
+      };
+      request.onerror = () => reject(request.error || new Error('IndexedDB open failed.'));
+    });
+    return { ...base, storageBackend: 'indexeddb' };
+  }
+  throw new Error('MEDIA_STORAGE_UNAVAILABLE: neither desktop SQLite nor browser IndexedDB is available.');
+}
+
+export async function loadRecordingMediaBlob(session: RecordingSession): Promise<Blob | null> {
+  const segments = [...(session.mediaSegments || [])].sort((a, b) => a.sequence - b.sequence);
+  if (!segments.length) return null;
+  const parts: BlobPart[] = [];
+  let mimeType = segments[0].mimeType || 'video/webm';
+  for (const segment of segments) {
+    let bytes: Uint8Array | null = null;
+    if (typeof window !== 'undefined' && window.electronAPI?.isElectron) {
+      const stored = await window.electronAPI.storage.readBlob(segment.blobHash);
+      if (!stored) throw new Error(`VIDEO_SEGMENT_MISSING: ${segment.id}`);
+      const binary = atob(stored.dataBase64);
+      bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+      mimeType = stored.mimeType || mimeType;
+    } else if (typeof window !== 'undefined' && window.indexedDB) {
+      const blob = await new Promise<Blob | null>((resolve, reject) => {
+        const request = window.indexedDB.open(IDB_DB_NAME, IDB_DB_VERSION);
+        request.onsuccess = () => {
+          const db = request.result;
+          if (!db.objectStoreNames.contains(IDB_MEDIA_STORE_NAME)) { db.close(); resolve(null); return; }
+          const tx = db.transaction(IDB_MEDIA_STORE_NAME, 'readonly');
+          const get = tx.objectStore(IDB_MEDIA_STORE_NAME).get(segment.id);
+          get.onsuccess = () => { const value = get.result?.blob; db.close(); resolve(value instanceof Blob ? value : null); };
+          get.onerror = () => { db.close(); reject(get.error || new Error('Unable to read video segment.')); };
+        };
+        request.onerror = () => reject(request.error || new Error('Unable to open recorder database.'));
+      });
+      if (!blob) throw new Error(`VIDEO_SEGMENT_MISSING: ${segment.id}`);
+      bytes = new Uint8Array(await blob.arrayBuffer());
+      mimeType = blob.type || mimeType;
+    }
+    if (!bytes) throw new Error('VIDEO_STORAGE_UNAVAILABLE: no persistent media store is available.');
+    const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes.buffer as ArrayBuffer);
+    const actualHash = Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, '0')).join('');
+    if (actualHash !== segment.blobHash) throw new Error(`VIDEO_INTEGRITY_FAILED: ${segment.id}`);
+    const exactBuffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+    parts.push(exactBuffer);
+  }
+  return new Blob(parts, { type: mimeType });
+}
+
+export async function deleteRecordingMediaSegments(segments: RecordingMediaSegmentMeta[]): Promise<number> {
+  let deleted = 0;
+  for (const segment of segments) {
+    if (typeof window !== 'undefined' && window.electronAPI?.isElectron) {
+      try {
+        const result = await window.electronAPI.storage.deleteRecord('recorder_media_segments', segment.id);
+        if (result.success) deleted++;
+        await window.electronAPI.storage.deleteBlob(segment.blobHash);
+      } catch (error) {
+        console.error(`Unable to delete media segment ${segment.id} from SQLite.`, error);
+      }
+    } else if (typeof window !== 'undefined' && window.indexedDB) {
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const request = window.indexedDB.open(IDB_DB_NAME, IDB_DB_VERSION);
+          request.onsuccess = () => {
+            const db = request.result;
+            if (!db.objectStoreNames.contains(IDB_MEDIA_STORE_NAME)) { db.close(); resolve(); return; }
+            const tx = db.transaction(IDB_MEDIA_STORE_NAME, 'readwrite');
+            tx.objectStore(IDB_MEDIA_STORE_NAME).delete(segment.id);
+            tx.oncomplete = () => { db.close(); resolve(); };
+            tx.onerror = () => { db.close(); reject(tx.error || new Error('Unable to delete video segment.')); };
+          };
+          request.onerror = () => reject(request.error || new Error('Unable to open recorder database.'));
+        });
+        deleted++;
+      } catch (error) {
+        console.error(`Unable to delete media segment ${segment.id} from IndexedDB.`, error);
+      }
+    }
+  }
+  return deleted;
+}
 
 // Fallback map for Node.js unit test environment where window.indexedDB is absent
 const NODE_IDB_FALLBACK = new Map<string, { meta: StoredKeyframeMeta; jpegDataUrl: string }>();
@@ -208,69 +366,84 @@ export async function saveKeyframeToIndexedDb(
   metaOrKey: StoredKeyframeMeta | string,
   jpegDataUrl: string
 ): Promise<StoredKeyframeMeta> {
-  const resolvedMeta: StoredKeyframeMeta =
-    typeof metaOrKey === 'string'
-      ? {
-          id: metaOrKey,
-          timestampMs: Date.now(),
-          elapsedSeconds: 0,
-          width: 640,
-          height: 360,
-          mimeType: 'image/jpeg',
-          byteSize: jpegDataUrl.length,
-          sha256Hash: computeDeterministicHash(metaOrKey),
-          pixelDiffPct: 12.0,
-          sourceKind: 'in_app',
-          caption: metaOrKey,
-          blurRegions: [],
-          approvedForCompile: true,
-          storedInIndexedDb: true,
-          previewDataUrl: jpegDataUrl,
-        }
-      : {
-          ...metaOrKey,
-          storedInIndexedDb: true,
-          previewDataUrl: jpegDataUrl,
-        };
+  const match = /^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/=]+)$/.exec(jpegDataUrl);
+  if (!match) throw new Error('KEYFRAME_INVALID_DATA_URL: expected a base64 JPEG, PNG, or WebP data URL.');
+  const mimeType = match[1] as StoredKeyframeMeta['mimeType'];
+  const dataBase64 = match[2];
+  const bytes = Uint8Array.from(atob(dataBase64), (c) => c.charCodeAt(0));
+  const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes);
+  const blobHash = Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, '0')).join('');
+  const baseMeta: StoredKeyframeMeta = typeof metaOrKey === 'string'
+    ? {
+        id: metaOrKey, timestampMs: Date.now(), elapsedSeconds: 0, width: 640, height: 360,
+        mimeType, byteSize: bytes.byteLength, sha256Hash: blobHash, pixelDiffPct: 12,
+        sourceKind: 'in_app', caption: metaOrKey, blurRegions: [], approvedForCompile: true,
+        storedInIndexedDb: false,
+      }
+    : { ...metaOrKey, mimeType, byteSize: bytes.byteLength, sha256Hash: blobHash };
 
-  NODE_IDB_FALLBACK.set(resolvedMeta.id, { meta: resolvedMeta, jpegDataUrl });
-
-  if (typeof window !== 'undefined' && 'indexedDB' in window && window.indexedDB) {
-    try {
-      await new Promise<void>((resolve, reject) => {
-        const req = window.indexedDB.open(IDB_DB_NAME, 1);
-        req.onupgradeneeded = () => {
-          const db = req.result;
-          if (!db.objectStoreNames.contains(IDB_STORE_NAME)) {
-            db.createObjectStore(IDB_STORE_NAME, { keyPath: 'id' });
-          }
-        };
-        req.onsuccess = () => {
-          const db = req.result;
-          const tx = db.transaction(IDB_STORE_NAME, 'readwrite');
-          const store = tx.objectStore(IDB_STORE_NAME);
-          store.put({ id: resolvedMeta.id, meta: resolvedMeta, jpegDataUrl });
-          tx.oncomplete = () => {
-            db.close();
-            resolve();
-          };
-          tx.onerror = () => {
-            db.close();
-            reject(tx.error);
-          };
-        };
-        req.onerror = () => reject(req.error);
-      });
-    } catch {
-      // Fallback to in-memory map if sandboxed iframe restricts IndexedDB
-    }
+  // Native desktop mode: binary frame bytes and metadata share the durable SQLite database.
+  if (typeof window !== 'undefined' && window.electronAPI?.isElectron) {
+    await window.electronAPI.storage.saveBlob(blobHash, dataBase64, mimeType);
+    const saved: StoredKeyframeMeta = {
+      ...baseMeta, sha256Hash: blobHash, blobHash, storageBackend: 'sqlite', storedInIndexedDb: false,
+    };
+    await window.electronAPI.storage.putRecord('recorder_keyframes', {
+      id: saved.id, collection: 'recorder_keyframes', data: { ...saved, previewDataUrl: undefined },
+      createdAt: saved.timestampMs, updatedAt: Date.now(),
+    });
+    return saved;
   }
 
-  return resolvedMeta;
+  // Browser preview uses IndexedDB. Memory is only a unit-test fallback when no DOM exists.
+  if (typeof window !== 'undefined' && window.indexedDB) {
+    await new Promise<void>((resolve, reject) => {
+      const req = window.indexedDB.open(IDB_DB_NAME, IDB_DB_VERSION);
+      req.onupgradeneeded = () => {
+        if (!req.result.objectStoreNames.contains(IDB_STORE_NAME)) {
+          req.result.createObjectStore(IDB_STORE_NAME, { keyPath: 'id' });
+        }
+        if (!req.result.objectStoreNames.contains(IDB_MEDIA_STORE_NAME)) {
+          req.result.createObjectStore(IDB_MEDIA_STORE_NAME, { keyPath: 'id' });
+        }
+      };
+      req.onsuccess = () => {
+        const db = req.result;
+        const tx = db.transaction(IDB_STORE_NAME, 'readwrite');
+        tx.objectStore(IDB_STORE_NAME).put({ id: baseMeta.id, meta: baseMeta, jpegDataUrl });
+        tx.oncomplete = () => { db.close(); resolve(); };
+        tx.onerror = () => { db.close(); reject(tx.error || new Error('IndexedDB write failed.')); };
+        tx.onabort = () => { db.close(); reject(tx.error || new Error('IndexedDB write aborted.')); };
+      };
+      req.onerror = () => reject(req.error || new Error('IndexedDB open failed.'));
+    });
+    return { ...baseMeta, storedInIndexedDb: true, storageBackend: 'indexeddb', previewDataUrl: jpegDataUrl };
+  }
+
+  if (typeof window === 'undefined') {
+    const fallback = { ...baseMeta, storageBackend: 'memory' as const, storedInIndexedDb: false };
+    NODE_IDB_FALLBACK.set(fallback.id, { meta: fallback, jpegDataUrl });
+    return fallback;
+  }
+  throw new Error('KEYFRAME_STORAGE_UNAVAILABLE: persistent IndexedDB storage is unavailable.');
 }
 
 export async function deleteKeyframesFromIndexedDb(frameIds: string[]): Promise<number> {
   let deleted = 0;
+  if (typeof window !== 'undefined' && window.electronAPI?.isElectron) {
+    for (const id of frameIds) {
+      try {
+        const metadata = await window.electronAPI.storage.getRecord('recorder_keyframes', id);
+        const blobHash = typeof metadata?.data?.blobHash === 'string' ? metadata.data.blobHash : undefined;
+        const result = await window.electronAPI.storage.deleteRecord('recorder_keyframes', id);
+        if (result.success) deleted++;
+        if (blobHash) await window.electronAPI.storage.deleteBlob(blobHash);
+      } catch (error) {
+        console.error(`Unable to delete keyframe ${id} from SQLite.`, error);
+      }
+    }
+    return deleted;
+  }
   for (const id of frameIds) {
     if (NODE_IDB_FALLBACK.delete(id)) {
       deleted++;
@@ -280,7 +453,7 @@ export async function deleteKeyframesFromIndexedDb(frameIds: string[]): Promise<
   if (typeof window !== 'undefined' && 'indexedDB' in window && window.indexedDB) {
     try {
       await new Promise<void>((resolve) => {
-        const req = window.indexedDB.open(IDB_DB_NAME, 1);
+        const req = window.indexedDB.open(IDB_DB_NAME, IDB_DB_VERSION);
         req.onsuccess = () => {
           const db = req.result;
           if (!db.objectStoreNames.contains(IDB_STORE_NAME)) {
@@ -497,6 +670,8 @@ export interface MockableMediaStreamTrack {
   label: string;
   readyState: 'live' | 'ended';
   stop: () => void;
+  addEventListener?: (event: 'ended', callback: () => void, options?: { once?: boolean }) => void;
+  enabled?: boolean;
 }
 
 export interface MockableMediaStream {
@@ -515,7 +690,7 @@ export type DisplayMediaProvider = () => Promise<MockableMediaStream>;
  */
 export class ScreenCaptureSource implements RecorderSource {
   public readonly kind: RecorderSourceKind = 'screen_capture';
-  public readonly uiLabel: RecorderSourceUiLabel = 'Screen view only';
+  public readonly uiLabel: RecorderSourceUiLabel = 'Selected display video + keyframes';
   public readonly isRealInPreview = true;
 
   private active = false;
@@ -529,18 +704,49 @@ export class ScreenCaptureSource implements RecorderSource {
   private allTracksStopped = false;
   private customDisplayMedia?: DisplayMediaProvider;
   private samplerConfig: KeyframeSamplerConfig;
+  private videoElement: HTMLVideoElement | null = null;
+  private canvasElement: HTMLCanvasElement | null = null;
+  private captureTimer: ReturnType<typeof setInterval> | null = null;
+  private previousPixels: Uint8ClampedArray | null = null;
+  private startedAtMs = 0;
+  private onFrame?: (frame: StoredKeyframeMeta) => void;
+  private onEnded?: () => void;
+  private onMediaSegment?: (segment: RecordingMediaSegmentMeta) => void;
+  private mediaRecorder: MediaRecorder | null = null;
+  private mediaSegmentWrites: Promise<void>[] = [];
+  private mediaSegmentSequence = 0;
+  private mediaSegmentsSaved = 0;
+  private mediaSegmentStartMs = 0;
+  private mediaRecordingError?: string;
+  private onMediaError?: (message: string) => void;
+  private sampling = false;
 
   constructor(
     customDisplayMedia?: DisplayMediaProvider,
-    samplerConfig: KeyframeSamplerConfig = DEFAULT_KEYFRAME_SAMPLER_CONFIG
+    samplerConfig: KeyframeSamplerConfig = DEFAULT_KEYFRAME_SAMPLER_CONFIG,
+    onFrame?: (frame: StoredKeyframeMeta) => void,
+    onEnded?: () => void,
+    onMediaSegment?: (segment: RecordingMediaSegmentMeta) => void,
+    onMediaError?: (message: string) => void
   ) {
     this.customDisplayMedia = customDisplayMedia;
     this.samplerConfig = samplerConfig;
+    this.onFrame = onFrame;
+    this.onEnded = onEnded;
+    this.onMediaSegment = onMediaSegment;
+    this.onMediaError = onMediaError;
   }
 
-  public async start(_consent: RecorderConsentRecord): Promise<RecorderSourceStatus> {
+  public async start(consent: RecorderConsentRecord): Promise<RecorderSourceStatus> {
+    this.consentSessionId = consent.consentId;
     this.framesCaptured = [];
     this.lastSampleTimeMs = null;
+    this.previousPixels = null;
+    this.blockExplanation = undefined;
+    this.mediaRecordingError = undefined;
+    this.mediaSegmentSequence = 0;
+    this.mediaSegmentsSaved = 0;
+    this.mediaSegmentWrites = [];
     this.allTracksStopped = false;
     this.blockedByIframe = false;
 
@@ -567,16 +773,43 @@ export class ScreenCaptureSource implements RecorderSource {
 
       this.active = true;
       this.paused = false;
+      this.startedAtMs = Date.now();
+      this.startFrameSampler();
+      this.startMediaRecorder();
+      for (const track of this.stream.getTracks()) {
+        track.addEventListener?.('ended', () => {
+          if (!this.active) return;
+          this.active = false;
+          this.paused = false;
+          this.stopFrameSampler();
+          void this.stopMediaRecorder().finally(() => {
+            for (const remainingTrack of this.stream?.getTracks() || []) {
+              try { remainingTrack.stop(); } catch { /* already ended */ }
+            }
+            this.allTracksStopped = true;
+            this.stream = null;
+            this.onEnded?.();
+          });
+        }, { once: true });
+      }
       return this.getStatus();
     } catch (err: any) {
       this.active = false;
       this.paused = false;
-      this.blockedByIframe = true;
+      this.stopFrameSampler();
+      if (this.stream) {
+        for (const track of this.stream.getTracks()) { try { track.stop(); } catch { /* no-op */ } }
+        this.stream = null;
+      }
       const msg = err?.message || String(err);
-      this.blockExplanation =
-        `Browser screen capture was blocked (${msg}). Embedded preview iframes often restrict 'display-capture' permissions Policy.`;
-      this.fallbackSuggestion =
-        'Open Blaize in a standalone browser tab to use live getDisplayMedia screen sharing,upload screenshots/video below, or use "In-app events" on the Desktop Stage.';
+      const isElectron = typeof window !== 'undefined' && Boolean(window.electronAPI?.isElectron);
+      this.blockedByIframe = !isElectron && err?.name === 'NotAllowedError';
+      this.blockExplanation = isElectron
+        ? `Display capture did not start (${msg}). Choose a display and approve the operating-system picker; no recording session was saved.`
+        : `Browser display capture did not start (${msg}). This can be caused by a user cancellation, browser permission, or an embedded-frame policy.`;
+      this.fallbackSuggestion = isElectron
+        ? 'Reopen the consent sheet and select a display in the native picker, or choose In-app events.'
+        : 'Open Blaize in a standalone browser tab and allow display capture, or choose In-app events.';
       return this.getStatus();
     }
   }
@@ -609,12 +842,11 @@ export class ScreenCaptureSource implements RecorderSource {
       return { sampled: false, reason: decision.reason };
     }
 
-    const dataUrl =
-      params.jpegDataUrl ||
-      createSyntheticThumbnailDataUrl(params.caption, this.framesCaptured.length + 1);
-    const sha256Hash = computeDeterministicHash(
-      `frame:${params.timestampMs}:${params.caption}:${dataUrl.length}`
-    );
+    if (!params.jpegDataUrl || !params.jpegDataUrl.startsWith('data:image/jpeg;base64,')) {
+      return { sampled: false, reason: 'real_jpeg_frame_required' };
+    }
+    const dataUrl = params.jpegDataUrl;
+    const sha256Hash = computeDeterministicHash(`frame-metadata:${params.timestampMs}:${params.caption}`);
 
     const meta: StoredKeyframeMeta = {
       id: `kf-${this.framesCaptured.length + 1}-${params.timestampMs}`,
@@ -630,26 +862,187 @@ export class ScreenCaptureSource implements RecorderSource {
       caption: params.caption,
       blurRegions: [],
       approvedForCompile: true,
-      storedInIndexedDb: true,
+      storedInIndexedDb: false,
     };
 
     const stored = await saveKeyframeToIndexedDb(meta, dataUrl);
     this.framesCaptured.push(stored);
     this.lastSampleTimeMs = params.timestampMs;
+    this.onFrame?.(stored);
 
     return { sampled: true, reason: decision.reason, frame: stored };
+  }
+
+  private startMediaRecorder(): void {
+    if (!this.stream || typeof MediaRecorder === 'undefined') {
+      this.mediaRecordingError = 'This runtime does not support MediaRecorder; continuous video capture is unavailable.';
+      this.onMediaError?.(this.mediaRecordingError);
+      return;
+    }
+    try {
+      const candidates = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
+      const mimeType = candidates.find((type) => MediaRecorder.isTypeSupported?.(type)) || '';
+      const recorder = mimeType
+        ? new MediaRecorder(this.stream as unknown as MediaStream, { mimeType, videoBitsPerSecond: 1_200_000 })
+        : new MediaRecorder(this.stream as unknown as MediaStream);
+      this.mediaRecorder = recorder;
+      this.mediaSegmentStartMs = Date.now();
+      recorder.addEventListener('dataavailable', (event: BlobEvent) => {
+        if (!event.data || event.data.size < 1) return;
+        const sequence = ++this.mediaSegmentSequence;
+        const timestampMs = this.mediaSegmentStartMs;
+        const endedAtMs = Date.now();
+        this.mediaSegmentStartMs = endedAtMs;
+        const write = saveRecordingMediaSegment(
+          this.consentSessionId,
+          sequence,
+          event.data,
+          timestampMs,
+          Math.max(0, endedAtMs - timestampMs)
+        ).then((segment) => {
+          this.mediaSegmentsSaved++;
+          this.onMediaSegment?.(segment);
+        }).catch((error: any) => {
+          this.mediaRecordingError = `Video segment ${sequence} was not saved: ${String(error?.message || error)}`;
+          this.paused = true;
+          for (const track of this.stream?.getTracks() || []) track.enabled = false;
+          if (this.mediaRecorder?.state === 'recording') { try { this.mediaRecorder.pause(); } catch { /* no-op */ } }
+          this.onMediaError?.(this.mediaRecordingError);
+        });
+        this.mediaSegmentWrites.push(write);
+        void write.finally(() => {
+          this.mediaSegmentWrites = this.mediaSegmentWrites.filter((pending) => pending !== write);
+        });
+      });
+      recorder.addEventListener('error', (event: Event) => {
+        const detail = (event as any).error?.message || 'MediaRecorder reported an error.';
+        this.mediaRecordingError = String(detail);
+        this.paused = true;
+        for (const track of this.stream?.getTracks() || []) track.enabled = false;
+        this.onMediaError?.(this.mediaRecordingError);
+      });
+      recorder.start(1000);
+    } catch (error: any) {
+      this.mediaRecorder = null;
+      this.mediaRecordingError = `Continuous video capture could not start: ${String(error?.message || error)}`;
+      this.onMediaError?.(this.mediaRecordingError);
+    }
+  }
+
+  private consentSessionId = '';
+
+  private async stopMediaRecorder(): Promise<void> {
+    const recorder = this.mediaRecorder;
+    if (!recorder) return;
+    if (recorder.state === 'inactive') {
+      this.mediaRecorder = null;
+      await Promise.allSettled(this.mediaSegmentWrites);
+      return;
+    }
+    await new Promise<void>((resolve) => {
+      const finish = () => {
+        void Promise.allSettled(this.mediaSegmentWrites).then(() => resolve());
+      };
+      recorder.addEventListener('stop', finish, { once: true });
+      try { recorder.stop(); } catch { finish(); }
+    });
+    this.mediaRecorder = null;
+  }
+
+  private startFrameSampler(): void {
+    if (typeof document === 'undefined' || !this.stream) return;
+    const video = document.createElement('video');
+    video.muted = true;
+    video.playsInline = true;
+    video.srcObject = this.stream as unknown as MediaStream;
+    this.videoElement = video;
+    const canvas = document.createElement('canvas');
+    canvas.width = 960;
+    canvas.height = 540;
+    this.canvasElement = canvas;
+    void video.play().catch((err) => {
+      this.blockExplanation = `Screen capture stream opened, but video playback failed: ${String(err?.message || err)}`;
+    });
+    this.captureTimer = setInterval(() => { void this.sampleActualFrame(); }, 1200);
+  }
+
+  public async captureCheckpoint(caption = 'User checkpoint'): Promise<StoredKeyframeMeta | undefined> {
+    const before = this.framesCaptured.length;
+    await this.sampleActualFrame(true, caption);
+    return this.framesCaptured.length > before ? this.framesCaptured[this.framesCaptured.length - 1] : undefined;
+  }
+
+  private async sampleActualFrame(forceCheckpoint = false, captionOverride?: string): Promise<void> {
+    if (!this.active || this.paused || this.sampling || !this.videoElement || !this.canvasElement) return;
+    this.sampling = true;
+    try {
+      const video = this.videoElement;
+      if (video.readyState < 2 || video.videoWidth < 1 || video.videoHeight < 1) return;
+      const canvas = this.canvasElement;
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+      if (!ctx) return;
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const sampleCanvas = document.createElement('canvas');
+      sampleCanvas.width = 64;
+      sampleCanvas.height = 36;
+      const sampleCtx = sampleCanvas.getContext('2d', { willReadFrequently: true });
+      if (!sampleCtx) return;
+      sampleCtx.drawImage(canvas, 0, 0, 64, 36);
+      const pixels = sampleCtx.getImageData(0, 0, 64, 36).data;
+      let changed = 0;
+      if (this.previousPixels) {
+        for (let i = 0; i < pixels.length; i += 4) {
+          const delta = Math.abs(pixels[i] - this.previousPixels[i]) +
+            Math.abs(pixels[i + 1] - this.previousPixels[i + 1]) +
+            Math.abs(pixels[i + 2] - this.previousPixels[i + 2]);
+          if (delta > 36) changed++;
+        }
+      } else changed = 64 * 36;
+      const diffPct = this.previousPixels ? (changed / (64 * 36)) * 100 : 100;
+      this.previousPixels = new Uint8ClampedArray(pixels);
+      const jpegDataUrl = canvas.toDataURL('image/jpeg', 0.66);
+      await this.offerCandidateFrame({
+        timestampMs: Date.now(),
+        elapsedSeconds: Math.max(0, Math.floor((Date.now() - this.startedAtMs) / 1000)),
+        pixelDiffPct: diffPct,
+        caption: captionOverride || `Captured desktop frame · ${new Date().toLocaleTimeString()}`,
+        jpegDataUrl,
+        forceCheckpoint: forceCheckpoint || this.framesCaptured.length === 0,
+      });
+    } catch (err: any) {
+      this.blockExplanation = `Frame sampling failed: ${String(err?.message || err)}`;
+    } finally {
+      this.sampling = false;
+    }
+  }
+
+  private stopFrameSampler(): void {
+    if (this.captureTimer) clearInterval(this.captureTimer);
+    this.captureTimer = null;
+    if (this.videoElement) {
+      try { this.videoElement.pause(); this.videoElement.srcObject = null; } catch { /* no-op */ }
+    }
+    this.videoElement = null;
+    this.canvasElement = null;
   }
 
   public pause(): RecorderSourceStatus {
     if (this.active) {
       this.paused = true;
+      for (const track of this.stream?.getTracks() || []) track.enabled = false;
+      if (this.mediaRecorder?.state === 'recording') { try { this.mediaRecorder.pause(); } catch { /* no-op */ } }
     }
     return this.getStatus();
   }
 
   public resume(): RecorderSourceStatus {
+    // A storage or MediaRecorder error is fail-closed until the user stops and starts
+    // a fresh recording session; resuming would otherwise silently lose video proof.
+    if (this.mediaRecordingError) return this.getStatus();
     if (this.active) {
       this.paused = false;
+      for (const track of this.stream?.getTracks() || []) track.enabled = true;
+      if (this.mediaRecorder?.state === 'paused') { try { this.mediaRecorder.resume(); } catch { /* no-op */ } }
     }
     return this.getStatus();
   }
@@ -657,6 +1050,8 @@ export class ScreenCaptureSource implements RecorderSource {
   public async stop(): Promise<RecorderSourceStatus> {
     this.active = false;
     this.paused = false;
+    this.stopFrameSampler();
+    await this.stopMediaRecorder();
     if (this.stream) {
       const tracks = this.stream.getTracks();
       for (const track of tracks) {
@@ -681,8 +1076,8 @@ export class ScreenCaptureSource implements RecorderSource {
   public getStatus(): RecorderSourceStatus {
     return {
       kind: 'screen_capture',
-      uiLabel: 'Screen view only',
-      realOrSimulatedBadge: 'REAL (Web API)',
+      uiLabel: 'Selected display video + keyframes',
+      realOrSimulatedBadge: 'REAL (User-Consented Display Capture)',
       active: this.active,
       paused: this.paused,
       blockedByIframePermission: this.blockedByIframe,
@@ -690,6 +1085,9 @@ export class ScreenCaptureSource implements RecorderSource {
       fallbackSuggestion: this.fallbackSuggestion,
       framesCapturedCount: this.framesCaptured.length,
       eventsCapturedCount: 0,
+      videoRecordingActive: this.mediaRecorder?.state === 'recording',
+      mediaSegmentsCaptured: this.mediaSegmentsSaved,
+      mediaRecordingError: this.mediaRecordingError,
       allTracksStopped: this.allTracksStopped,
     };
   }
@@ -769,34 +1167,8 @@ export class InAppSource implements RecorderSource {
     };
     this.events.push(fullEvent);
 
-    // Also capture a lightweight keyframe snapshot on checkpoints or key actions
-    if (
-      event.kind === 'checkpoint' ||
-      event.kind === 'navigate' ||
-      event.kind === 'file_op' ||
-      this.keyframes.length === 0
-    ) {
-      const caption = `${event.kind.toUpperCase()}: ${event.accessibleName || event.targetSelector}`;
-      const dataUrl = createSyntheticThumbnailDataUrl(caption, this.keyframes.length + 1);
-      const kf: StoredKeyframeMeta = {
-        id: `kf-inapp-${this.keyframes.length + 1}-${event.timestampMs}`,
-        timestampMs: event.timestampMs,
-        elapsedSeconds: event.elapsedSeconds,
-        width: 960,
-        height: 540,
-        mimeType: 'image/jpeg',
-        byteSize: Math.round(dataUrl.length * 0.75),
-        sha256Hash: computeDeterministicHash(`inapp-kf:${event.timestampMs}:${caption}`),
-        pixelDiffPct: 12.4,
-        sourceKind: 'in_app',
-        caption,
-        blurRegions: [],
-        approvedForCompile: true,
-        storedInIndexedDb: true,
-      };
-      const saved = await saveKeyframeToIndexedDb(kf, dataUrl);
-      this.keyframes.push(saved);
-    }
+    // In-app event recording stores semantic interaction events. It deliberately does not
+    // manufacture screenshots or JPEG placeholders; only ScreenCaptureSource stores pixels.
 
     return { recorded: true, autoPaused: false, event: fullEvent };
   }
@@ -874,7 +1246,7 @@ export class NativeInputSource implements RecorderSource {
       blockExplanation:
         'NativeInputSource requires OS-level accessibility hooks (macOS AXUIElement / Windows UIAutomation) inside the packaged desktop shell.',
       fallbackSuggestion:
-        'Use "In-app events" (real DOM + workspace capture) or "Screen view only" (real browser getDisplayMedia) in this web preview.',
+        'Use in-app events or select a display through the browser or Electron display picker.',
       framesCapturedCount: 0,
       eventsCapturedCount: 0,
       allTracksStopped: true,
@@ -1222,7 +1594,7 @@ export function compileRecordingToDraftSkill(params: {
 
   const sourceUiLabel: RecorderSourceUiLabel =
     params.sourceKind === 'screen_capture'
-      ? 'Screen view only'
+      ? 'Selected display video + keyframes'
       : params.sourceKind === 'in_app'
         ? 'In-app events'
         : 'Full desktop (not available in this preview)';
@@ -1320,7 +1692,7 @@ export function compileRecordingToDraftSkill(params: {
       sourceType: params.sourceKind,
       sourceUiLabel,
       approvedKeyframeHashes: params.approvedKeyframes.map((k) => k.sha256Hash),
-      encryptedAtRest: true,
+      encryptedAtRest: false,
       retentionPolicy: params.retentionPolicy || 'delete_after_compile',
     },
     goldenTest,

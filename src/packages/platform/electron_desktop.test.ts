@@ -74,7 +74,7 @@ describe('Phase 5 — Reproducible, Secure Electron Desktop Foundation', () => {
     const registered = new Set(getRegisteredIpcChannels());
     const manifestKeys = Object.keys(IPC_CONTRACT_MANIFEST) as Array<keyof ElectronIpcChannels>;
 
-    assert.equal(manifestKeys.length, 25, 'Expected 25 explicit IPC channels in manifest');
+    assert.equal(manifestKeys.length, 26, 'Expected 26 explicit IPC channels in manifest');
     assert.equal(
       registered.size,
       manifestKeys.length,
@@ -615,8 +615,8 @@ describe('Phase 5 — Reproducible, Secure Electron Desktop Foundation', () => {
 
         const smokeSummary = JSON.parse(stdout.trim());
         assert.equal(smokeSummary.smokeVerified, true);
-        assert.equal(smokeSummary.registeredChannels, 25);
-        assert.equal(smokeSummary.manifestChannels, 25);
+        assert.equal(smokeSummary.registeredChannels, 26);
+        assert.equal(smokeSummary.manifestChannels, 26);
         assert.equal(smokeSummary.sqliteIntegrityOk, true);
         assert.ok(fs.existsSync(path.join(cleanMachineDir, 'blaize.sqlite')));
       } finally {

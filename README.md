@@ -1,5 +1,6 @@
 # Blaize
 
+
 ## Desktop Personal Assistant Made For and By Muse
 
 [![CI/CD Security & Verification Pipeline](https://github.com/blaize-ai/blaize-desktop/actions/workflows/ci.yml/badge.svg)](https://github.com/blaize-ai/blaize-desktop/actions/workflows/ci.yml)
@@ -9,6 +10,19 @@
 **Blaize** is a local-first, accountable desktop personal assistant made for and by **Muse**. Built around **Morrow**—an expressive desktop companion—and powered by the **Muse** model family (`muse-spark-1.3`, `muse-wonder-1.0`, and `sam-3.1`), Blaize combines natural-language task execution, cross-platform computer use, personal finance reconciliation, and self-extension inside a deterministic security boundary.
 
 ---
+
+## Native desktop execution, recording, and local persistence
+
+Blaize's desktop companion includes a consent-gated native task path and a real display recorder:
+
+- **Native PC Operator:** In the Electron app, a live model can propose one desktop action at a time against a freshly enumerated window and accessibility element. The user approves each action. Element-backed click/type/scroll requests are revalidated in the main process immediately before dispatch; coordinate-only pixel actions, navigation, shell execution, and credential-like text are rejected by this path. Browser preview reports native desktop actions as unsupported.
+- **Host accessibility:** Linux uses the optional AT-SPI2 bridge (`scripts/linux-atspi-bridge.py`). Install `at-spi2-core` and Python `pyatspi` bindings for semantic window access. `xdotool` is needed only for supported keyboard shortcuts under X11. The bridge is not a universal Wayland accessibility or input solution. Windows and macOS execution also depend on the host accessibility permissions and the platform adapter available in the packaged build.
+- **Desktop screen recorder:** The user selects a display through the OS display-capture picker. Blaize records a video-only WebM stream using `MediaRecorder`, stores short segments locally, and samples hashed JPEG keyframes for the review timeline. Audio is disabled. Review checks each segment's SHA-256 before playback. The browser preview path uses IndexedDB; Electron uses SQLite.
+- **Unified desktop persistence:** UI preferences, workspace snapshots, active/archived recording sessions, saved recorder skills, keyframe metadata/blobs, and video segment metadata/blobs use the Electron SQLite store. Browser preview has a separate localStorage/IndexedDB fallback and is not presented as native desktop persistence. Legacy desktop localStorage preferences/snapshots are migrated during bootstrap.
+- **Honest privacy boundary:** Recorder blobs and general SQLite state are durable but are **not encrypted at rest by this recorder/storage layer**. The API-key vault is a separate security subsystem. Native app content can include sensitive information that semantic detectors do not recognize; keep sensitive windows closed or pause the recorder before showing them. `delete_after_compile` deletes retained keyframe/video data after the skill compile step.
+- **Skill compilation guard:** A video or screenshot is not treated as evidence of a click or file operation. Blaize will not synthesize missing action events from pixels; a reusable skill requires actual recorded action events.
+
+The desktop features require an installed Electron build and host OS permissions. Repository static checks do not substitute for exercising display capture, AT-SPI, accessibility permissions, and packaging on each target operating system.
 
 ## Proven Ability to Learn & Operate Any Application
 

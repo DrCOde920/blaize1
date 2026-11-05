@@ -45,6 +45,17 @@ function getSafeCwd(): string {
   }
 }
 
+function getAtspiBridgeScriptPath(): string {
+  const envPath = getSafeProcessEnv().BLAIZE_ATSPI_BRIDGE_PATH;
+  const resourcesPath = IS_NODE_RUNTIME ? (process as any).resourcesPath as string | undefined : undefined;
+  const candidates = [
+    envPath,
+    resourcesPath ? path.resolve(resourcesPath, 'scripts/linux-atspi-bridge.py') : undefined,
+    path.resolve(getSafeCwd(), 'scripts/linux-atspi-bridge.py'),
+  ].filter((value): value is string => Boolean(value));
+  return candidates.find((candidate) => fs.existsSync(candidate)) || candidates[candidates.length - 1] || 'scripts/linux-atspi-bridge.py';
+}
+
 function safeRandomHex(bytes: number): string {
   if (IS_NODE_RUNTIME) {
     try {
@@ -754,7 +765,35 @@ export class LinuxDesktopDriver implements DesktopDriver {
       }
     }
 
-    // 2. If running on X11 with wmctrl, also enumerate real X11 windows
+    // 2. Generic system AT-SPI2 path for ordinary Linux desktop applications.
+    //    This is separate from the controlled test-app socket bridge and only runs
+    //    when the user's session D-Bus reports a live AT-SPI bus.
+    if (probe.atSpiBackend === 'dbus_atspi' && probe.atSpiSocketPaths.length === 0) {
+      try {
+        const atspiScript = getAtspiBridgeScriptPath();
+        const atspiOut = execFileSync('python3', [atspiScript, '--snapshot'], {
+          timeout: 5000, stdio: 'pipe', env,
+        }).toString('utf8');
+        const parsed = JSON.parse(atspiOut.trim());
+        if (parsed?.ok && Array.isArray(parsed.windows) && Array.isArray(parsed.elements)) {
+          for (const windowInfo of parsed.windows) {
+            if (!windows.some((existing) => existing.id === windowInfo.id)) {
+              windows.push(windowInfo as DesktopWindowSnapshot);
+            }
+          }
+          for (const element of parsed.elements) {
+            if (!rawElements.some((existing) => existing.id === element.id)) {
+              rawElements.push({ ...element, markNumber: rawElements.length + 1 } as UIElement);
+            }
+          }
+        }
+      } catch {
+        // AT-SPI bus can be reachable while system Python bindings are absent.
+        // Keep the live X11 window list and surface no guessed controls.
+      }
+    }
+
+    // 3. If running on X11 with wmctrl, also enumerate real X11 windows
     if (probe.sessionType === 'x11' && probe.x11ToolsAvailable.wmctrl) {
       try {
         const wmOut = execFileSync('wmctrl', ['-lpG'], {
@@ -1048,6 +1087,52 @@ export class LinuxDesktopDriver implements DesktopDriver {
     const targetSock = probe.atSpiSocketPaths[0];
 
     if (!targetSock || !fs.existsSync(targetSock)) {
+      if (probe.atSpiBackend === 'dbus_atspi') {
+        try {
+          const atspiScript = getAtspiBridgeScriptPath();
+          const actionType = tier === 'T3_SHORTCUTS_MENU' && cmd.shortcutKeys
+            ? 'shortcut'
+            : cmd.accessibilityAction || (cmd.valueToSet !== undefined ? 'set_value' : 'invoke');
+          const payload = {
+            targetWindowId: cmd.windowId,
+            targetElementId: cmd.targetElementId,
+            actionType,
+            valueToSet: cmd.valueToSet,
+            shortcutKeys: cmd.shortcutKeys,
+          };
+          const actionOut = execFileSync('python3', [atspiScript, '--action', '--payload', JSON.stringify(payload)], {
+            timeout: 5000, stdio: 'pipe', env,
+          }).toString('utf8');
+          const actionResult = JSON.parse(actionOut.trim());
+          if (!actionResult?.ok) {
+            return {
+              ok: false, executionState: 'UNSUPPORTED', isSimulated: false, tierUsed: tier,
+              driverName: this.driverName, platform: 'linux', cursorMoved: false,
+              pausedForUserInput: false, latencyMs: Math.max(1, Date.now() - startMs),
+              tokensConsumed: beforeSnapshot.estimatedDigestTokens, resultingSnapshot: beforeSnapshot,
+              logMessage: `[LinuxDesktopDriver] AT-SPI2 action unavailable: ${actionResult?.error || 'unknown bridge error'}`,
+            };
+          }
+          const afterSnapshot = this.capturePerception();
+          const diff = diffPerceptionSnapshots(beforeSnapshot, afterSnapshot);
+          return {
+            ok: true, executionState: 'EXECUTED', isSimulated: false, tierUsed: tier,
+            driverName: this.driverName, platform: 'linux', cursorMoved: false,
+            pausedForUserInput: false, latencyMs: Math.max(1, Date.now() - startMs),
+            tokensConsumed: beforeSnapshot.estimatedDigestTokens + afterSnapshot.estimatedDigestTokens,
+            resultingSnapshot: afterSnapshot,
+            logMessage: `[LinuxDesktopDriver] EXECUTED \"${cmd.intent}\" via live AT-SPI2 (${actionResult.detail || actionType}). Observed diff: ${diff.summary}`,
+          };
+        } catch (err: any) {
+          return {
+            ok: false, executionState: 'UNSUPPORTED', isSimulated: false, tierUsed: tier,
+            driverName: this.driverName, platform: 'linux', cursorMoved: false,
+            pausedForUserInput: false, latencyMs: Math.max(1, Date.now() - startMs),
+            tokensConsumed: beforeSnapshot.estimatedDigestTokens, resultingSnapshot: beforeSnapshot,
+            logMessage: `[LinuxDesktopDriver] AT-SPI2 bridge could not run: ${err?.message || String(err)}. Install python3-pyatspi and at-spi2-core, then restart Blaize.`,
+          };
+        }
+      }
       return {
         ok: false,
         executionState: 'UNSUPPORTED',

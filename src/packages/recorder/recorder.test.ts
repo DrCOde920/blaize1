@@ -77,10 +77,14 @@ test('1. ScreenCaptureSource with mocked getDisplayMedia & fake timer timestamps
 
   const startStatus = await source.start(SAMPLE_CONSENT);
   assert.equal(startStatus.active, true);
-  assert.equal(startStatus.uiLabel, 'Screen view only');
+  assert.equal(startStatus.uiLabel, 'Selected display video + keyframes');
+
+  // Unit fixture: a real 2x2 JPEG payload, not a generated placeholder thumbnail.
+  const jpegDataUrl = 'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAoHBwgHBgoICAgLCgoLDhgQDg0NDh0VFhEYIx8lJCIfIiEmKzcvJik0KSEiMEExNDk7Pj4+JS5ESUM8SDc9Pjv/2wBDAQoLCw4NDhwQEBw7KCIoOzs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozv/wAARCAACAAIDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDyeiiitjI//9k=';
 
   // Frame 1 at t=0ms -> sampled (first_frame)
   const f1 = await source.offerCandidateFrame({
+    jpegDataUrl,
     timestampMs: 0,
     elapsedSeconds: 0,
     pixelDiffPct: 100,
@@ -92,6 +96,7 @@ test('1. ScreenCaptureSource with mocked getDisplayMedia & fake timer timestamps
   // Frame 2 at t=400ms (< 1000ms minIntervalMs) -> skipped_rate_limit
   t.mock.timers.tick(400);
   const f2RateLimited = await source.offerCandidateFrame({
+    jpegDataUrl,
     timestampMs: 400,
     elapsedSeconds: 0.4,
     pixelDiffPct: 25.0,
@@ -103,6 +108,7 @@ test('1. ScreenCaptureSource with mocked getDisplayMedia & fake timer timestamps
   // Frame 3 at t=1500ms with low visual delta (1.2% < 5.0%) -> skipped_low_visual_delta
   t.mock.timers.tick(1100);
   const f3LowDelta = await source.offerCandidateFrame({
+    jpegDataUrl,
     timestampMs: 1500,
     elapsedSeconds: 1.5,
     pixelDiffPct: 1.2,
@@ -114,6 +120,7 @@ test('1. ScreenCaptureSource with mocked getDisplayMedia & fake timer timestamps
   // Frame 4 at t=2000ms with 14.5% change -> sampled (meaningful_visual_change)
   t.mock.timers.tick(500);
   const f4Sampled = await source.offerCandidateFrame({
+    jpegDataUrl,
     timestampMs: 2000,
     elapsedSeconds: 2.0,
     pixelDiffPct: 14.5,
@@ -125,6 +132,7 @@ test('1. ScreenCaptureSource with mocked getDisplayMedia & fake timer timestamps
   // Frame 5 at t=3500ms -> sampled (reaches maxFrames=3)
   t.mock.timers.tick(1500);
   const f5Sampled = await source.offerCandidateFrame({
+    jpegDataUrl,
     timestampMs: 3500,
     elapsedSeconds: 3.5,
     pixelDiffPct: 18.0,
@@ -135,6 +143,7 @@ test('1. ScreenCaptureSource with mocked getDisplayMedia & fake timer timestamps
   // Frame 6 at t=5000ms -> skipped_max_frame_cap (cap is 3)
   t.mock.timers.tick(1500);
   const f6Capped = await source.offerCandidateFrame({
+    jpegDataUrl,
     timestampMs: 5000,
     elapsedSeconds: 5.0,
     pixelDiffPct: 50.0,
@@ -192,6 +201,7 @@ test('2. Credential auto-pause & secret masking: pauses on password/OTP/PIN fiel
   assert.equal(evSecret.recorded, false);
   assert.equal(evSecret.autoPaused, true);
   assert.equal(inApp.getStatus().paused, true);
+  assert.equal(inApp.getCapturedKeyframes().length, 0, 'In-app semantic events must not manufacture screenshot keyframes.');
 
   // Resume and click save
   inApp.resume();

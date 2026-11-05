@@ -4481,23 +4481,34 @@ export function migratePersistedSnapshot(raw: any): PersistedWorkspaceSnapshotV2
 export function savePersistedSnapshotSync(snapshot: PersistedWorkspaceSnapshotV2): void {
   const serialized = JSON.stringify(snapshot);
   MEMORY_KV_FALLBACK.set(STORAGE_KEY_V2, serialized);
+  if (typeof window !== 'undefined' && window.electronAPI?.isElectron) {
+    // Electron's SQLite database is the durable source of truth. The renderer
+    // localStorage copy is deliberately not updated in desktop mode.
+    void window.electronAPI.storage.putRecord('workspace_snapshot', {
+      id: 'v2', collection: 'workspace_snapshot', data: { snapshot },
+      createdAt: Date.now(), updatedAt: Date.now(),
+    }).catch(() => undefined);
+    return;
+  }
   if (typeof window !== 'undefined' && window.localStorage) {
-    try {
-      window.localStorage.setItem(STORAGE_KEY_V2, serialized);
-    } catch {
-      // ignore quota errors
-    }
+    try { window.localStorage.setItem(STORAGE_KEY_V2, serialized); } catch { /* quota */ }
   }
 }
 
 export function loadPersistedSnapshotSync(): PersistedWorkspaceSnapshotV2 {
+  if (typeof window !== 'undefined' && (window as any).__BLAIZE_BOOTSTRAP_SNAPSHOT__) {
+    return migratePersistedSnapshot((window as any).__BLAIZE_BOOTSTRAP_SNAPSHOT__);
+  }
+  if (typeof window !== 'undefined' && window.electronAPI?.isElectron) {
+    // Electron bootstrap loads this from SQLite before React mounts. Never
+    // silently fall back to a stale localStorage snapshot on desktop.
+    return buildDefaultPersistedSnapshot();
+  }
   if (typeof window !== 'undefined' && window.localStorage) {
     try {
       const raw = window.localStorage.getItem(STORAGE_KEY_V2);
       if (raw) return migratePersistedSnapshot(JSON.parse(raw));
-    } catch {
-      // fallback
-    }
+    } catch { /* fallback */ }
   }
   const mem = MEMORY_KV_FALLBACK.get(STORAGE_KEY_V2);
   if (mem) {
@@ -4508,12 +4519,10 @@ export function loadPersistedSnapshotSync(): PersistedWorkspaceSnapshotV2 {
 
 export function clearPersistedSnapshotSync(): PersistedWorkspaceSnapshotV2 {
   MEMORY_KV_FALLBACK.delete(STORAGE_KEY_V2);
-  if (typeof window !== 'undefined' && window.localStorage) {
-    try {
-      window.localStorage.removeItem(STORAGE_KEY_V2);
-    } catch {
-      // ignore
-    }
+  if (typeof window !== 'undefined' && window.electronAPI?.isElectron) {
+    void window.electronAPI.storage.deleteRecord('workspace_snapshot', 'v2').catch(() => undefined);
+  } else if (typeof window !== 'undefined' && window.localStorage) {
+    try { window.localStorage.removeItem(STORAGE_KEY_V2); } catch { /* ignore */ }
   }
   return buildDefaultPersistedSnapshot();
 }

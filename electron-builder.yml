@@ -9,6 +9,9 @@ files:
   - dist/**/*
   - dist-electron/**/*
   - package.json
+extraResources:
+  - from: scripts/linux-atspi-bridge.py
+    to: scripts/linux-atspi-bridge.py
 extraMetadata:
   main: dist-electron/main.cjs
 linux:

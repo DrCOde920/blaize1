@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 280" width="220" height="280">
+  <defs>
+    <linearGradient id="hairGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#7DD3FC" />
+      <stop offset="45%" stop-color="#38BDF8" />
+      <stop offset="100%" stop-color="#0369A1" />
+    </linearGradient>
+    <linearGradient id="jacketGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#1E293B" />
+      <stop offset="100%" stop-color="#0F172A" />
+    </linearGradient>
+  </defs>
+  <ellipse cx="110" cy="266" rx="34" ry="5" fill="#020617" fill-opacity="0.4" />
+  <path d="M62 60 C24 80, 16 146, 34 206 C46 184, 54 140, 68 88 Z" fill="url(#hairGrad)" />
+  <path d="M158 60 C196 80, 204 146, 186 206 C174 184, 166 140, 152 88 Z" fill="url(#hairGrad)" />
+  <polygon points="60,58 42,46 48,68" fill="#F43F5E" />
+  <polygon points="160,58 178,46 172,68" fill="#F43F5E" />
+  <rect x="89" y="182" width="14" height="72" rx="5" fill="#0F172A" stroke="#10B981" stroke-width="1.5" />
+  <rect x="117" y="182" width="14" height="72" rx="5" fill="#0F172A" stroke="#10B981" stroke-width="1.5" />
+  <polygon points="74,148 146,148 162,186 58,186" fill="#0F172A" stroke="#10B981" stroke-width="1.5" />
+  <path d="M80 98 L140 98 L146 150 L74 150 Z" fill="url(#jacketGrad)" stroke="#10B981" stroke-width="1.5" />
+  <polygon points="105,102 115,102 112,138 108,138" fill="#10B981" />
+  <!-- Raised Victory Peace-Sign Arm -->
+  <path d="M80 104 L62 142 L72 146 L88 114 Z" fill="url(#jacketGrad)" stroke="#10B981" stroke-width="1.3" />
+  <path d="M140 104 L168 58 L158 52 L132 96 Z" fill="url(#jacketGrad)" stroke="#10B981" stroke-width="1.4" />
+  <circle cx="164" cy="52" r="5.5" fill="#FFE4D6" />
+  <!-- Happy Verified Celebration Expression -->
+  <path d="M76 58 C76 32, 144 32, 144 58 C144 82, 128 94, 110 94 C92 94, 76 82, 76 58 Z" fill="#FFF0E5" />
+  <path d="M86 66 Q94 56 102 66" fill="none" stroke="#0F172A" stroke-width="2.6" stroke-linecap="round" />
+  <path d="M118 66 Q126 56 134 66" fill="none" stroke="#0F172A" stroke-width="2.6" stroke-linecap="round" />
+  <path d="M102 78 Q110 90 118 78 Z" fill="#E11D48" />
+  <path d="M72 60 C72 24, 148 24, 148 60 C138 42, 128 56, 120 40 C114 56, 104 54, 98 40 C90 56, 80 44, 72 60 Z" fill="url(#hairGrad)" />
+  <polygon points="44,44 48,54 58,58 48,62 44,72 40,62 30,58 40,54" fill="#FDE047" />
+  <polygon points="180,36 183,44 191,47 183,50 180,58 177,50 169,47 177,44" fill="#34D399" />
+</svg>

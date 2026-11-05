@@ -237,6 +237,7 @@ import {
   ScreenAwarenessMode,
   RecordingSession,
   RecordedKeyframe,
+  RecordingMediaSegmentMeta,
   RecordedInteractionEvent,
   DraftRecordedSkill,
   SkillPlan,
@@ -246,6 +247,9 @@ import {
   buildDefaultDomainNeutralRecordedSkills,
   saveKeyframeToIndexedDb,
   deleteKeyframesFromIndexedDb,
+  deleteRecordingMediaSegments,
+  ScreenCaptureSource,
+  type RecorderConsentRecord,
 } from './packages/recorder';
 import {
   CharacterHistoryStack,
@@ -547,21 +551,33 @@ const INITIAL_PROJECT_THREADS: ProjectChatSummary[] = [
 ];
 
 function readStoredPref<T>(key: string, fallback: T): T {
+  const runtime = typeof window !== 'undefined' ? window.__BLAIZE_RUNTIME_PREFS__ : undefined;
+  const boot = typeof window !== 'undefined' ? window.__BLAIZE_BOOTSTRAP_PREFS__ : undefined;
+  if (runtime && Object.prototype.hasOwnProperty.call(runtime, key)) return runtime[key] as T;
+  if (boot && Object.prototype.hasOwnProperty.call(boot, key)) return boot[key] as T;
+  // Electron must never hydrate stale localStorage after the SQLite bootstrap ran.
+  if (typeof window !== 'undefined' && window.electronAPI?.isElectron) return fallback;
   try {
     const raw = window.localStorage.getItem(`blaize_pref_${key}`);
     if (raw === null) return fallback;
     return JSON.parse(raw) as T;
-  } catch {
-    return fallback;
-  }
+  } catch { return fallback; }
 }
 
 function writeStoredPref<T>(key: string, value: T): void {
   try {
-    window.localStorage.setItem(`blaize_pref_${key}`, JSON.stringify(value));
-  } catch {
-    // ignore storage errors
-  }
+    if (typeof window === 'undefined') return;
+    if (window.electronAPI?.isElectron) {
+      const prefs = (window.__BLAIZE_RUNTIME_PREFS__ ||= { ...(window.__BLAIZE_BOOTSTRAP_PREFS__ || {}) });
+      prefs[key] = value;
+      void window.electronAPI.storage.putRecord('ui_preferences', {
+        id: 'ui', collection: 'ui_preferences', data: { values: prefs },
+        createdAt: Date.now(), updatedAt: Date.now(),
+      }).catch(() => undefined);
+    } else {
+      window.localStorage.setItem(`blaize_pref_${key}`, JSON.stringify(value));
+    }
+  } catch { /* storage errors are surfaced in the storage health panel */ }
 }
 
 /**
@@ -802,22 +818,12 @@ export default function App() {
     projects.find((p) => p.id === activeProjectId) || projects[0];
 
   useEffect(() => {
-    try {
-      window.localStorage.setItem('blaize_pref_activeView_v2', JSON.stringify(activeView));
-      window.localStorage.setItem('blaize_pref_sidebarCollapsed', JSON.stringify(sidebarCollapsed));
-      window.localStorage.setItem('blaize_pref_uiTheme', JSON.stringify(uiTheme));
-      window.localStorage.setItem(
-        'blaize_pref_artifactDrawerWidthPx',
-        JSON.stringify(artifactDrawerWidthPx)
-      );
-      window.localStorage.setItem('blaize_pref_activeProjectId', JSON.stringify(activeProjectId));
-      window.localStorage.setItem(
-        'blaize_pref_howMuchShouldIAsk',
-        JSON.stringify(howMuchShouldIAsk)
-      );
-    } catch {
-      // Ignore storage errors in sandboxed iframes
-    }
+    writeStoredPref('activeView_v2', activeView);
+    writeStoredPref('sidebarCollapsed', sidebarCollapsed);
+    writeStoredPref('uiTheme', uiTheme);
+    writeStoredPref('artifactDrawerWidthPx', artifactDrawerWidthPx);
+    writeStoredPref('activeProjectId', activeProjectId);
+    writeStoredPref('howMuchShouldIAsk', howMuchShouldIAsk);
   }, [
     activeView,
     sidebarCollapsed,
@@ -1001,12 +1007,15 @@ export default function App() {
   const [popoverAnchorTopPx, setPopoverAnchorTopPx] = useState<number>(140);
 
   const [voiceEnabled, setVoiceEnabled] = useState<boolean>(() => {
+    const saved = readStoredPref<boolean | null>('morrow_voice_enabled_v1', null);
+    if (typeof saved === 'boolean') return saved;
+    // Desktop preferences are loaded before React mounts; never resurrect a stale
+    // renderer localStorage value when the SQLite record is missing or unreadable.
+    if (window.electronAPI?.isElectron) return false;
     try {
       const raw = window.localStorage.getItem(VOICE_ENABLED_STORAGE_KEY);
       return raw ? JSON.parse(raw) === true : false;
-    } catch {
-      return false;
-    }
+    } catch { return false; }
   });
   const voiceControllerRef = useRef<VoiceToggleController | null>(null);
   if (!voiceControllerRef.current) {
@@ -1015,13 +1024,10 @@ export default function App() {
   const handleToggleVoice = () => {
     const snap = voiceControllerRef.current!.toggle();
     setVoiceEnabled(snap.voiceEnabled);
-    try {
-      window.localStorage.setItem(
-        VOICE_ENABLED_STORAGE_KEY,
-        JSON.stringify(snap.voiceEnabled)
-      );
-    } catch {
-      // ignore storage errors
+    writeStoredPref('morrow_voice_enabled_v1', snap.voiceEnabled);
+    if (!window.electronAPI?.isElectron) {
+      try { window.localStorage.setItem(VOICE_ENABLED_STORAGE_KEY, JSON.stringify(snap.voiceEnabled)); }
+      catch { /* browser legacy setting is best-effort; preference store remains primary */ }
     }
   };
 
@@ -1361,12 +1367,44 @@ export default function App() {
   const [newBlockedCategoryInput, setNewBlockedCategoryInput] = useState<string>('');
   const [askScreenPreviewModalOpen, setAskScreenPreviewModalOpen] = useState<boolean>(false);
   const [pendingAskScreenPrompt, setPendingAskScreenPrompt] = useState<string>('');
+  const [showSkillRecorderStudio, setShowSkillRecorderStudio] = useState(false);
   const [recordedSkills, setRecordedSkills] = useState<DraftRecordedSkill[]>(() =>
-    buildDefaultDomainNeutralRecordedSkills()
+    Array.isArray(window.__BLAIZE_BOOTSTRAP_RECORDED_SKILLS__)
+      ? (window.__BLAIZE_BOOTSTRAP_RECORDED_SKILLS__ as DraftRecordedSkill[])
+      : buildDefaultDomainNeutralRecordedSkills()
   );
   const [activeRecordingSession, setActiveRecordingSession] = useState<RecordingSession | null>(
-    null
+    (window.__BLAIZE_BOOTSTRAP_ACTIVE_RECORDING__ as RecordingSession | null) || null
   );
+  const screenCaptureRef = useRef<ScreenCaptureSource | null>(null);
+
+  useEffect(() => {
+    if (!window.electronAPI?.isElectron) return;
+    if (activeRecordingSession?.endedAt) {
+      void Promise.all([
+        window.electronAPI.storage.putRecord('recorder_sessions', {
+          id: activeRecordingSession.id, collection: 'recorder_sessions', data: { session: activeRecordingSession },
+          createdAt: Date.parse(activeRecordingSession.startedAt) || Date.now(), updatedAt: Date.now(),
+        }),
+        window.electronAPI.storage.deleteRecord('recorder_sessions', 'active'),
+      ]).catch((error) => console.error('Unable to archive recording session in SQLite.', error));
+    } else if (activeRecordingSession) {
+      void window.electronAPI.storage.putRecord('recorder_sessions', {
+        id: 'active', collection: 'recorder_sessions', data: { session: activeRecordingSession },
+        createdAt: Date.parse(activeRecordingSession.startedAt) || Date.now(), updatedAt: Date.now(),
+      }).catch((error) => console.error('Unable to persist recording session in SQLite.', error));
+    } else {
+      void window.electronAPI.storage.deleteRecord('recorder_sessions', 'active').catch(() => undefined);
+    }
+  }, [activeRecordingSession]);
+
+  useEffect(() => {
+    if (!window.electronAPI?.isElectron) return;
+    void window.electronAPI.storage.putRecord('recorder_skills', {
+      id: 'current', collection: 'recorder_skills', data: { skills: recordedSkills },
+      createdAt: Date.now(), updatedAt: Date.now(),
+    }).catch((error) => console.error('Unable to persist recorded skills in SQLite.', error));
+  }, [recordedSkills]);
 
   // Timer for active skill recording
   useEffect(() => {
@@ -1377,26 +1415,74 @@ export default function App() {
     return () => window.clearInterval(interval);
   }, [isRecordingSkill, isRecordingPaused]);
 
-  const handleStartRecordingAfterConsent = () => {
+  const handleStartRecordingAfterConsent = async () => {
     const newSession: RecordingSession = {
       id: `rec_${Date.now()}`,
       startedAt: new Date().toISOString(),
       sourceType: recorderSourceType,
-      sourceLabel:
-        recorderSourceType === 'screen'
-          ? 'Screen view only'
-          : recorderSourceType === 'in_app'
-            ? 'In-app events'
-            : 'Full desktop (not available in this preview)',
+      sourceLabel: recorderSourceType === 'screen'
+        ? 'Selected display video + keyframes'
+        : recorderSourceType === 'in_app' ? 'In-app events' : 'Selected display (native system picker)',
       retentionPolicy: consentRetention,
-      encryptedLocal: true,
-      keyframes: [],
-      events: [],
-      narration: [],
-      autoPausedCount: 0,
+      encryptedLocal: false,
+      keyframes: [], mediaSegments: [], events: [], narration: [], autoPausedCount: 0,
       blockedCategories: blockedAppCategories,
       userApprovedKeyframesForCompile: false,
     };
+
+    if (recorderSourceType === 'screen' || recorderSourceType === 'native_stub') {
+      const consent: RecorderConsentRecord = {
+        consentId: newSession.id,
+        grantedAtIso: new Date().toISOString(),
+        selectedSource: 'screen_capture',
+        retentionPolicy: consentRetention,
+        credentialAutoPauseEnabled: true,
+        blockedAppCategories,
+        narrationMode: 'off',
+      };
+      const capture = new ScreenCaptureSource(undefined, undefined, (meta) => {
+        const keyframe: RecordedKeyframe = {
+          id: meta.id, timestamp: meta.timestampMs, sourceType: recorderSourceType,
+          width: meta.width, height: meta.height, jpegQuality: 0.66,
+          diffScore: meta.pixelDiffPct, sha256Hash: meta.blobHash || meta.sha256Hash,
+          indexedDbKey: meta.id, blobHash: meta.blobHash, storageBackend: meta.storageBackend,
+          blurRegions: meta.blurRegions, annotation: meta.caption, inferredFromPixelsOnly: true,
+        };
+        setActiveRecordingSession((previous) => previous ? { ...previous, keyframes: [...previous.keyframes, keyframe] } : previous);
+      }, () => {
+        screenCaptureRef.current = null;
+        setIsRecordingSkill(false);
+        setIsRecordingPaused(false);
+        setScreenAwarenessMode('off');
+        setActiveRecordingSession((previous) => previous && !previous.endedAt
+          ? { ...previous, endedAt: new Date().toISOString() }
+          : previous);
+        setShowSkillRecorderStudio(true);
+        setActiveView('skills');
+        setAutoPauseReason('The selected display stopped sharing. Blaize finalized the video and keyframe timeline.');
+      }, (segment: RecordingMediaSegmentMeta) => {
+        setActiveRecordingSession((previous) => previous ? {
+          ...previous, mediaSegments: [...(previous.mediaSegments || []), segment],
+        } : previous);
+      }, (message: string) => {
+        setIsRecordingPaused(true);
+        setAutoPauseReason(message);
+      });
+      screenCaptureRef.current = capture;
+      const captureStatus = await capture.start(consent);
+      if (!captureStatus.active) {
+        screenCaptureRef.current = null;
+        window.alert(captureStatus.blockExplanation || captureStatus.fallbackSuggestion || 'Screen capture could not be started. No recording session was created.');
+        return;
+      }
+      if (!captureStatus.videoRecordingActive) {
+        screenCaptureRef.current = null;
+        await capture.stop();
+        window.alert(captureStatus.mediaRecordingError || 'Continuous video capture could not be started. No recording session was created.');
+        return;
+      }
+    }
+
     setActiveRecordingSession(newSession);
     setConsentSheetOpen(false);
     setScreenAwarenessMode('recording');
@@ -1406,41 +1492,45 @@ export default function App() {
     setAutoPauseReason(null);
     setMorrowState('attentive');
     ledger.appendEvent({
-      actor: 'user',
-      type: 'recording_started',
+      actor: 'user', type: 'recording_started',
       summary: `Started skill recording (${newSession.sourceLabel}) with retention: ${consentRetention}.`,
-      payload: JSON.stringify({
-        sessionId: newSession.id,
-        sourceType: recorderSourceType,
-        retentionPolicy: consentRetention,
-      }),
-      trustLevel: 'user_stated',
-      missionId: newSession.id,
+      payload: JSON.stringify({ sessionId: newSession.id, sourceType: recorderSourceType, retentionPolicy: consentRetention }),
+      trustLevel: 'user_stated', missionId: newSession.id,
     });
     bumpLedger();
   };
 
   const handlePauseResumeRecording = () => {
     if (!isRecordingSkill) return;
-    setIsRecordingPaused((prev) => {
-      const next = !prev;
-      if (!next) setAutoPauseReason(null);
-      return next;
-    });
+    const next = !isRecordingPaused;
+    const status = next
+      ? screenCaptureRef.current?.pause()
+      : screenCaptureRef.current?.resume();
+    const actuallyPaused = status?.paused ?? next;
+    setIsRecordingPaused(actuallyPaused);
+    if (!actuallyPaused) setAutoPauseReason(null);
+    else if (status?.mediaRecordingError) setAutoPauseReason(status.mediaRecordingError);
   };
 
-  const handleStopAndReviewRecording = () => {
+  const handleStopAndReviewRecording = async () => {
+    const capture = screenCaptureRef.current;
+    if (capture) {
+      const finalStatus = await capture.stop();
+      if (finalStatus.mediaRecordingError) setAutoPauseReason(finalStatus.mediaRecordingError);
+    }
+    screenCaptureRef.current = null;
     setIsRecordingSkill(false);
     setIsRecordingPaused(false);
     setScreenAwarenessMode('off');
     setActiveRecordingSession((prev) =>
-      prev ? { ...prev, endedAt: new Date().toISOString() } : prev
+      prev ? { ...prev, endedAt: prev.endedAt || new Date().toISOString() } : prev
     );
+    setShowSkillRecorderStudio(true);
     setActiveView('skills');
     ledger.appendEvent({
       actor: 'user',
       type: 'recording_stopped',
-      summary: `Stopped skill recording and opened local keyframe review timeline.`,
+      summary: 'Stopped skill recording and finalized its local video and keyframe review timeline.',
       payload: JSON.stringify({
         sessionId: activeRecordingSession?.id,
         elapsedSec: recordingElapsedSec,
@@ -1454,6 +1544,7 @@ export default function App() {
   const handleRecordStageEvent = (
     eventInput: Omit<RecordedInteractionEvent, 'id' | 'timestamp'>
   ) => {
+    if (!isRecordingSkill || isRecordingPaused) return;
     const protection = evaluateCredentialAndAppProtection({
       urlOrApp: eventInput.urlOrApp,
       inputType: eventInput.isCredentialField ? 'password' : 'text',
@@ -1470,7 +1561,8 @@ export default function App() {
       ...eventInput,
       id: `ev_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
       timestamp: Date.now(),
-      value: eventInput.isCredentialField ? '{{SECRET_REDACTED}}' : eventInput.value,
+      isCredentialField: Boolean(eventInput.isCredentialField || protection.isSecretField),
+      value: protection.shouldAutoPause ? '{{SECRET_REDACTED}}' : eventInput.value,
     };
     setActiveRecordingSession((prev) => {
       const base: RecordingSession = prev || {
@@ -1479,7 +1571,7 @@ export default function App() {
         sourceType: recorderSourceType,
         sourceLabel: 'In-app events',
         retentionPolicy: consentRetention,
-        encryptedLocal: true,
+        encryptedLocal: false,
         keyframes: [],
         events: [],
         narration: [],
@@ -1497,51 +1589,61 @@ export default function App() {
     });
   };
 
-  const handleAddManualKeyframe = (
+  const handleAddManualKeyframe = async (
     label: string,
     dataUrl?: string,
     pixelInferred = false
   ) => {
+    if (!dataUrl && screenCaptureRef.current) {
+      const saved = await screenCaptureRef.current.captureCheckpoint(label);
+      if (!saved) setAutoPauseReason(screenCaptureRef.current.getStatus().blockExplanation || 'The live display frame is not ready yet. Try the checkpoint again after the screen is shared.');
+      return;
+    }
+    if (!dataUrl) {
+      setAutoPauseReason('No real screenshot was supplied. Blaize does not create placeholder frames for a recording.');
+      return;
+    }
     const frameId = `kf_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-    const hash = computeDeterministicHash(`${frameId}|${label}`);
     const frame: RecordedKeyframe = {
-      id: frameId,
-      timestamp: Date.now(),
-      sourceType: recorderSourceType,
-      width: 640,
-      height: 360,
-      jpegQuality: 0.72,
-      diffScore: 14.8,
-      sha256Hash: hash,
-      indexedDbKey: `idb_kf_${frameId}`,
-      blurRegions: [],
-      annotation: label,
+      id: frameId, timestamp: Date.now(), sourceType: recorderSourceType,
+      width: 640, height: 360, jpegQuality: 0.72, diffScore: 14.8,
+      sha256Hash: computeDeterministicHash(`${frameId}|${label}`),
+      indexedDbKey: frameId, blurRegions: [], annotation: label,
       inferredFromPixelsOnly: pixelInferred,
     };
-    void saveKeyframeToIndexedDb(
-      frame.indexedDbKey,
-      dataUrl || `data:image/jpeg;base64,SIMULATED_JPEG_${hash.slice(0, 12)}`
-    );
-    setActiveRecordingSession((prev) => {
-      const base: RecordingSession = prev || {
-        id: `rec_${Date.now()}`,
-        startedAt: new Date().toISOString(),
-        sourceType: recorderSourceType,
-        sourceLabel: 'In-app events',
-        retentionPolicy: consentRetention,
-        encryptedLocal: true,
-        keyframes: [],
-        events: [],
-        narration: [],
-        autoPausedCount: 0,
-        blockedCategories: blockedAppCategories,
-        userApprovedKeyframesForCompile: false,
-      };
-      return {
-        ...base,
-        keyframes: [...base.keyframes, frame],
-      };
-    });
+    try {
+      const saved = await saveKeyframeToIndexedDb({
+        id: frame.id,
+        timestampMs: frame.timestamp,
+        elapsedSeconds: Math.max(0, Math.floor((frame.timestamp - (Date.parse(activeRecordingSession?.startedAt || '') || frame.timestamp)) / 1000)),
+        width: frame.width,
+        height: frame.height,
+        mimeType: 'image/jpeg',
+        byteSize: 0,
+        sha256Hash: frame.sha256Hash,
+        pixelDiffPct: frame.diffScore,
+        sourceKind: recorderSourceType === 'in_app' ? 'in_app' : 'screen_capture',
+        caption: label,
+        blurRegions: frame.blurRegions,
+        approvedForCompile: true,
+        storedInIndexedDb: false,
+      }, dataUrl);
+      frame.sha256Hash = saved.blobHash || saved.sha256Hash;
+      frame.blobHash = saved.blobHash;
+      frame.indexedDbKey = saved.id;
+      frame.storageBackend = saved.storageBackend;
+      setActiveRecordingSession((prev) => {
+        const base = prev || {
+          id: `rec_${Date.now()}`, startedAt: new Date().toISOString(), sourceType: recorderSourceType,
+          sourceLabel: recorderSourceType === 'in_app' ? 'In-app events' : 'Selected display video + keyframes',
+          retentionPolicy: consentRetention, encryptedLocal: false, keyframes: [], events: [], narration: [],
+          autoPausedCount: 0, blockedCategories: blockedAppCategories, userApprovedKeyframesForCompile: false,
+        };
+        return { ...base, keyframes: [...base.keyframes, frame] };
+      });
+    } catch (error: any) {
+      setAutoPauseReason(`Keyframe was not saved: ${error?.message || 'persistent storage failed'}`);
+    }
   };
 
   useEffect(() => {
@@ -3798,7 +3900,99 @@ export default function App() {
 
         {/* VIEW 4: LIBRARY -> SKILLS (One place, simple: cards, filters, New skill -> Record it / Describe it / From a chat, detail with steps, Try it, Edit, History, Advanced) */}
         {activeView === 'skills' && (
-          <UnifiedSkillsPageView
+          <main className="flex-1 min-h-0 overflow-y-auto p-6 space-y-5">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <h2 className="text-sm font-semibold text-[var(--text-primary)]">Skill recorder</h2>
+                <p className="text-xs text-[var(--text-secondary)]">Capture a real desktop task, review its video and keyframes, then compile a reusable skill.</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowSkillRecorderStudio((visible) => !visible)}
+                className="px-3 py-2 rounded-xl border border-[var(--border-subtle)] text-xs font-semibold text-[var(--text-primary)] hover:bg-[var(--bg-muted)]"
+              >
+                {showSkillRecorderStudio ? 'Hide Recorder Studio' : 'Open Recorder Studio'}
+              </button>
+            </div>
+            {showSkillRecorderStudio && (
+              <SkillRecorderStudio
+                screenAwarenessMode={screenAwarenessMode}
+                onChangeScreenAwarenessMode={setScreenAwarenessMode}
+                activeSourceType={recorderSourceType}
+                onChangeSourceType={setRecorderSourceType}
+                isRecording={isRecordingSkill}
+                isPaused={isRecordingPaused}
+                autoPauseReason={autoPauseReason}
+                activeSession={activeRecordingSession}
+                recordedSkills={recordedSkills}
+                onUpdateRecordedSkills={setRecordedSkills}
+                onOpenConsentSheet={() => setConsentSheetOpen(true)}
+                onStartRecordingAfterConsent={handleStartRecordingAfterConsent}
+                onPauseResumeRecording={handlePauseResumeRecording}
+                onStopAndReviewRecording={handleStopAndReviewRecording}
+                onRecordStageEvent={handleRecordStageEvent}
+                onAddManualKeyframe={handleAddManualKeyframe}
+                onAddNarration={(note, mode) => {
+                  setActiveRecordingSession((previous) => previous ? {
+                    ...previous,
+                    narration: [...previous.narration, { id: `nar_${Date.now()}`, timestamp: Date.now(), text: note, mode }],
+                  } : previous);
+                }}
+                onDeleteKeyframe={(frameId) => {
+                  void deleteKeyframesFromIndexedDb([frameId]);
+                  setActiveRecordingSession((previous) => previous ? {
+                    ...previous, keyframes: previous.keyframes.map((frame) => frame.id === frameId ? { ...frame, deleted: true } : frame),
+                  } : previous);
+                }}
+                onAddBlurRegionToFrame={(frameId, label) => {
+                  setActiveRecordingSession((previous) => previous ? {
+                    ...previous,
+                    keyframes: previous.keyframes.map((frame) => frame.id === frameId ? {
+                      ...frame,
+                      blurRegions: [...frame.blurRegions, { id: `blur_${Date.now()}`, xPct: 10, yPct: 10, widthPct: 20, heightPct: 12, label }],
+                    } : frame),
+                  } : previous);
+                }}
+                onDiscardRecording={async () => {
+                  const sessionToDiscard = activeRecordingSession;
+                  const capture = screenCaptureRef.current;
+                  if (capture) await capture.stop();
+                  screenCaptureRef.current = null;
+                  if (sessionToDiscard) {
+                    await deleteKeyframesFromIndexedDb(sessionToDiscard.keyframes.map((frame) => frame.id));
+                    await deleteRecordingMediaSegments(sessionToDiscard.mediaSegments || []);
+                    if (window.electronAPI?.isElectron) {
+                      await window.electronAPI.storage.deleteRecord('recorder_sessions', sessionToDiscard.id).catch(() => undefined);
+                      await window.electronAPI.storage.deleteRecord('recorder_sessions', 'active').catch(() => undefined);
+                    }
+                  }
+                  setActiveRecordingSession(null);
+                  setIsRecordingSkill(false);
+                  setIsRecordingPaused(false);
+                  setScreenAwarenessMode('off');
+                  setRecordingElapsedSec(0);
+                  setAutoPauseReason(null);
+                }}
+                onCompleteRecordingRetention={async (sessionToClean) => {
+                  await deleteKeyframesFromIndexedDb(sessionToClean.keyframes.map((frame) => frame.id));
+                  await deleteRecordingMediaSegments(sessionToClean.mediaSegments || []);
+                  setActiveRecordingSession((previous) => previous?.id === sessionToClean.id ? {
+                    ...previous,
+                    keyframes: previous.keyframes.map((frame) => ({ ...frame, deleted: true })),
+                    mediaSegments: [],
+                  } : previous);
+                }}
+                onRecordLedgerEvent={(title, summary, details) => {
+                  ledger.appendEvent({
+                    actor: 'operator', type: 'skill_created', summary: `${title}: ${summary}`,
+                    payload: JSON.stringify(details), trustLevel: 'verified_by_evidence', missionId: activeRecordingSession?.id || 'skill-recorder',
+                  });
+                  bumpLedger();
+                }}
+                isLiveModelMode={modelRouter.getMode() === 'live'}
+              />
+            )}
+            <UnifiedSkillsPageView
             skills={unifiedSkills}
             threads={threads.map((t) => ({ id: t.id, title: t.title }))}
             isLight={isLight}
@@ -3828,7 +4022,7 @@ export default function App() {
               });
               bumpLedger();
             }}
-            onStartRecordingSkill={() => setConsentSheetOpen(true)}
+            onStartRecordingSkill={() => { setShowSkillRecorderStudio(true); setConsentSheetOpen(true); }}
             onTrySkillInChat={(skill) => {
               setUnifiedSkills((prev) =>
                 prev.map((s) => (s.id === skill.id ? { ...s, lastUsed: 'Just now' } : s))
@@ -3846,6 +4040,7 @@ export default function App() {
               handleSendMessage(`Run skill "${skill.name}": ${skill.oneLineDescription}`);
             }}
           />
+          </main>
         )}
 
         {/* VIEW 5: LIBRARY -> SOUL (Identity, voice style, role/job description, personality template: Download Template, Import, Remove — no memory and no skills) */}
@@ -4568,6 +4763,7 @@ export default function App() {
           <div className="flex-1 overflow-hidden">
             <PCOperatorView
               initialTab={activeView === 'doctor' ? 'doctor' : 'loop'}
+              modelRouter={modelRouter}
               howMuchShouldIAsk={howMuchShouldIAsk}
               onChangeHowMuchShouldIAsk={setHowMuchShouldIAsk}
               onRecordAuditEvent={(summary, details) => {
@@ -5712,16 +5908,16 @@ export default function App() {
                 <div className="font-semibold">What will &amp; will not be captured:</div>
                 <ul className="list-disc pl-4 space-y-0.5 text-[11px]">
                   <li>
-                    <strong>Captured:</strong> Only meaningful keyframe changes (downscaled JPEG in
-                    local IndexedDB, never held in RAM) and in-app element intents.
+                    <strong>Captured:</strong> The entire display you select, as local video-only WebM segments, plus sampled JPEG keyframes and in-app event notes.
                   </li>
                   <li>
-                    <strong>Never Captured:</strong> Password, OTP, PIN, and CVV fields auto-pause
-                    recording and become runtime placeholders (<code>{'{{SECRET_...}}'}</code>).
+                    <strong>Privacy boundary:</strong> Detected in-app password/OTP/PIN values are redacted and can auto-pause. Native display video cannot reliably identify every sensitive field in every external application; close sensitive windows and pause capture before entering private data.
                   </li>
                   <li>
-                    <strong>Review First:</strong> Nothing leaves your device or is sent to the
-                    compiler until you review and approve selected keyframes.
+                    <strong>Local storage:</strong> Recording data is stored locally but this recorder layer does not encrypt SQLite/IndexedDB media at rest. Anyone with access to the local app data directory may be able to read retained recordings.
+                  </li>
+                  <li>
+                    <strong>Review First:</strong> Video and frame segments stay in local storage. Nothing is uploaded or sent to a model by the recorder; review the recording before compiling a skill.
                   </li>
                   <li>
                     <strong>How to Stop Anytime:</strong> Click the red Stop button on {companionName} or
@@ -5743,18 +5939,13 @@ export default function App() {
                   }`}
                 >
                   <option value="in_app">In-app events (Real DOM &amp; Desktop Stage)</option>
-                  <option value="screen">
-                    Screen view only (Real Web getDisplayMedia)
-                  </option>
-                  <option value="native_stub">
-                    Full desktop (not available in this preview — documented stub)
-                  </option>
+                  <option value="screen">Selected display (video + keyframes; native picker in desktop app)</option>
                 </select>
               </div>
 
               <div>
                 <label className="block font-semibold mb-1 text-stone-200">
-                  Local Storage Retention (IndexedDB)
+                  Local Retention (SQLite on desktop, IndexedDB in browser preview)
                 </label>
                 <select
                   value={consentRetention}
@@ -5769,9 +5960,8 @@ export default function App() {
                   }`}
                 >
                   <option value="delete_after_compile">
-                    Delete keyframes immediately after skill compile (Default)
+                    Delete video and keyframes immediately after skill compile (Default)
                   </option>
-                  <option value="keep_24h">Keep locally for 24 hours</option>
                   <option value="keep_until_deleted">Keep locally until manually deleted</option>
                 </select>
               </div>
@@ -6006,12 +6196,12 @@ export default function App() {
         recordingElapsedSec={recordingElapsedSec}
         activeRecorderSourceLabel={
           recorderSourceType === 'screen'
-            ? 'Screen view only'
+            ? 'Selected display video + keyframes'
             : recorderSourceType === 'in_app'
               ? 'In-app events'
-              : 'Full desktop (stub)'
+              : 'Selected display (native system picker)'
         }
-        onOpenRecordConsent={() => setConsentSheetOpen(true)}
+        onOpenRecordConsent={() => { setShowSkillRecorderStudio(true); setConsentSheetOpen(true); }}
         onPauseResumeRecording={handlePauseResumeRecording}
         onStopAndReviewRecording={handleStopAndReviewRecording}
         onAddRecordingNote={(noteText) => {

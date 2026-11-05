@@ -1,0 +1,307 @@
+# Argon Build Prompt: Redesign Blaize into the Living Anime Desktop Companion
+
+## Your assignment
+
+You are Argon, working inside the existing Blaize project. Refine and implement the current application into the product described below. This is a **targeted redesign and functional improvement of the existing codebase**, not a request to generate a new mockup or rewrite everything from scratch.
+
+The current UI/UX is not acceptable because the companion looks or behaves like iPhone AssistiveTouch. Replace that interaction concept completely. Blaize must present a **real floating, animated 2D anime girl** on the desktop, not a circular button or bubble that opens a radial action menu.
+
+Work within the existing repository, inspect its code and assets first, preserve useful working functionality, and make changes in small tested increments. The GitHub repository currently has an archive named `blaize-—-the-accountable-ai-desktop.zip`; inspect the actual source/archive and unpack it into the working tree if needed before making assumptions. Do not claim to have inspected source files that you have not opened. Keep the project’s existing stack unless there is a concrete blocker; explain any necessary migration before doing it.
+
+**For this pass, focus on UI/UX, companion behaviour, app discovery, personality/rule/plugin management, music, and scheduling. Do not perform live Meta API calls or require API keys yet.** Add or preserve clean provider interfaces and an explicitly labelled local/demo mode so Muse can refine the project and real Meta API calls can be configured and tested later. Never fake a successful API call.
+
+Do not push commits, deploy, alter production data, or incur paid API costs. Work locally unless I explicitly approve another action.
+
+## 1. Product direction
+
+Blaize is a modular AI desktop environment. Its default companion is named **Morrow** (the first-run user may rename her). Morrow is an anime-style 2D female character who lives on the desktop, responds to natural-language prompts, behaves naturally over time, learns how the user works with permission, and uses the computer’s tools to complete missions.
+
+Blaize contains:
+
+- **Morrow companion:** the floating animated character and her conversational interface.
+- **Blaize Core:** planning, memory, app/tool orchestration, permissions, verification, rules, and resource management.
+- **Blaize Browser:** real Chromium-based tabs and isolated persistent browser profiles.
+- **Pocket tools:** integrated workspaces for coding, files, research, music, and automation as they become functional.
+- **Plugins and skills:** importable extensions and reusable workflows that Morrow can help create, test, and maintain.
+- **Schedules and missions:** user-defined time-based or conditional tasks, with clear execution policies.
+
+The application must feel like one coherent desktop environment, not a dashboard of unrelated cards and not a chatbot with a mascot.
+
+## 2. Redesign the desktop companion completely
+
+### Mandatory visual requirement
+
+Render an actual anime-style 2D character with a transparent background, visible body and expressive pose. It should feel like a lightweight desktop pet or animated companion. **Do not use AssistiveTouch, a circular floating button, a generic orb, a chat bubble as the character, or a radial menu as the primary experience.**
+
+Implement the companion as a separate transparent, always-on-top desktop window with:
+
+- Drag-to-move positioning and safe screen-edge placement.
+- Configurable size, opacity, always-on-top, launch-at-login, and hide/show.
+- Clear hit testing: clicking the character interacts with her; unused transparent areas do not block the desktop.
+- A small, contextual interaction surface when the user talks to or selects her, not a permanent large panel.
+- Keyboard-accessible controls and reduced-motion mode.
+- Low idle CPU/GPU usage and no constant expensive model calls.
+- Sensible behaviour across multiple monitors, display scaling, and window changes.
+
+Create an asset/animation pipeline with replaceable sprites, layered artwork, or compatible 2D animation assets. Use an original placeholder character or existing project artwork if available; do not copy a copyrighted anime character. If production-quality art is not present, build a working placeholder animation rig and document where final artwork can be dropped in. Do not pretend static artwork is animated.
+
+### Natural behaviour and model-directed actions
+
+Morrow must support at least these animation/action states:
+
+- Idle/standing, blinking, breathing, looking around.
+- Sitting and resting/sleeping.
+- Walking or running across a safe portion of the screen.
+- Dancing, with multiple short loopable dance variants.
+- Listening, thinking, speaking, working, waiting, success, confused/uncertain, and recovering.
+- Music-reactive dancing when music is playing and the user’s settings allow it.
+
+These are not tasks that require the user to click a button every time. Morrow should transition naturally according to deterministic animation rules and real application events. The model may request an action such as `sit`, `run_to_safe_position`, `dance`, `rest`, `listen`, or `celebrate`, but a local animation controller executes the approved action without another model call. Use bounded duration, cooldown, context, and focus rules to prevent distracting behaviour.
+
+Example behaviours:
+
+- On idle, she occasionally blinks, shifts posture, looks around, or sits/rests. Do not make her constantly move.
+- When called by name, she wakes, turns or looks toward the user, and listens if voice is enabled.
+- When a mission starts, she may become attentive or working.
+- When a mission is verifying, she visibly focuses; when verified, she may briefly celebrate.
+- When blocked or uncertain, she signals that state instead of acting confident.
+- If the user says “Morrow, dance”, she dances. “Sit down for a while” makes her sit for a sensible duration. “Go rest” puts her into a resting state. “Run over here” triggers a safe, bounded on-screen run.
+- If music is playing and dance-along is enabled, she may move in time with the music. This must be local animation behaviour, not repeated calls to an AI model.
+
+Create a small validated animation command schema and an animation state machine. Natural-language intent can map to that schema, but invalid actions, coordinates, timing, and repeated commands must be constrained by local code. Animation should never obstruct full-screen work or steal focus without user permission.
+
+## 3. First-run onboarding and naming
+
+The first run should feel personal and polished. Present a short setup wizard, with skip options where appropriate:
+
+1. Welcome to Blaize and explain what Morrow can do.
+2. Let the user choose a display name for the companion; default to “Morrow”. Keep the underlying product name Blaize.
+3. Let the user choose an animation scale, visual theme, and whether the character appears on startup.
+4. Offer optional microphone permission and setup for wake phrase/voice input. Recording a voice sample is only for a clearly explained supported purpose; do not silently retain raw recordings.
+5. Offer optional identity verification setup: a user-defined secret phrase/code, or operating-system-native authentication where available. Custom voice matching or face recognition may be an optional convenience signal, but must not be treated as secure proof by itself for high-risk actions. Prefer Windows Hello, Touch ID, or equivalent OS authentication for sensitive approvals. Never send face images or voice enrolment samples to a model by default.
+6. Explain browser profile persistence, app discovery, memory, scheduled tasks, plugins, permissions, and cloud settings in plain language.
+7. Finish at the main workspace with the anime companion already visible.
+
+Let users later change the companion name, privacy settings, voice, wake phrase, and appearance without reinstalling the application.
+
+## 4. Personality: one starting personality, user-editable
+
+Ship **only Morrow** as the initial built-in personality. Do not add Architect, Sage, Sentinel, Muse, or a gallery of prebuilt personas in this pass.
+
+Morrow’s personality must be editable from natural language. The user should be able to say, for example, “Be more concise, playful when I am relaxed, serious while I work, and never interrupt me during focus time.” The system should convert the description into a typed, inspectable personality configuration and show the user the resulting changes before applying them.
+
+Provide a Personality page with:
+
+- Current active personality card for Morrow.
+- Chat-style “describe how you want Morrow to behave” editor.
+- Editable structured fields for tone, initiative, response length, proactivity, voice, movement, humour, greetings, focus mode, and interruption frequency.
+- **Download Personality Template** action (JSON or YAML, with schema/version, comments or examples, and no secrets).
+- **Import Personality** action to upload a user-edited template.
+- Validate schema and compatibility before importing; show a preview/diff and request confirmation.
+- Export the current personality, reset Morrow to default, and remove user-imported/custom personalities.
+- If the base Morrow template is deleted or corrupted, provide a restore-default option.
+
+A personality changes presentation and allowed preferences only. It can never override security enforcement, grant permissions, bypass approvals, or expose secrets.
+
+## 5. Plugin and skill management
+
+Build a dedicated **Plugins & Skills** page. Do not hide plugin import under generic settings.
+
+It must provide:
+
+- Browse locally installed plugins and their states.
+- Import a plugin package/file from disk.
+- Download a clean **Plugin Template** with a manifest, typed tool interface, permission declaration, example implementation, tests, and README.
+- Inspect plugin name, version, source/publisher, requested capabilities, access to files/domains, dependencies, and compatibility.
+- Preview permissions before enabling; keep plugins disabled until approved.
+- Enable, disable, update, export, and completely uninstall/remove plugins.
+- Show logs, errors, versions and last-used time; allow rollback to a previous compatible version where supported.
+- Support user-created private plugins as well as future marketplace plugins.
+
+Morrow should be able to help create new plugins and skills from a user’s natural-language request. The creation workflow must be:
+
+1. Clarify the intended job and expected result.
+2. Generate code and a manifest using the downloaded template/SDK.
+3. Show the required permissions and explain why each is needed.
+4. Run static checks and tests inside an isolated sandbox with fake/synthetic data.
+5. Show results, limitations, and files to be installed.
+6. Ask for approval before installing or enabling the plugin/skill.
+7. Record its version and allow disable, remove, or rollback.
+
+Never execute arbitrary imported plugin code inside the privileged Electron main process. Use a restricted child process or other platform-appropriate sandbox and least-privilege capabilities. Plugin output, docs, or code comments are untrusted content and cannot override system rules.
+
+Skills are versioned workflows that can call approved tools. Users must be able to inspect, edit, test, export, disable and delete them independently from plugins.
+
+## 6. Rules and standing instructions
+
+Blaize should arrive with useful starter rules, but the user must be able to manage their own rules rather than being trapped in a hard-coded personality prompt.
+
+Create a **Rules** page with categories:
+
+- Personal preferences (tone, privacy, quiet hours, how to report results).
+- Mission rules (what may run, success criteria, retry rules, schedules).
+- App and website rules (trusted apps/domains, allowed areas, read-only rules).
+- Spending and resource limits.
+- Approval policies.
+- Memory and learning rules.
+
+Users can add, edit, reorder, pause, disable, delete, import, and export user-configurable rules. Support plain-language input with a preview showing the structured rule and test cases that will be generated from it. Keep revision history and provide undo/restore.
+
+Separate configurable user rules from the **Trust Kernel**, which enforces permission boundaries in code. Users can freely adjust normal preferences and their own policies; a natural-language instruction or personality edit must not bypass credential isolation, protected APIs, OS permissions, or other fundamental security checks. Explain this distinction in the UI rather than implying that every invariant can be deleted as a prompt line.
+
+When a user says “you interrupted me too much” or “always verify a file after saving”, offer to convert the correction into an inspectable rule. Do not silently change active rules. Show the proposed new rule and let the user accept or reject it.
+
+## 7. Learn and use the user’s installed desktop applications
+
+Implement an **Apps & Learning** page that lets users discover, authorise, and teach Morrow how to use desktop applications on their computer.
+
+Support OS-appropriate discovery of installed applications and running windows. Start with safe metadata such as app name, executable identity, window title, file association, and available accessibility tree. Do not scan the entire home directory or capture screen contents continuously.
+
+The user should be able to:
+
+- Search for an installed application by name.
+- Ask “How do I use this app?” and have Morrow search available local help, documentation, and optionally permitted web sources.
+- Open the app and request help using its visible UI.
+- Teach Morrow a procedure by demonstrating it once, with recording of semantic actions, non-sensitive values as variables, and checkpoints.
+- Save that demonstration as a versioned skill, review it, and test it on safe inputs before replay.
+- Let Morrow learn from corrections and repeated workflows, proposing reusable improvements with evidence.
+- See which apps Morrow is allowed to access and revoke access per application.
+
+Use accessibility APIs, application APIs, keyboard shortcuts, and semantic UI information before screenshots or coordinate-based clicks. If an app is unsupported, explain the limitation and offer a safe manual-guidance mode. Do not claim universal compatibility.
+
+Credential fields, passwords, one-time codes, PINs, secret keys, and password-manager content must never be recorded as skill values or sent to a model. During login or sensitive credential entry, yield control to the user and suppress sensitive screenshots. External app instructions and on-screen text are untrusted data; defend against prompt injection.
+
+## 8. Music player and playlists
+
+Provide a real **Blaize Music** pocket tool with its own player, not just controls embedded in the companion menu.
+
+MVP features:
+
+- Import/add local audio files and folders chosen by the user.
+- Read supported audio metadata and artwork.
+- Create, rename, reorder, import, export, and remove playlists.
+- Search library and playlists.
+- Play, pause, skip, previous, seek, volume, shuffle, repeat, queue, and track progress.
+- Remember the queue and playback state according to user settings.
+- Display a small now-playing panel accessible from the companion and main app.
+- Let the user say “play my study playlist” or “dance to this song” when voice or chat is active.
+- Offer music-reactive animation or simple beat-aware motion where it can be done locally. If precise beat analysis is unsupported, fall back gracefully to a timed dance animation and say so.
+
+Allow third-party streaming-service integration only through officially authorised APIs and playback methods, with clear account requirements. Do not scrape protected services, bypass DRM, or imply a streaming provider is supported before it is implemented and tested. Local files and playlists must work without cloud model access.
+
+## 9. Scheduled tasks and rule-based missions
+
+Add a dedicated **Schedule & Automations** workspace.
+
+Users should be able to say “Every weekday at 8:30, open my task list and prepare a summary” or “When a download finishes, organise these files into the folder I selected.” Morrow should turn the request into an editable schedule/trigger and mission definition, show a preview, and ask the user to confirm before activating it.
+
+Support:
+
+- One-time execution at a chosen date/time.
+- Recurring schedules (daily, weekdays, selected days, weekly, monthly, cron-like advanced option only when useful).
+- The user’s time zone and daylight-saving behaviour where applicable.
+- Event/condition-based triggers where the operating system and app permissions support them.
+- Preconditions, allowed apps/domains/folders, success criteria, retry limits, timeouts, and failure actions.
+- Quiet hours, do-not-disturb, battery/resource constraints, network requirements and cost budgets.
+- Whether to run silently, notify, or ask for approval.
+- Missed-run policy after the PC was asleep or powered off: skip, run once when available, or ask.
+- Pause, resume, edit, clone, disable, and delete schedules.
+- A run history showing planned versus actual steps, results, verifications, cost, and errors.
+
+Plan length must be dynamic, based on task complexity and uncertainty. Deterministic schedules and simple operations should run without an LLM call. Use the model to interpret or adapt a mission when necessary; don't call it every minute just to check whether a schedule is due.
+
+The application must explain that tasks requiring the computer, network, or an unlocked desktop cannot always finish while the device is asleep, shut down, or offline. Do not promise background execution the OS cannot support.
+
+All scheduled missions pass through the same policy guard, mission checkpoints, and verifier as user-triggered tasks. Scheduling never grants new permissions. Sensitive or financial actions require the configured approval policy and must not execute merely because a schedule fired.
+
+## 10. Desktop app shell and UI/UX
+
+Redesign the main application into a clean, modern, high-quality desktop workspace. Avoid generic admin-dashboard cards, excessive empty space, a mobile-style AssistiveTouch interaction, and a permanent chatbot panel that dominates the screen.
+
+Suggested navigation:
+
+- Home / Companion
+- Missions
+- Browser
+- Apps & Learning
+- Workspace / Files
+- Music
+- Plugins & Skills
+- Personality
+- Rules
+- Schedule & Automations
+- Settings / Privacy / Models
+
+Do not expose unfinished modules as active features. If a page is not functional yet, hide it or clearly label it as coming later.
+
+The main workspace should prioritise the user's current mission and useful recent activity. The floating anime companion exists independently of the main window. Clicking her can open a compact chat/command panel; the full task manager lives in the main application. Provide intuitive global shortcuts, focus mode, useful empty states, clear loading and error states, and consistent light/dark styling.
+
+The character must be the actual visual identity of the product. Keep animation smooth and restrained. Use real assets and state transitions, not a circular icon masquerading as an animated figure.
+
+## 11. Core model and API policy for this pass
+
+Do not implement or test live Muse API calls during this UI/UX redesign pass. Do not request or invent an API key. Use a `ModelProvider` abstraction with a clearly labelled local mock/demo provider and structured sample outputs for development. Mock results must be visibly marked as simulated and cannot be reported as verified real-world actions.
+
+Keep integration points ready for later Meta model adapters, especially Muse Spark, Muse Wonder, Muse Image, Muse Voice Transcribe, SAM 3.1, Muse Glimmer, and Muse Spark Open. Later, Muse can refine the integrations and we will use valid credentials to test them. Make the provider settings page ready for future configuration, but do not fabricate live availability or responses.
+
+## 12. Token and compute efficiency
+
+- UI animation commands such as sit, rest, run and dance run locally from validated commands.
+- Music playback, playlist operations, schedule timers, basic app discovery, rule storage, file operations, and simple calculations should use deterministic code.
+- Make model calls only for natural-language interpretation, planning, complex decisions, app instruction help, or tasks where the model adds value.
+- Use short task summaries and retrieve only relevant memories.
+- Load plugin/tool schemas on demand rather than sending every tool definition for every request.
+- Prefer app accessibility trees and selected text over screenshots. Only capture screenshots when necessary and authorised.
+- Cache stable results and generated artwork; never regenerate the character on each launch.
+- Avoid model calls for every animation frame, audio beat, clock tick, or scheduler poll.
+- Respect quiet hours, focus mode, token/cost limits, and user-configured resource limits.
+- Keep a clear distinction between simulated metrics and actual provider usage.
+
+## 13. Security and safety requirements
+
+- Keep credentials out of renderer code, logs, memory, plugin output and skill files.
+- Separate untrusted web content, plugin output and generated code from trusted instructions.
+- Validate all IPC, imported templates, plugin manifests, rules, skills and animation commands.
+- Deny new plugin permissions by default.
+- Run third-party plugin code in a restricted process or sandbox, never in the privileged main process.
+- Do not read raw passwords, browser cookies, OTPs, PINs or secret keys.
+- Use OS-native authentication for sensitive approval when available; voice or custom face matching alone must not authorise high-risk actions.
+- Require explicit confirmation for destructive file operations, sending messages, purchases, external publication, sensitive account changes, and financial actions.
+- Keep user rules editable without allowing them to bypass actual code-level protections.
+- Provide pause, cancel, emergency stop, audit history, memory deletion and plugin removal.
+
+## 14. Implementation order
+
+1. Inspect the current project/archive, stack, existing UI, entry points, assets, and tests. Report a short audit and plan.
+2. Replace AssistiveTouch-like UI with a transparent floating anime character and a working animation state machine. This is the highest priority.
+3. Redesign the main shell and first-run onboarding/naming experience.
+4. Build the Personality page for Morrow, personality template download/import/export, preview, restore and removal of imported profiles.
+5. Build Plugins & Skills with template download, import, permission preview, sandbox/test status, disable and uninstall.
+6. Build Rules and correction-to-rule proposal flow.
+7. Build Apps & Learning with installed-app discovery and a safe Teach & Replay MVP.
+8. Build Music player and local playlists.
+9. Build Schedule & Automations with confirmation, conditions, budgets, policy checks and run history.
+10. Add regression tests for the Trust Kernel and ensure all unfinished functionality is hidden or honestly labelled.
+
+Do not stop after writing a plan or rendering mockups. Implement the first working vertical slice, run available checks, fix failures, and keep a changelog. Do not remove valuable existing functionality unless it conflicts with the requirements above; if replacement is necessary, explain it in the implementation report.
+
+## 15. Acceptance criteria
+
+The redesign is accepted only when evidence shows:
+
+1. The companion is visibly an animated 2D anime girl on a transparent floating desktop window—not an AssistiveTouch button.
+2. Morrow can idle naturally and respond to model/application events with the appropriate pose or movement without requiring a manual action button for each behaviour.
+3. Direct prompts such as “sit”, “run over here”, “dance”, and “go rest” map to controlled local animations.
+4. The user can name Morrow during first-run setup and change the name later.
+5. Morrow is the only default personality. Users can download the template, import their edited personality, preview changes, export, reset, and remove user-added personalities.
+6. Users can download a plugin template, import plugins, inspect permissions, test in a restricted environment, and remove plugins. Morrow can draft plugin/skill files, but installation requires user approval.
+7. Users can manage their own rules and turn corrections into reviewed, versioned rules.
+8. Blaize can discover authorised installed apps, explain how to use an app, and save a safe user-demonstrated workflow as a reusable skill.
+9. The music player works with user-selected local files and playlists without model/API access, and Morrow can trigger dance mode from natural language.
+10. Users can create, edit, pause, resume, and delete scheduled missions with time zone, conditions, limits, approval policy, and run history.
+11. Basic animation, music, scheduling and storage paths do not depend on a language model.
+12. No live Muse API call is made during this pass. Mock mode is labelled as simulated.
+13. Existing working features are preserved or deliberately replaced with documented reasons.
+14. Relevant unit/integration tests pass, and screenshots or a short screen recording demonstrate the redesigned desktop experience.
+
+At the end, report exactly what was changed, which tests were run and their results, which features are real versus mocked, what remains incomplete, and how to run the application locally. Do not say a feature works if only its UI exists.

@@ -131,6 +131,8 @@ export function buildPreloadApi(
           dataBase64: string;
           mimeType: string;
         } | null>,
+      deleteBlob: (hash: string) =>
+        ipc.invoke('storage:delete-blob', { hash }) as Promise<{ success: boolean }>,
     }),
     pcOperator: Object.freeze({
       listWindows: () =>

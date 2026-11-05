@@ -186,6 +186,14 @@ export async function packageDesktopTarget(
   copyDirectoryRecursive(path.join(rootDir, 'dist'), path.join(appResourcesDir, 'dist'));
   copyDirectoryRecursive(path.join(rootDir, 'dist-electron'), path.join(appResourcesDir, 'dist-electron'));
 
+  // Ship the generic Linux AT-SPI adapter outside app.asar so system Python can execute it.
+  const atspiResourceDir = path.join(unpackedDir, 'resources', 'scripts');
+  fs.mkdirSync(atspiResourceDir, { recursive: true });
+  fs.copyFileSync(
+    path.join(rootDir, 'scripts', 'linux-atspi-bridge.py'),
+    path.join(atspiResourceDir, 'linux-atspi-bridge.py')
+  );
+
   // Write clean production package.json inside resources/app
   const packagedPkgJson = {
     name: 'blaize-desktop',

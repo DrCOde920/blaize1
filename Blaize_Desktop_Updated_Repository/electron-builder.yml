@@ -1,0 +1,38 @@
+appId: com.blaize.desktop
+productName: Blaize
+copyright: Copyright © 2026 Blaize
+asar: true
+directories:
+  output: release
+  buildResources: public
+files:
+  - dist/**/*
+  - dist-electron/**/*
+  - package.json
+extraResources:
+  - from: scripts/linux-atspi-bridge.py
+    to: scripts/linux-atspi-bridge.py
+extraMetadata:
+  main: dist-electron/main.cjs
+linux:
+  target:
+    - dir
+    - tar.gz
+    - AppImage
+    - deb
+  category: Development
+  executableName: blaize-desktop
+mac:
+  target:
+    - dmg
+    - zip
+  category: public.app-category.developer-tools
+  hardenedRuntime: true
+  gatekeeperAssess: false
+win:
+  target:
+    - nsis
+    - zip
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true

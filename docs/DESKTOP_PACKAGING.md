@@ -16,7 +16,7 @@
 4. **Default-Deny Permission Handler**:
    - `setPermissionRequestHandler` and `setPermissionCheckHandler` deny camera, microphone, geolocation, notifications, USB, HID, and serial permissions by default, allowing only `clipboard-sanitized-write` from authorized origins.
 5. **Strict IPC Security Boundary (`IPC_CONTRACT_MANIFEST`)**:
-   - All 25 IPC channels are defined in `electron/ipc-contracts.ts` with runtime Zod request and response schemas (`validateIpcRequestPayload`, `validateIpcResponsePayload`).
+   - All IPC channels are defined in `electron/ipc-contracts.ts` with runtime Zod request and response schemas (`validateIpcRequestPayload`, `validateIpcResponsePayload`).
    - `validateIpcSender` verifies that every IPC call originates from the non-destroyed primary `mainFrame` of an allowed origin (rejecting child iframes/subframes with `UNTRUSTED_IPC_SUBFRAME_REJECTED` and untrusted URLs with `UNTRUSTED_IPC_ORIGIN_REJECTED`).
    - Non-read IPC channels are routed through `globalPolicyEngine.evaluateToolCall` before handler execution.
    - `electron/preload.ts` exposes a deeply frozen (`Object.freeze`) `window.electronAPI` bridge with narrow methods and zero exposure of `ipcRenderer`, `fs`, `child_process`, `shell`, `process`, or `require`.

@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import {
   Video,
   Square,
@@ -37,6 +37,7 @@ import {
   rollbackSkillToVersion,
   executeMultiSkillPlan,
   buildDemoMultiSkillPlan,
+  loadRecordingMediaBlob,
 } from '../packages/recorder';
 import { MemoryLedger } from '../packages/trust';
 
@@ -61,6 +62,7 @@ export interface SkillRecorderStudioProps {
   onDeleteKeyframe: (frameId: string) => void;
   onAddBlurRegionToFrame: (frameId: string, label: string) => void;
   onDiscardRecording: () => void;
+  onCompleteRecordingRetention?: (session: RecordingSession) => void | Promise<void>;
   onRecordLedgerEvent: (title: string, summary: string, details: Record<string, unknown>) => void;
   onPublishMultiSkillResultToChat?: (plan: SkillPlan, result: SkillPlanExecutionReport) => void;
   isLiveModelMode?: boolean;
@@ -86,6 +88,7 @@ export const SkillRecorderStudio: React.FC<SkillRecorderStudioProps> = ({
   onDeleteKeyframe,
   onAddBlurRegionToFrame,
   onDiscardRecording,
+  onCompleteRecordingRetention,
   onRecordLedgerEvent,
   onPublishMultiSkillResultToChat,
   isLiveModelMode = false,
@@ -123,6 +126,36 @@ export const SkillRecorderStudio: React.FC<SkillRecorderStudioProps> = ({
     allowed: boolean;
   } | null>(null);
   const [historySkillId, setHistorySkillId] = useState<string | null>(null);
+  const [recordingPreviewUrl, setRecordingPreviewUrl] = useState<string | null>(null);
+  const [compileGuardMessage, setCompileGuardMessage] = useState<string | null>(null);
+  const mediaSegmentCount = activeSession?.mediaSegments?.length || 0;
+
+  useEffect(() => {
+    let cancelled = false;
+    let objectUrl: string | null = null;
+    if (!activeSession?.endedAt || mediaSegmentCount < 1) {
+      setRecordingPreviewUrl(null);
+      return;
+    }
+    void loadRecordingMediaBlob(activeSession).then((blob) => {
+      if (cancelled || !blob) return;
+      objectUrl = URL.createObjectURL(blob);
+      setRecordingPreviewUrl(objectUrl);
+    }).catch((error) => {
+      if (!cancelled) {
+        setRecordingPreviewUrl(null);
+        console.error('Unable to load the locally stored desktop video for review.', error);
+      }
+    });
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [activeSession?.id, activeSession?.endedAt, mediaSegmentCount]);
+
+  useEffect(() => {
+    if (activeSession?.endedAt) setStudioTab('review');
+  }, [activeSession?.id, activeSession?.endedAt]);
 
   // Multi-Skill DAG Planner state
   const [selectedPlanSkillIds, setSelectedPlanSkillIds] = useState<string[]>(() =>
@@ -173,15 +206,18 @@ export const SkillRecorderStudio: React.FC<SkillRecorderStudioProps> = ({
   const handleApproveKeyframesAndCompile = () => {
     const activeFrames = activeSession?.keyframes.filter(k => !k.deleted) || [];
     const activeEvents = activeSession?.events || [];
+    setCompileGuardMessage(null);
+    if (activeEvents.length === 0) {
+      setCompileGuardMessage('No real action events were captured. Blaize has the video and keyframe timeline, but it will not invent clicks, typing, or file operations from screenshots. Add verified action events or use the in-app Desktop Stage before compiling a reusable skill.');
+      return;
+    }
 
-    const mappedEvents: CapturedActionEvent[] =
-      activeEvents.length > 0
-        ? activeEvents.map((ev, idx) => ({
+    const mappedEvents: CapturedActionEvent[] = activeEvents.map((ev, idx) => ({
             id: ev.id,
             timestampMs: ev.timestamp,
             elapsedSeconds: idx + 1,
             kind: ev.type,
-            sourceKind: activeSourceType === 'screen' ? 'screen_capture' : 'in_app',
+            sourceKind: activeSourceType === 'in_app' ? 'in_app' : 'screen_capture',
             targetSelector: ev.targetDescriptor,
             accessibleName: ev.accessibleName || ev.targetDescriptor,
             tagName: ev.type === 'type' ? 'INPUT' : 'BUTTON',
@@ -193,25 +229,7 @@ export const SkillRecorderStudio: React.FC<SkillRecorderStudioProps> = ({
             destinationPath: ev.type === 'file_op' ? `/workspace/notes/${stageNewFileName}` : undefined,
             appOrDomain: ev.urlOrApp || 'workspace.local',
             checkpointExpectedState: ev.isCheckpoint ? `${ev.accessibleName || 'Step'} verified` : undefined,
-          }))
-        : [
-            {
-              id: `ev_fallback_${Date.now()}`,
-              timestampMs: Date.now(),
-              elapsedSeconds: 1,
-              kind: 'file_op',
-              sourceKind: 'in_app',
-              targetSelector: 'button[data-stage="rename-file"]',
-              accessibleName: 'Rename Workspace File',
-              tagName: 'BUTTON',
-              role: 'button',
-              fileOpKind: 'rename',
-              filePath: `/workspace/notes/${stageFileName}`,
-              destinationPath: `/workspace/notes/${stageNewFileName}`,
-              appOrDomain: 'workspace.local',
-              checkpointExpectedState: `File ${stageNewFileName} exists with verified SHA-256 hash`,
-            },
-          ];
+          }));
 
     const mappedFrames: StoredKeyframeMeta[] = activeFrames.map((f, idx) => ({
       id: f.id,
@@ -223,11 +241,11 @@ export const SkillRecorderStudio: React.FC<SkillRecorderStudioProps> = ({
       byteSize: 24576,
       sha256Hash: f.sha256Hash,
       pixelDiffPct: f.diffScore,
-      sourceKind: f.sourceType === 'screen' ? 'screen_capture' : 'in_app',
+      sourceKind: f.sourceType === 'in_app' ? 'in_app' : 'screen_capture',
       caption: f.annotation || `Keyframe #${idx + 1}`,
       blurRegions: f.blurRegions,
       approvedForCompile: true,
-      storedInIndexedDb: true,
+      storedInIndexedDb: f.storageBackend ? f.storageBackend !== 'memory' : Boolean(f.blobHash || f.indexedDbKey),
     }));
 
     const compiled = compileRecordingToDraftSkill({
@@ -237,13 +255,16 @@ export const SkillRecorderStudio: React.FC<SkillRecorderStudioProps> = ({
       summary: activeSession?.narration[0]?.text,
       events: mappedEvents,
       approvedKeyframes: mappedFrames,
-      sourceKind: activeSourceType === 'screen' ? 'screen_capture' : 'in_app',
+      sourceKind: activeSourceType === 'in_app' ? 'in_app' : 'screen_capture',
       retentionPolicy: 'delete_after_compile',
       mode: isLiveModelMode ? 'live' : 'mock',
     });
 
     setDraftSkill(compiled);
     setDryRunLogs([]);
+    if (activeSession?.retentionPolicy === 'delete_after_compile') {
+      void onCompleteRecordingRetention?.(activeSession);
+    }
     onRecordLedgerEvent(
       'Skill Compiled from Approved Keyframes',
       `Compiled "${compiled.name}" (${compiled.steps.length} steps, ${compiled.parameters.length} parameters) using ${compiled.compilerLabel}. Raw frames hashed (${mappedFrames.length} frames); no raw video sent.`,
@@ -258,6 +279,7 @@ export const SkillRecorderStudio: React.FC<SkillRecorderStudioProps> = ({
 
   const handleRunDryRun = () => {
     if (!draftSkill) return;
+    setCompileGuardMessage(null);
     const res = replayRecordedSkillByIntent({
       skill: draftSkill,
       dryRun: true,
@@ -610,7 +632,7 @@ export const SkillRecorderStudio: React.FC<SkillRecorderStudioProps> = ({
         <div className="mt-4 pt-3 border-t border-[var(--border-subtle)] flex flex-wrap items-center justify-between gap-3 text-xs">
           <div className="flex flex-wrap items-center gap-2">
             <span className="text-[var(--text-secondary)] font-medium">Active Capture Source:</span>
-            {(['in_app', 'screen', 'native_stub'] as RecorderSourceType[]).map(src => (
+            {(['in_app', 'screen'] as RecorderSourceType[]).map(src => (
               <button
                 key={src}
                 type="button"
@@ -622,9 +644,8 @@ export const SkillRecorderStudio: React.FC<SkillRecorderStudioProps> = ({
                     : 'bg-[var(--bg-canvas)] text-[var(--text-secondary)] border-[var(--border-subtle)] hover:text-[var(--text-primary)]'
                 }`}
               >
-                {src === 'screen' && 'Screen view only [REAL Web API]'}
+                {src === 'screen' && 'Selected display video + keyframes'}
                 {src === 'in_app' && 'In-app events [REAL DOM]'}
-                {src === 'native_stub' && 'Full desktop (not available in this preview) [STUB]'}
               </button>
             ))}
           </div>
@@ -915,7 +936,12 @@ export const SkillRecorderStudio: React.FC<SkillRecorderStudioProps> = ({
                 <strong className="text-[var(--text-primary)]">
                   {activeSession?.keyframes.filter(k => !k.deleted).length || 0}
                 </strong>{' '}
-                (stored in IndexedDB, never raw video)
+                (stored as local JPEG proof frames)
+              </div>
+              <div>
+                Continuous video segments:{' '}
+                <strong className="text-[var(--text-primary)]">{mediaSegmentCount}</strong>
+                {' '}(local WebM, video only)
               </div>
               <div>
                 DOM/Stage events:{' '}
@@ -1009,7 +1035,7 @@ export const SkillRecorderStudio: React.FC<SkillRecorderStudioProps> = ({
                 className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-medium bg-rose-500/10 text-rose-500 border border-rose-500/20"
               >
                 <Trash2 className="w-3.5 h-3.5" />
-                Discard &amp; Delete From IndexedDB
+                Discard &amp; Delete Local Recording
               </button>
               <button
                 type="button"
@@ -1018,10 +1044,29 @@ export const SkillRecorderStudio: React.FC<SkillRecorderStudioProps> = ({
                 className="inline-flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 text-white shadow-xs cursor-pointer"
               >
                 <CheckCircle2 className="w-4 h-4" />
-                Approve Selected Keyframes &amp; Compile Skill
+                Approve Evidence &amp; Compile Skill
               </button>
             </div>
           </div>
+          {compileGuardMessage ? (
+            <p role="alert" className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-300">
+              {compileGuardMessage}
+            </p>
+          ) : null}
+
+          {activeSession?.mediaSegments?.length ? (
+            <section className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-canvas)] p-4 space-y-2">
+              <div className="flex items-center justify-between gap-3">
+                <div className="text-xs font-semibold text-[var(--text-primary)]">Recorded desktop video</div>
+                <span className="text-[11px] text-[var(--text-secondary)]">{activeSession.mediaSegments.length} verified WebM segments · local only</span>
+              </div>
+              {recordingPreviewUrl ? (
+                <video className="w-full max-h-[480px] rounded-lg bg-black" src={recordingPreviewUrl} controls playsInline />
+              ) : (
+                <div className="text-xs text-[var(--text-secondary)]">Loading and verifying the locally stored recording…</div>
+              )}
+            </section>
+          ) : null}
 
           {!activeSession || activeSession.keyframes.filter(k => !k.deleted).length === 0 ? (
             <div className="p-8 rounded-xl bg-[var(--bg-canvas)] border border-[var(--border-subtle)] text-center space-y-3">
@@ -1121,18 +1166,18 @@ export const SkillRecorderStudio: React.FC<SkillRecorderStudioProps> = ({
           {!draftSkill ? (
             <div className="p-8 text-center space-y-3">
               <p className="text-xs text-[var(--text-secondary)]">
-                Approve keyframes in Step 3 to compile a structured Draft Skill, or load the guided recording now.
+                A Draft Skill is created only from recorded action events. A screen video by itself is never converted into invented clicks or file operations.
               </p>
               <button
                 type="button"
                 onClick={() => {
                   handleRecordGuidedStageTask();
-                  handleApproveKeyframesAndCompile();
+                  setStudioTab('review');
                 }}
                 data-testid="compile-quick-seed-btn"
                 className="px-4 py-2 rounded-xl text-xs font-semibold bg-sky-600 text-white"
               >
-                Compile Guided Task Now
+                Capture Guided Stage Events
               </button>
             </div>
           ) : (

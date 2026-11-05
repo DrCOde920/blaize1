@@ -1,0 +1,10 @@
+#EXTM3U
+#PLAYLIST:Morrow Focus & Cyber Synth (CC0 Local Demo Playlist)
+#EXTINF:168,Morrow Synth Lab - Neon Ledger (124 BPM)
+/workspace/audio/neon_ledger_124bpm.synth
+#EXTINF:194,Accra Lo-Fi Collective - Makola Rain (96 BPM)
+/workspace/audio/makola_rain_96bpm.synth
+#EXTINF:152,Blaize Core Audio - Zero Drift Protocol (132 BPM)
+/workspace/audio/zero_drift_132bpm.synth
+#EXTINF:210,Morrow Synth Lab - Starlight Verification (110 BPM)
+/workspace/audio/starlight_verification_110bpm.synth

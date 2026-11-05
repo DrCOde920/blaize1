@@ -59,7 +59,7 @@ function redactSecretsFromText(raw: string): string {
     .replace(/Bearer\s+[A-Za-z0-9\-._~+/]+=*/gi, 'Bearer [REDACTED_TOKEN]');
 }
 
-const { app, BrowserWindow, ipcMain, safeStorage, powerMonitor, session, shell, Tray, Menu, globalShortcut, nativeImage } =
+const { app, BrowserWindow, ipcMain, safeStorage, powerMonitor, session, shell, Tray, Menu, globalShortcut, nativeImage, desktopCapturer, dialog } =
   (electronPkg as any) || {};
 
 const CURRENT_DIR =
@@ -1299,6 +1299,20 @@ export function registerIpcHandlers(options?: {
     options?.ipcMainOverride
   );
 
+  registerChannel(
+    'storage:delete-blob',
+    ({ hash }) => {
+      const db = getDesktopDurableDb();
+      const normalizedHash = hash.toLowerCase();
+      const stillReferenced = ['recorder_keyframes', 'recorder_media_segments'].some((collection) =>
+        db.listRecords(collection).some((record) => record.data?.blobHash === normalizedHash)
+      );
+      if (stillReferenced) return { success: false };
+      return { success: db.deleteBlob(normalizedHash) };
+    },
+    options?.ipcMainOverride
+  );
+
   // 6. PC Operator (Honest truth state reporting + real LinuxDesktopDriver on Linux)
   registerChannel(
     'pc-operator:list-windows',
@@ -1345,6 +1359,16 @@ export function registerIpcHandlers(options?: {
                   height: w.bounds.height,
                 },
                 isFocused: w.isFocused,
+                elements: snap.elements
+                  .filter((element) => element.windowId === w.id)
+                  .slice(0, 120)
+                  .map((element) => ({
+                    id: element.id,
+                    role: element.role,
+                    name: redactSecretsFromText(element.name).slice(0, 180),
+                    bounds: { x: element.bounds.x, y: element.bounds.y, width: element.bounds.width, height: element.bounds.height },
+                    supportedActions: element.supportedActions,
+                  })),
               });
             }
           }
@@ -1360,65 +1384,107 @@ export function registerIpcHandlers(options?: {
   registerChannel(
     'pc-operator:execute-action',
     (request: PCOperatorActionRequest): PCOperatorActionResult => {
-      if (request.coordinates) {
-        request.coordinates.x = Math.max(0, Math.min(request.coordinates.x, 3840));
-        request.coordinates.y = Math.max(0, Math.min(request.coordinates.y, 2160));
+      const fail = (state: PCOperatorActionResult['executionState'], message: string): PCOperatorActionResult => ({
+        success: false, actionId: request.actionId, executionState: state, isSimulated: false,
+        message, targetWindowVerified: false, timestamp: Date.now(),
+      });
+      if (!request.requiresConfirmation) {
+        return fail('BLOCKED', 'APPROVAL_REQUIRED: A human must approve each native desktop action in the PC Operator panel.');
       }
-      if (process.platform === 'linux' || process.platform === 'win32' || process.platform === 'darwin') {
-        const driver =
-          process.platform === 'win32'
-            ? new WindowsDesktopDriver()
-            : process.platform === 'darwin'
-              ? new MacOSDesktopDriver()
-              : new LinuxDesktopDriver();
-        const beforeSnap = driver.capturePerception();
-        if (beforeSnap.windows.length > 0 || !isHeadlessEnvironment()) {
-          const targetWinId = request.targetWindowId || 'win-blaize-main';
-          const outcome = driver.executeTierAction(
-            {
-              appId: targetWinId,
-              windowId: targetWinId,
-              intent: `${request.type} on ${targetWinId}`,
-              tier: request.coordinates ? 'T4_PIXEL_INPUT' : 'T2_ACCESSIBILITY',
-              accessibilityAction: request.type === 'type' ? 'set_value' : 'invoke',
-              valueToSet: request.text,
-              shortcutKeys: request.key,
-              pixelCoordinates: request.coordinates,
-            },
-            beforeSnap
-          );
-          return {
-            success: outcome.ok,
-            actionId: request.actionId,
-            executionState: outcome.executionState,
-            isSimulated: outcome.isSimulated,
-            message: outcome.logMessage,
-            targetWindowVerified:
-              outcome.ok &&
-              outcome.resultingSnapshot.windows.some((w) => w.id === targetWinId),
-            timestamp: Date.now(),
-          };
-        }
+      if (request.type === 'navigate') {
+        return fail('UNSUPPORTED', 'DIRECT_NAVIGATION_UNSUPPORTED: Use the visible browser address bar with a separately reviewed keyboard action.');
+      }
+      if (request.type === 'type' && (!request.text || !request.targetElementId)) {
+        return fail('BLOCKED', 'TARGET_REQUIRED: Typing requires a grounded accessibility element and explicit text.');
+      }
+      if ((request.type === 'click' || request.type === 'scroll') && !request.targetElementId) {
+        return fail('BLOCKED', 'TARGET_REQUIRED: Click and scroll require a fresh accessibility element target.');
+      }
+      if (request.coordinates) {
+        return fail('BLOCKED', 'PIXEL_INPUT_DISABLED: Autonomous AI actions must use fresh accessibility targets; coordinate-only input is disabled.');
+      }
+      if (request.type === 'key' && !request.key) {
+        return fail('BLOCKED', 'KEY_REQUIRED: Keyboard action requires an explicit key or shortcut.');
+      }
+      const safeShortcuts = new Set([
+        'escape', 'tab', 'shift+tab', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright',
+        'home', 'end', 'pageup', 'pagedown', 'ctrl+f', 'ctrl+s', 'ctrl+a', 'ctrl+c',
+        'ctrl+z', 'ctrl+y', 'ctrl+tab', 'ctrl+shift+tab', 'ctrl+shift+s', 'alt+tab',
+        'cmd+f', 'cmd+s', 'cmd+a', 'cmd+c', 'cmd+z', 'cmd+shift+z', 'cmd+tab',
+      ]);
+      if (request.type === 'key' && !safeShortcuts.has(String(request.key || '').toLowerCase().replace(/\s+/g, ''))) {
+        return fail('BLOCKED', 'KEY_SHORTCUT_BLOCKED: This shortcut is outside Blaize’s allowlist. Use a visible accessibility control instead.');
+      }
+      if (request.type === 'scroll' && request.deltaY !== undefined && (!Number.isFinite(request.deltaY) || Math.abs(request.deltaY) > 100)) {
+        return fail('BLOCKED', 'SCROLL_RANGE_BLOCKED: Scroll movement must be within -100 to 100.');
+      }
+      if (request.text && /(password|passcode|one.?time.?code|otp|\bpin\b|api.?key|secret|bearer\s+)/i.test(request.text)) {
+        return fail('BLOCKED', 'SENSITIVE_INPUT_BLOCKED: Blaize will not type credentials or secret material through the autonomous desktop channel.');
+      }
+      if (process.platform !== 'linux' && process.platform !== 'win32' && process.platform !== 'darwin') {
+        return fail('UNSUPPORTED', 'UNSUPPORTED: Native desktop control is unavailable on this platform.');
       }
       if (isHeadlessEnvironment()) {
-        return {
-          success: false,
-          actionId: request.actionId,
-          executionState: 'UNSUPPORTED',
-          isSimulated: false,
-          message:
-            'UNSUPPORTED: Native OS desktop input dispatch requires an active display session (X11/Wayland/Quartz/Win32).',
-          targetWindowVerified: false,
-          timestamp: Date.now(),
-        };
+        return fail('UNSUPPORTED', 'UNSUPPORTED: Native OS input dispatch requires an active display session (X11/Wayland/Quartz/Win32).');
       }
+      const driver = process.platform === 'win32'
+        ? new WindowsDesktopDriver()
+        : process.platform === 'darwin' ? new MacOSDesktopDriver() : new LinuxDesktopDriver();
+      const beforeSnap = driver.capturePerception();
+      const target = request.targetWindowId
+        ? beforeSnap.windows.find((window) => window.id === request.targetWindowId)
+        : beforeSnap.windows.find((window) => window.isFocused);
+      if (!target) return fail('BLOCKED', 'TARGET_WINDOW_NOT_FOUND: The requested application window is no longer present.');
+      if (target.isElevatedAdmin) return fail('BLOCKED', 'UIPI_ELEVATION_DENIED: Elevated administrative windows cannot be controlled.');
+      if (/(password manager|1password|bitwarden|keepass|keychain|credential manager|banking|online bank|brokerage|trading|tax portal|medical record|health portal|payroll)/i.test(`${target.title} ${target.processName}`)) {
+        return fail('BLOCKED', 'SENSITIVE_APPLICATION_BLOCKED: Blaize will not autonomously control password, banking, brokerage, tax, payroll, or medical applications.');
+      }
+      if (request.coordinates) {
+        const { x, y } = request.coordinates;
+        const b = target.bounds;
+        if (!Number.isFinite(x) || !Number.isFinite(y) || x < b.x || y < b.y || x > b.x + b.width || y > b.y + b.height) {
+          return fail('BLOCKED', 'COORDINATE_OUT_OF_BOUNDS: Coordinates must lie inside the freshly verified target window.');
+        }
+      }
+      if (request.type === 'key' && !target.isFocused) {
+        return fail('BLOCKED', 'WINDOW_NOT_FOCUSED: Keyboard input is only allowed in the currently focused target window.');
+      }
+      const targetElement = request.targetElementId
+        ? beforeSnap.elements.find((element) => element.id === request.targetElementId && element.windowId === target.id)
+        : undefined;
+      if (request.targetElementId && !targetElement) {
+        return fail('BLOCKED', 'TARGET_ELEMENT_NOT_FOUND: The accessibility element changed or belongs to another window. Refresh perception and retry.');
+      }
+      const requiredCapability = request.type === 'click' ? 'invoke' : request.type === 'type' ? 'set_value' : request.type === 'scroll' ? 'scroll' : undefined;
+      if (requiredCapability && !targetElement?.supportedActions?.includes(requiredCapability)) {
+        return fail('BLOCKED', `ACTION_NOT_SUPPORTED: The refreshed accessibility target does not expose ${requiredCapability}.`);
+      }
+      if (targetElement && /(pay|payment|transfer|send money|purchase|checkout|delete|remove account|confirm|approve|submit|sign in|log in|password|credential|security settings)/i.test(targetElement.name)) {
+        return fail('BLOCKED', 'SENSITIVE_CONTROL_BLOCKED: This control could commit a payment, delete data, submit a form, or modify security settings. Use a separately reviewed workflow.');
+      }
+      const action = request.type === 'type' ? 'set_value'
+        : request.type === 'scroll' ? 'scroll'
+          : request.type === 'click' ? 'invoke' : undefined;
+      const outcome = driver.executeTierAction({
+        appId: target.appId,
+        windowId: target.id,
+        intent: `${request.type} on reviewed target ${target.title}`,
+        tier: request.type === 'key' ? 'T3_SHORTCUTS_MENU' : 'T2_ACCESSIBILITY',
+        targetElementId: request.targetElementId,
+        accessibilityAction: action,
+        valueToSet: request.type === 'type' ? request.text : request.type === 'scroll' ? String(request.deltaY ?? 50) : undefined,
+        shortcutKeys: request.type === 'key' ? request.key : undefined,
+        pixelCoordinates: request.coordinates,
+        riskClass: request.type === 'type' || request.type === 'click' || request.type === 'scroll' ? 'write_in_scope' : 'read',
+      }, beforeSnap);
+      const targetStillPresent = outcome.resultingSnapshot.windows.some((window) => window.id === target.id);
       return {
-        success: false,
+        success: outcome.ok,
         actionId: request.actionId,
-        executionState: 'SIMULATED',
-        isSimulated: true,
-        message: `Simulated desktop action '${request.type}' in sandboxed stage (native OS driver not attached).`,
-        targetWindowVerified: false,
+        executionState: outcome.executionState,
+        isSimulated: outcome.isSimulated,
+        message: redactSecretsFromText(outcome.logMessage),
+        targetWindowVerified: Boolean(outcome.ok && targetStillPresent),
         timestamp: Date.now(),
       };
     },
@@ -1481,6 +1547,31 @@ export function initApp(): void {
     .then(async () => {
       initializeDesktopDirectories();
       registerIpcHandlers();
+      // getDisplayMedia is handled in the privileged process so the user chooses an
+      // actual desktop display. This handler only runs after the app's consent sheet
+      // has explicitly initiated capture; cancelling the picker grants no stream.
+      if (session?.defaultSession && typeof session.defaultSession.setDisplayMediaRequestHandler === 'function' && desktopCapturer?.getSources) {
+        session.defaultSession.setDisplayMediaRequestHandler(async (_request: any, callback: (selection: any) => void) => {
+          try {
+            const sources = await desktopCapturer.getSources({ types: ['screen'], fetchWindowIcons: false });
+            if (!sources?.length) { callback({}); return; }
+            const labels = sources.map((source: any, index: number) => `${index + 1}. ${String(source.name || 'Display').slice(0, 80)}`);
+            labels.push('Cancel');
+            const picked = await dialog.showMessageBox(mainWindow || undefined, {
+              type: 'question', title: 'Blaize screen recording',
+              message: 'Choose the display to capture. Only the selected display is recorded.',
+              detail: 'Capture begins only for this consented session. You can stop at any time from Blaize.',
+              buttons: labels, cancelId: labels.length - 1, defaultId: 0,
+            });
+            const source = sources[picked.response];
+            if (!source) { callback({}); return; }
+            callback({ video: source, audio: undefined });
+          } catch (err: any) {
+            startupErrors.push(`Display capture picker failed: ${redactSecretsFromText(err?.message || String(err))}`);
+            callback({});
+          }
+        }, { useSystemPicker: process.platform === 'darwin' });
+      }
       isReady = true;
 
       if (process.env.BLAIZE_ELECTRON_SMOKE_TEST === '1') {

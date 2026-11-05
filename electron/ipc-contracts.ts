@@ -60,12 +60,14 @@ export interface PCOperatorWindowTarget {
   processName: string;
   bounds: { x: number; y: number; width: number; height: number };
   isFocused: boolean;
+  elements?: Array<{ id: string; role: string; name: string; bounds: { x: number; y: number; width: number; height: number }; supportedActions: string[] }>;
 }
 
 export interface PCOperatorActionRequest {
   actionId: string;
   type: 'click' | 'type' | 'scroll' | 'key' | 'navigate';
   targetWindowId?: string;
+  targetElementId?: string;
   coordinates?: { x: number; y: number };
   text?: string;
   key?: string;
@@ -155,6 +157,7 @@ export const PCOperatorActionRequestSchema = z.object({
   actionId: z.string().min(1).max(128),
   type: z.enum(['click', 'type', 'scroll', 'key', 'navigate']),
   targetWindowId: z.string().max(128).optional(),
+  targetElementId: z.string().max(256).optional(),
   coordinates: z
     .object({
       x: z.number().finite(),
@@ -267,6 +270,7 @@ export interface ElectronIpcChannels {
     req: { hash: string };
     res: { dataBase64: string; mimeType: string } | null;
   };
+  'storage:delete-blob': { req: { hash: string }; res: { success: boolean } };
 
   // PC Operator (Desktop control)
   'pc-operator:list-windows': { req: void; res: PCOperatorWindowTarget[] };
@@ -637,6 +641,15 @@ export const IPC_CONTRACT_MANIFEST: Record<
       })
       .nullable(),
   },
+  'storage:delete-blob': {
+    channel: 'storage:delete-blob',
+    preloadNamespace: 'storage',
+    preloadMethod: 'deleteBlob',
+    riskClass: 'scoped_write',
+    requiresMainFrame: true,
+    reqSchema: z.object({ hash: z.string().regex(/^[a-f0-9]{64}$/i) }),
+    resSchema: z.object({ success: z.boolean() }),
+  },
   'pc-operator:list-windows': {
     channel: 'pc-operator:list-windows',
     preloadNamespace: 'pcOperator',
@@ -656,6 +669,13 @@ export const IPC_CONTRACT_MANIFEST: Record<
           height: z.number(),
         }),
         isFocused: z.boolean(),
+        elements: z.array(z.object({
+          id: z.string(),
+          role: z.string(),
+          name: z.string(),
+          bounds: z.object({ x: z.number(), y: z.number(), width: z.number(), height: z.number() }),
+          supportedActions: z.array(z.string()),
+        })).optional(),
       })
     ),
   },
@@ -772,6 +792,7 @@ export interface BlaizeElectronAPI {
       mimeType: string
     ) => Promise<{ path: string; size: number }>;
     readBlob: (hash: string) => Promise<{ dataBase64: string; mimeType: string } | null>;
+    deleteBlob: (hash: string) => Promise<{ success: boolean }>;
   };
   pcOperator: {
     listWindows: () => Promise<PCOperatorWindowTarget[]>;
@@ -782,5 +803,10 @@ export interface BlaizeElectronAPI {
 declare global {
   interface Window {
     electronAPI?: BlaizeElectronAPI;
+    __BLAIZE_BOOTSTRAP_SNAPSHOT__?: unknown;
+    __BLAIZE_BOOTSTRAP_PREFS__?: Record<string, unknown>;
+    __BLAIZE_BOOTSTRAP_ACTIVE_RECORDING__?: unknown;
+    __BLAIZE_BOOTSTRAP_RECORDED_SKILLS__?: unknown;
+    __BLAIZE_RUNTIME_PREFS__?: Record<string, unknown>;
   }
 }
