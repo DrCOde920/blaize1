@@ -156,6 +156,15 @@ export function isAllowedHost(host: string | undefined | null): boolean {
   return false;
 }
 
+export function isExactCloudRunHost(host: string | undefined | null): boolean {
+  if (!host || typeof host !== 'string') return false;
+  const clean = host.trim().toLowerCase().replace(/:\d+$/, '');
+  return (
+    clean === 'ais-dev-6mhw74jqog4clrimu37pke-9589332985.europe-west2.run.app' ||
+    clean === 'ais-pre-6mhw74jqog4clrimu37pke-9589332985.europe-west2.run.app'
+  );
+}
+
 /**
  * Checks if a socket remote address is a local loopback IP.
  */
@@ -215,10 +224,17 @@ export function shouldInjectLaunchToken(req: {
     }
   }
 
+  const isCloudRunHost = isExactCloudRunHost(host) || isExactCloudRunHost(xForwardedHost);
   const remoteIp = req.socket?.remoteAddress;
-  if (remoteIp && !isLoopbackAddress(remoteIp) && process.env.ALLOW_REMOTE_API_ACCESS !== 'true') {
+  if (
+    remoteIp &&
+    !isLoopbackAddress(remoteIp) &&
+    !isCloudRunHost &&
+    process.env.ALLOW_REMOTE_API_ACCESS !== 'true'
+  ) {
     return false;
   }
 
   return true;
 }
+

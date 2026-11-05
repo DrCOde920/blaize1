@@ -576,6 +576,7 @@ describe('Phase 5 — Reproducible, Secure Electron Desktop Foundation', () => {
     const buildManifest = await buildDesktopArtifacts({ skipFrontend: false });
     assert.ok(fs.existsSync(path.join(process.cwd(), buildManifest.files.mainCjs.path)));
     assert.ok(fs.existsSync(path.join(process.cwd(), buildManifest.files.preloadCjs.path)));
+    assert.ok(fs.existsSync(path.join(process.cwd(), buildManifest.files.serverEsm.path)));
     assert.ok(fs.existsSync(path.join(process.cwd(), buildManifest.files.rendererIndexHtml.path)));
 
     if (process.platform === 'linux') {

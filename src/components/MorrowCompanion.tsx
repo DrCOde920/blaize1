@@ -37,8 +37,10 @@ import {
   Square,
   Flag,
   MessageSquarePlus,
-  Minus,
-  Plus,
+  LogOut,
+  Maximize2,
+  RotateCcw,
+  MessageSquare,
 } from 'lucide-react';
 import {
   MorrowState,
@@ -48,6 +50,7 @@ import {
 import {
   COMPANION_LOOK_PRESETS,
   CompiledPersonalityProfile,
+  FreeCompanionPosition,
   Live2DExpressionId,
   Live2DPropId,
   Live2DProportionMode,
@@ -57,6 +60,7 @@ import {
   PERCH_TARGETS_REGISTRY,
   PerchTargetId,
   PRESENCE_STATE_USAGE_MAP,
+  clampFreeCompanionPosition,
   computePerchPlacement,
   computePopoverPlacement,
   mapModelActivityToPresence,
@@ -158,6 +162,10 @@ interface MorrowCompanionProps {
   onStopAndReviewRecording?: () => void;
   onAddRecordingNote?: (note: string) => void;
   onMarkRecordingCheckpoint?: () => void;
+  isBlaizeWindowClosed?: boolean;
+  onReopenBlaizeWindow?: () => void;
+  isCompanionExited?: boolean;
+  onExitCompanion?: () => void;
   characterParametricState?: {
     scalePct: number;
     opacityPct: number;
@@ -181,6 +189,7 @@ interface MorrowCompanionProps {
 }
 
 const PERCH_STORAGE_KEY = 'blaize_perch_by_page_v1';
+const FREE_POS_STORAGE_KEY = 'blaize_morrow_free_position_v1';
 const DOT_COLLAPSED_STORAGE_KEY = 'blaize_morrow_collapsed_dot_v1';
 const COMPANION_SCALE_STORAGE_KEY = 'blaize_companion_scale_pct_v1';
 
@@ -235,10 +244,16 @@ export const MorrowCompanion: React.FC<MorrowCompanionProps> = ({
   onStopAndReviewRecording,
   onAddRecordingNote,
   onMarkRecordingCheckpoint,
+  isBlaizeWindowClosed = false,
+  onReopenBlaizeWindow,
+  isCompanionExited = false,
+  onExitCompanion,
   characterParametricState,
 }) => {
   const [quickNoteOpen, setQuickNoteOpen] = useState(false);
   const [quickNoteText, setQuickNoteText] = useState('');
+  const [internalExited, setInternalExited] = useState(false);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
 
   // Adjustable floating figure scale (50% to 200%)
   const [localScalePct, setLocalScalePct] = useState<number>(() => {
@@ -424,8 +439,44 @@ export const MorrowCompanion: React.FC<MorrowCompanionProps> = ({
     artifactDrawerWidthPx,
   ]);
 
+  // Free-roam screen coordinates (null = anchored to activePerchId; {x, y} = user moved figure to any screen coordinate)
+  const [customPosition, setCustomPosition] = useState<FreeCompanionPosition | null>(() => {
+    if (typeof window === 'undefined') return null;
+    try {
+      const raw = window.localStorage.getItem(FREE_POS_STORAGE_KEY);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed.x === 'number' && typeof parsed.y === 'number') {
+        return clampFreeCompanionPosition({
+          x: parsed.x,
+          y: parsed.y,
+          viewportWidth: window.innerWidth || 1440,
+          viewportHeight: window.innerHeight || 900,
+        });
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  });
+
+  const saveCustomPosition = useCallback((nextPos: FreeCompanionPosition | null) => {
+    setCustomPosition(nextPos);
+    if (typeof window === 'undefined') return;
+    try {
+      if (nextPos) {
+        window.localStorage.setItem(FREE_POS_STORAGE_KEY, JSON.stringify(nextPos));
+      } else {
+        window.localStorage.removeItem(FREE_POS_STORAGE_KEY);
+      }
+    } catch {
+      // ignore storage errors
+    }
+  }, []);
+
   const setPerchForCurrentPage = useCallback(
     (perchId: PerchTargetId) => {
+      saveCustomPosition(null);
       setRememberedPerches((prev) => {
         const next = { ...prev, [resolvedPageId]: perchId };
         try {
@@ -436,61 +487,8 @@ export const MorrowCompanion: React.FC<MorrowCompanionProps> = ({
         return next;
       });
     },
-    [resolvedPageId]
+    [resolvedPageId, saveCustomPosition]
   );
-
-  // Dragging to snap to nearest perch
-  const [isDragging, setIsDragging] = useState(false);
-  const [dragMoved, setDragMoved] = useState(false);
-  const [dragDelta, setDragDelta] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
-  const [dragOrigin, setDragOrigin] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
-
-  const handlePointerDownCharacter = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (e.button !== 0) return;
-    setIsDragging(true);
-    setDragMoved(false);
-    setDragOrigin({ x: e.clientX, y: e.clientY });
-    setDragDelta({ x: 0, y: 0 });
-  };
-
-  useEffect(() => {
-    if (!isDragging) return;
-    const onMove = (e: MouseEvent) => {
-      const dx = e.clientX - dragOrigin.x;
-      const dy = e.clientY - dragOrigin.y;
-      if (Math.abs(dx) > 5 || Math.abs(dy) > 5) {
-        setDragMoved(true);
-      }
-      setDragDelta({ x: dx, y: dy });
-    };
-    const onUp = (e: MouseEvent) => {
-      setIsDragging(false);
-      setDragDelta({ x: 0, y: 0 });
-      if (!dragMoved) return;
-
-      // Snap to closest PerchTarget based on drop coordinates
-      const dropX = e.clientX;
-      const dropY = e.clientY;
-      const vw = window.innerWidth || 1440;
-      const vh = window.innerHeight || 900;
-
-      if (dropX < 260 && dropY > vh - 260) {
-        setPerchForCurrentPage('sidebar-footer');
-      } else if (dropY < 240) {
-        setPerchForCurrentPage('panel-top-right');
-      } else if (isChatViewOpen && Math.abs(dropX - vw / 2) < 420 && dropY > vh - 320) {
-        setPerchForCurrentPage('composer-top');
-      } else {
-        setPerchForCurrentPage('screen-floor');
-      }
-    };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
-    return () => {
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-    };
-  }, [isDragging, dragOrigin, dragMoved, isChatViewOpen, setPerchForCurrentPage]);
 
   // Compute perch coordinates and obstacle avoidance
   const perchPlacement = useMemo(
@@ -502,7 +500,7 @@ export const MorrowCompanion: React.FC<MorrowCompanionProps> = ({
         viewport: viewportDims,
         isTypingInComposer,
         isAiThinking,
-        hasActiveApprovalSheet: Boolean(pendingApproval && isChatViewOpen),
+        hasActiveApprovalSheet: Boolean(pendingApproval && isChatViewOpen && !isBlaizeWindowClosed),
         idlePoseOverride: idleStage,
       }),
     [
@@ -514,9 +512,130 @@ export const MorrowCompanion: React.FC<MorrowCompanionProps> = ({
       isAiThinking,
       pendingApproval,
       isChatViewOpen,
+      isBlaizeWindowClosed,
       idleStage,
     ]
   );
+
+  // Effective base coordinates: user's free-roam screen position if moved, otherwise active perch
+  const baseCompanionPos = useMemo<FreeCompanionPosition>(() => {
+    if (customPosition) {
+      return clampFreeCompanionPosition({
+        x: customPosition.x,
+        y: customPosition.y,
+        viewportWidth: viewportDims.width,
+        viewportHeight: viewportDims.height,
+        companionWidth: scaledWidthPx,
+        companionHeight: scaledHeightPx,
+      });
+    }
+    return { x: perchPlacement.x, y: perchPlacement.y };
+  }, [
+    customPosition,
+    perchPlacement.x,
+    perchPlacement.y,
+    viewportDims.width,
+    viewportDims.height,
+    scaledWidthPx,
+    scaledHeightPx,
+  ]);
+
+  // Dragging to move Morrow to ANY part of the screen
+  const [isDragging, setIsDragging] = useState(false);
+  const [dragMoved, setDragMoved] = useState(false);
+  const [dragDelta, setDragDelta] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  const [dragOrigin, setDragOrigin] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  const [dragStartBasePos, setDragStartBasePos] = useState<FreeCompanionPosition>({ x: 0, y: 0 });
+
+  const handlePointerDownCharacter = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return;
+    setContextMenu(null);
+    setIsDragging(true);
+    setDragMoved(false);
+    setDragOrigin({ x: e.clientX, y: e.clientY });
+    setDragStartBasePos(baseCompanionPos);
+    setDragDelta({ x: 0, y: 0 });
+  };
+
+  useEffect(() => {
+    if (!isDragging) return;
+    const onMove = (e: MouseEvent) => {
+      const dx = e.clientX - dragOrigin.x;
+      const dy = e.clientY - dragOrigin.y;
+      if (Math.abs(dx) > 4 || Math.abs(dy) > 4) {
+        setDragMoved(true);
+      }
+      setDragDelta({ x: dx, y: dy });
+    };
+    const onUp = (e: MouseEvent) => {
+      const dx = e.clientX - dragOrigin.x;
+      const dy = e.clientY - dragOrigin.y;
+      const moved = dragMoved || Math.abs(dx) > 4 || Math.abs(dy) > 4;
+      setIsDragging(false);
+      setDragDelta({ x: 0, y: 0 });
+      if (!moved) return;
+
+      const vw = window.innerWidth || 1440;
+      const vh = window.innerHeight || 900;
+      const nextPos = clampFreeCompanionPosition({
+        x: dragStartBasePos.x + dx,
+        y: dragStartBasePos.y + dy,
+        viewportWidth: vw,
+        viewportHeight: vh,
+        companionWidth: scaledWidthPx,
+        companionHeight: scaledHeightPx,
+      });
+      saveCustomPosition(nextPos);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+  }, [
+    isDragging,
+    dragOrigin,
+    dragMoved,
+    dragStartBasePos,
+    scaledWidthPx,
+    scaledHeightPx,
+    saveCustomPosition,
+  ]);
+
+  const handleOpenContextMenu = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const vw = typeof window !== 'undefined' ? window.innerWidth : 1440;
+      const vh = typeof window !== 'undefined' ? window.innerHeight : 900;
+      const menuW = 216;
+      const menuH = 228;
+      const rawX = e.clientX > 0 ? e.clientX : baseCompanionPos.x;
+      const rawY = e.clientY > 0 ? e.clientY : baseCompanionPos.y;
+      setContextMenu({
+        x: Math.max(12, Math.min(vw - menuW - 12, rawX)),
+        y: Math.max(12, Math.min(vh - menuH - 12, rawY)),
+      });
+    },
+    [baseCompanionPos.x, baseCompanionPos.y]
+  );
+
+  const handleExitCompanion = useCallback(() => {
+    setContextMenu(null);
+    setPopoutChatOpen(false);
+    setInternalExited(true);
+    if (onExitCompanion) {
+      onExitCompanion();
+    }
+  }, [onExitCompanion]);
+
+  useEffect(() => {
+    if (!contextMenu) return;
+    const closeMenu = () => setContextMenu(null);
+    window.addEventListener('click', closeMenu);
+    return () => window.removeEventListener('click', closeMenu);
+  }, [contextMenu]);
 
   // Derive live activity event -> natural expression/presence
   const currentActivityEvent: MissionEngineActivityEvent = useMemo(() => {
@@ -569,12 +688,13 @@ export const MorrowCompanion: React.FC<MorrowCompanionProps> = ({
     }
   }, [popoutChatOpen, chatMessages.length, isAiThinking]);
 
-  // Esc closes popover; Alt+M opens popover; Alt+H collapses to status dot
+  // Esc closes popover/contextMenu; Alt+M opens popover; Alt+H collapses to status dot
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         setPopoutChatOpen(false);
         setCustomizeOpen(false);
+        setContextMenu(null);
       } else if (e.altKey && e.key.toLowerCase() === 'm') {
         e.preventDefault();
         toggleCollapsedToDot(false);
@@ -637,10 +757,10 @@ export const MorrowCompanion: React.FC<MorrowCompanionProps> = ({
     () =>
       computePopoverPlacement(
         {
-          x: perchPlacement.x,
-          y: perchPlacement.y,
-          width: 84,
-          height: 96,
+          x: baseCompanionPos.x,
+          y: baseCompanionPos.y,
+          width: scaledWidthPx,
+          height: scaledHeightPx,
         },
         {
           width: viewportDims.width,
@@ -649,7 +769,14 @@ export const MorrowCompanion: React.FC<MorrowCompanionProps> = ({
         },
         { width: 356, height: 460 }
       ),
-    [perchPlacement.x, perchPlacement.y, viewportDims.width, viewportDims.height]
+    [
+      baseCompanionPos.x,
+      baseCompanionPos.y,
+      scaledWidthPx,
+      scaledHeightPx,
+      viewportDims.width,
+      viewportDims.height,
+    ]
   );
 
   // Gaze transform for looking at text cursor vs looking up while thinking
@@ -660,51 +787,112 @@ export const MorrowCompanion: React.FC<MorrowCompanionProps> = ({
         ? 'translate3d(0px, -3px, 0) rotate(2deg)'
         : 'translate3d(0px, 0px, 0)';
 
+  // Reset internalExited if parent explicitly re-enables companion
+  useEffect(() => {
+    if (!isCompanionExited) {
+      setInternalExited(false);
+    }
+  }, [isCompanionExited]);
+
+  if (isCompanionExited || internalExited) {
+    return null;
+  }
+
   // 1. Collapsed Status Dot mode
   if (collapsedToDot) {
     return (
-      <button
-        type="button"
-        data-testid="morrow-status-dot"
-        onClick={() => toggleCollapsedToDot(false)}
-        title={`${companionName} (${statusInfo.label}) — Click or press Alt+H to expand`}
-        className={`fixed bottom-4 right-4 z-40 inline-flex items-center gap-2 px-3 py-1.5 rounded-full border text-xs font-medium shadow-md transition-all duration-150 ${
-          isLight
-            ? 'bg-white border-stone-200 text-stone-800 hover:bg-stone-50'
-            : 'bg-stone-900 border-stone-800 text-stone-200 hover:border-stone-700'
-        }`}
-      >
-        <span
-          className={`w-2.5 h-2.5 rounded-full ${
-            statusInfo.tone === 'amber'
-              ? 'bg-amber-500 animate-pulse'
-              : statusInfo.tone === 'emerald'
-                ? 'bg-emerald-500'
-                : statusInfo.tone === 'blue'
-                  ? 'bg-sky-500 animate-pulse'
-                  : 'bg-emerald-500'
+      <>
+        <button
+          type="button"
+          data-testid="morrow-status-dot"
+          onClick={() => toggleCollapsedToDot(false)}
+          onContextMenu={handleOpenContextMenu}
+          title={`${companionName} (${statusInfo.label}) — Click to expand, right-click for menu`}
+          className={`fixed bottom-4 right-4 z-40 inline-flex items-center gap-2 px-3 py-1.5 rounded-full border text-xs font-medium shadow-md transition-all duration-150 ${
+            isLight
+              ? 'bg-white border-stone-200 text-stone-800 hover:bg-stone-50'
+              : 'bg-stone-900 border-stone-800 text-stone-200 hover:border-stone-700'
           }`}
-        />
-        <span>{companionName}</span>
-        <span className="text-stone-400">· {statusInfo.label}</span>
-      </button>
+        >
+          <span
+            className={`w-2.5 h-2.5 rounded-full ${
+              statusInfo.tone === 'amber'
+                ? 'bg-amber-500 animate-pulse'
+                : statusInfo.tone === 'emerald'
+                  ? 'bg-emerald-500'
+                  : statusInfo.tone === 'blue'
+                    ? 'bg-sky-500 animate-pulse'
+                    : 'bg-emerald-500'
+            }`}
+          />
+          <span>{companionName}</span>
+          <span className="text-stone-400">· {statusInfo.label}</span>
+        </button>
+        {contextMenu && (
+          <div
+            role="menu"
+            aria-label={`${companionName} desktop menu`}
+            data-testid="morrow-context-menu"
+            onClick={(e) => e.stopPropagation()}
+            style={{ left: `${contextMenu.x}px`, top: `${contextMenu.y}px` }}
+            className={`fixed z-50 w-52 rounded-xl border p-1.5 shadow-2xl text-xs ${
+              isLight
+                ? 'bg-white border-stone-200 text-stone-800'
+                : 'bg-stone-900 border-stone-800 text-stone-100'
+            }`}
+          >
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setContextMenu(null);
+                toggleCollapsedToDot(false);
+              }}
+              className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-stone-500/15 text-left"
+            >
+              <Maximize2 className="w-3.5 h-3.5 text-sky-400" />
+              <span>Expand {companionName}</span>
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              data-testid="morrow-context-exit-btn"
+              onClick={handleExitCompanion}
+              className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-rose-500/15 text-rose-400 font-medium text-left"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+              <span>Exit</span>
+            </button>
+          </div>
+        )}
+      </>
     );
   }
 
+  const renderedLeftPx = customPosition
+    ? baseCompanionPos.x + dragDelta.x
+    : baseCompanionPos.x + dragDelta.x - Math.round((scaledWidthPx - 80) / 2);
+  const renderedTopPx = customPosition
+    ? baseCompanionPos.y + dragDelta.y
+    : baseCompanionPos.y + dragDelta.y - Math.round((scaledHeightPx - 96) * 0.78);
+
   return (
     <>
-      {/* PERCHED COMPANION (No chair stage; sits on composer-top in Chat or perches on panel edges) */}
+      {/* 2D COMPANION FIGURE (Can be dragged to any part of the screen, stays alive when Blaize is closed, right-click -> Exit) */}
       <div
         data-testid="morrow-floating-companion"
-        data-perch-active={perchPlacement.perchId}
+        data-perch-active={customPosition ? 'free-screen' : perchPlacement.perchId}
+        data-free-position={customPosition ? 'true' : 'false'}
+        data-pos-x={Math.round(renderedLeftPx)}
+        data-pos-y={Math.round(renderedTopPx)}
         data-legs-dangling={perchPlacement.legsDangling ? 'true' : 'false'}
         data-gaze-direction={perchPlacement.gazeDirection}
         data-moved-aside={perchPlacement.movedAsideForObstacle ? 'true' : 'false'}
         data-presence-state={effectivePresenceState}
         data-scale-pct={effectiveScalePct}
         style={{
-          left: `${perchPlacement.x + dragDelta.x - Math.round((scaledWidthPx - 80) / 2)}px`,
-          top: `${perchPlacement.y + dragDelta.y - Math.round((scaledHeightPx - 96) * 0.78)}px`,
+          left: `${renderedLeftPx}px`,
+          top: `${renderedTopPx}px`,
           opacity: (characterParametricState?.opacityPct ?? 100) / 100,
           transition: isDragging
             ? 'none'
@@ -716,11 +904,13 @@ export const MorrowCompanion: React.FC<MorrowCompanionProps> = ({
           role="button"
           tabIndex={0}
           data-testid="morrow-character-trigger"
-          aria-label={`${companionName} (${statusInfo.label}) — Click to open chat popover or drag to another perch`}
+          aria-label={`${companionName} (${statusInfo.label}) — Drag anywhere on screen, click to chat, or right-click to exit`}
           aria-expanded={popoutChatOpen}
           onMouseDown={handlePointerDownCharacter}
+          onContextMenu={handleOpenContextMenu}
           onClick={() => {
             if (dragMoved) return;
+            setContextMenu(null);
             setPopoutChatOpen((prev) => !prev);
           }}
           onKeyDown={(e) => {
@@ -733,7 +923,7 @@ export const MorrowCompanion: React.FC<MorrowCompanionProps> = ({
             transform: gazeTransform,
             transition: 'transform 150ms ease-out',
           }}
-          className={`pointer-events-auto cursor-pointer active:cursor-grabbing focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-500 rounded-xl group relative ${
+          className={`pointer-events-auto cursor-grab active:cursor-grabbing focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-500 rounded-xl group relative ${
             isRecordingSkill ? 'ring-2 ring-rose-500/80 shadow-lg shadow-rose-500/20' : ''
           }`}
         >
@@ -883,7 +1073,7 @@ export const MorrowCompanion: React.FC<MorrowCompanionProps> = ({
                   : statusInfo.tone === 'emerald'
                     ? 'bg-emerald-400'
                     : statusInfo.tone === 'blue'
-                      ? 'bg-sky-400 animate-pulse'
+                      ? 'bg-sky-400'
                       : 'bg-emerald-400'
               }`}
             />
@@ -917,6 +1107,120 @@ export const MorrowCompanion: React.FC<MorrowCompanionProps> = ({
           </div>
         </div>
       </div>
+
+      {/* RIGHT-CLICK DESKTOP CONTEXT MENU ON 2D FIGURE */}
+      {contextMenu && (
+        <div
+          role="menu"
+          aria-label={`${companionName} desktop context menu`}
+          data-testid="morrow-context-menu"
+          onClick={(e) => e.stopPropagation()}
+          style={{
+            left: `${contextMenu.x}px`,
+            top: `${contextMenu.y}px`,
+          }}
+          className={`fixed z-50 w-56 rounded-2xl border p-1.5 shadow-2xl text-xs space-y-0.5 ${
+            isLight
+              ? 'bg-white border-stone-200 text-stone-800'
+              : 'bg-stone-900 border-stone-800 text-stone-100'
+          }`}
+        >
+          <div className="px-2.5 py-1.5 border-b border-stone-700/30 flex items-center justify-between text-[11px]">
+            <span className="font-semibold">{companionName} Desktop</span>
+            <span className="text-stone-400">
+              {customPosition ? `${customPosition.x}, ${customPosition.y}` : 'Perched'}
+            </span>
+          </div>
+
+          {isBlaizeWindowClosed && onReopenBlaizeWindow && (
+            <button
+              type="button"
+              role="menuitem"
+              data-testid="morrow-context-open-blaize-btn"
+              onClick={() => {
+                setContextMenu(null);
+                onReopenBlaizeWindow();
+              }}
+              className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-xl bg-sky-600/15 hover:bg-sky-600/25 text-sky-400 font-medium text-left"
+            >
+              <Maximize2 className="w-3.5 h-3.5 shrink-0" />
+              <span>Open Blaize Window</span>
+            </button>
+          )}
+
+          <button
+            type="button"
+            role="menuitem"
+            data-testid="morrow-context-chat-btn"
+            onClick={() => {
+              setContextMenu(null);
+              setPopoutChatOpen((prev) => !prev);
+            }}
+            className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-xl hover:bg-stone-500/15 text-left"
+          >
+            <MessageSquare className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+            <span>{popoutChatOpen ? 'Close Chat Popover' : `Chat with ${companionName}`}</span>
+          </button>
+
+          <button
+            type="button"
+            role="menuitem"
+            data-testid="morrow-context-prefs-btn"
+            onClick={() => {
+              setContextMenu(null);
+              setCustomizeOpen(!customizeOpen);
+            }}
+            className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-xl hover:bg-stone-500/15 text-left"
+          >
+            <Settings className="w-3.5 h-3.5 text-stone-400 shrink-0" />
+            <span>Size &amp; Appearance</span>
+          </button>
+
+          {customPosition && (
+            <button
+              type="button"
+              role="menuitem"
+              data-testid="morrow-context-reset-perch-btn"
+              onClick={() => {
+                setContextMenu(null);
+                saveCustomPosition(null);
+              }}
+              className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-xl hover:bg-stone-500/15 text-left"
+            >
+              <RotateCcw className="w-3.5 h-3.5 text-stone-400 shrink-0" />
+              <span>Snap back to perch</span>
+            </button>
+          )}
+
+          <button
+            type="button"
+            role="menuitem"
+            data-testid="morrow-context-collapse-dot-btn"
+            onClick={() => {
+              setContextMenu(null);
+              setPopoutChatOpen(false);
+              toggleCollapsedToDot(true);
+            }}
+            className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-xl hover:bg-stone-500/15 text-left"
+          >
+            <CircleDot className="w-3.5 h-3.5 text-stone-400 shrink-0" />
+            <span>Collapse to status dot</span>
+          </button>
+
+          <div className="pt-1 mt-1 border-t border-stone-700/30">
+            <button
+              type="button"
+              role="menuitem"
+              data-testid="morrow-context-exit-btn"
+              onClick={handleExitCompanion}
+              className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-xl hover:bg-rose-500/15 text-rose-400 font-semibold text-left"
+            >
+              <LogOut className="w-3.5 h-3.5 shrink-0" />
+              <span>Exit</span>
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* CLICK POPOVER (Header with name, status chip with icon+text, gear icon; messages; inline approvals; mic+send composer) */}
       {popoutChatOpen && (
@@ -994,7 +1298,7 @@ export const MorrowCompanion: React.FC<MorrowCompanionProps> = ({
                 data-testid="morrow-popover-gear-btn"
                 onClick={() => {
                   setPopoutChatOpen(false);
-                  if (onOpenSettingsSection) {
+                  if (onOpenSettingsSection && !isBlaizeWindowClosed) {
                     onOpenSettingsSection('character');
                   } else {
                     setCustomizeOpen(!customizeOpen);
@@ -1025,15 +1329,25 @@ export const MorrowCompanion: React.FC<MorrowCompanionProps> = ({
           >
             <div className="flex items-center gap-1.5 truncate">
               <Compass className="w-3 h-3 shrink-0" />
-              <span>Perch:</span>
+              <span>Position:</span>
               <select
                 aria-label="Select perch for this page"
-                value={perchPlacement.perchId}
-                onChange={(e) => setPerchForCurrentPage(e.target.value as PerchTargetId)}
+                value={customPosition ? 'free' : perchPlacement.perchId}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  if (val !== 'free') {
+                    setPerchForCurrentPage(val as PerchTargetId);
+                  }
+                }}
                 className={`px-1.5 py-0.5 rounded border text-[11px] ${
                   isLight ? 'bg-white border-stone-200 text-stone-800' : 'bg-stone-900 border-stone-700 text-stone-200'
                 }`}
               >
+                {customPosition && (
+                  <option value="free">
+                    Custom screen ({customPosition.x}, {customPosition.y})
+                  </option>
+                )}
                 {Object.values(PERCH_TARGETS_REGISTRY).map((p) => (
                   <option key={p.id} value={p.id}>
                     {p.label}

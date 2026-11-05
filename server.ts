@@ -144,7 +144,12 @@ export async function createBlaizeServer(options?: CreateServerOptions) {
   });
 
   if (!options?.skipVite) {
-    if (!isProd) {
+    const appRoot = process.env.BLAIZE_APP_ROOT || __dirname;
+    const distPath = process.env.BLAIZE_DIST_DIR || path.resolve(appRoot, 'dist');
+    const distIndexFile = path.join(distPath, 'index.html');
+    const useStaticDist = isProd && fs.existsSync(distIndexFile);
+
+    if (!useStaticDist) {
       const { createServer: createViteServer } = await import('vite');
       const vite = await createViteServer({
         server: { middlewareMode: true },
@@ -163,10 +168,11 @@ export async function createBlaizeServer(options?: CreateServerOptions) {
           !req.path.startsWith('/node_modules/')
         ) {
           try {
-            const indexHtmlPath = path.resolve(__dirname, 'index.html');
+            const devAppRoot = process.env.BLAIZE_APP_ROOT || __dirname;
+            const indexHtmlPath = path.resolve(devAppRoot, 'index.html');
             const template = fs.readFileSync(indexHtmlPath, 'utf8');
             const transformed = await vite.transformIndexHtml(req.originalUrl, template);
-            const canInject = shouldInjectLaunchToken(req);
+            const canInject = process.env.BLAIZE_ELECTRON_MODE !== '1' && shouldInjectLaunchToken(req);
             const body = canInject ? injectLaunchTokenHtml(transformed) : transformed;
             res.status(200).set({ 'Content-Type': 'text/html' }).end(body);
             return;
@@ -179,13 +185,14 @@ export async function createBlaizeServer(options?: CreateServerOptions) {
         next();
       });
     } else {
-      const distPath = path.resolve(__dirname, 'dist');
       app.use(express.static(distPath, { index: false }));
-      app.get('*', (req, res) => {
-        const indexFile = path.join(distPath, 'index.html');
-        if (fs.existsSync(indexFile)) {
-          const raw = fs.readFileSync(indexFile, 'utf8');
-          const canInject = shouldInjectLaunchToken(req);
+      app.use((req, res, next) => {
+        if (req.method !== 'GET' || req.path.startsWith('/api')) {
+          return next();
+        }
+        if (fs.existsSync(distIndexFile)) {
+          const raw = fs.readFileSync(distIndexFile, 'utf8');
+          const canInject = process.env.BLAIZE_ELECTRON_MODE !== '1' && shouldInjectLaunchToken(req);
           const body = canInject ? injectLaunchTokenHtml(raw) : raw;
           res.status(200).set({ 'Content-Type': 'text/html' }).send(body);
         } else {
@@ -196,11 +203,12 @@ export async function createBlaizeServer(options?: CreateServerOptions) {
   } else {
     // When skipVite is enabled (e.g. testing), provide baseline HTML root handler
     app.get('/', (req, res) => {
-      const indexFile = path.resolve(__dirname, 'index.html');
+      const appRoot = process.env.BLAIZE_APP_ROOT || __dirname;
+      const indexFile = path.resolve(appRoot, 'index.html');
       const raw = fs.existsSync(indexFile)
         ? fs.readFileSync(indexFile, 'utf8')
         : '<!DOCTYPE html><html><head><title>Blaize</title></head><body><div id="root"></div></body></html>';
-      const canInject = shouldInjectLaunchToken(req);
+      const canInject = process.env.BLAIZE_ELECTRON_MODE !== '1' && shouldInjectLaunchToken(req);
       const body = canInject ? injectLaunchTokenHtml(raw) : raw;
       res.status(200).set({ 'Content-Type': 'text/html' }).send(body);
     });
@@ -210,8 +218,12 @@ export async function createBlaizeServer(options?: CreateServerOptions) {
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
-  const port = Number(process.env.APP_PORT) || Number(process.env.DEFAULT_APP_PORT) || Number(process.env.PORT) || 3000;
-  const host = process.env.BLAIZE_SERVER_HOST || process.env.HOST || '127.0.0.1';
+  const port =
+    Number(process.env.PORT) ||
+    Number(process.env.APP_PORT) ||
+    Number(process.env.DEFAULT_APP_PORT) ||
+    3000;
+  const host = process.env.BLAIZE_SERVER_HOST || process.env.HOST || '0.0.0.0';
   createBlaizeServer().then((app) => {
     app.listen(port, host, () => {
       console.log(`Blaize hardened desktop server listening on http://${host}:${port}`);
@@ -219,4 +231,5 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.a
     });
   });
 }
+
 

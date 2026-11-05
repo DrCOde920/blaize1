@@ -21,7 +21,7 @@ import * as path from 'node:path';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as crypto from 'node:crypto';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   IPC_CONTRACT_MANIFEST,
   validateIpcRequestPayload,
@@ -67,6 +67,56 @@ const CURRENT_DIR =
     ? __dirname
     : path.resolve(process.cwd(), 'electron');
 
+let desktopBackendServer: any = null;
+let desktopBackendOrigin = '';
+
+/** Starts the existing Express/Vite application inside the Electron main process. */
+export async function startEmbeddedBackend(): Promise<string> {
+  if (desktopBackendServer && desktopBackendOrigin) return desktopBackendOrigin + '/';
+
+  const appRoot = typeof app?.getAppPath === 'function' ? app.getAppPath() : path.resolve(CURRENT_DIR, '..');
+  process.env.BLAIZE_APP_ROOT = appRoot;
+  process.env.BLAIZE_DIST_DIR = path.resolve(appRoot, 'dist');
+  process.env.BLAIZE_USER_DATA_DIR = app?.getPath?.('userData') || path.join(os.homedir(), '.blaize');
+  process.env.BLAIZE_SERVER_HOST = '127.0.0.1';
+  process.env.BLAIZE_ELECTRON_MODE = '1';
+  process.env.NODE_ENV = app?.isPackaged ? 'production' : (process.env.NODE_ENV || 'development');
+
+  const backendPath = path.join(CURRENT_DIR, 'server.mjs');
+  if (!fs.existsSync(backendPath)) {
+    throw new Error('Embedded backend bundle is missing: ' + backendPath + '. Run desktop:build first.');
+  }
+  const backendModule = await import(pathToFileURL(backendPath).href);
+  if (typeof backendModule.createBlaizeServer !== 'function') {
+    throw new Error('Embedded backend does not export createBlaizeServer().');
+  }
+
+  const expressApp = await backendModule.createBlaizeServer();
+  const server = expressApp.listen(0, '127.0.0.1');
+  await new Promise<void>((resolve, reject) => {
+    server.once('listening', resolve);
+    server.once('error', reject);
+  });
+  const address = server.address();
+  if (!address || typeof address === 'string') {
+    server.close();
+    throw new Error('Embedded backend did not bind to a TCP loopback port.');
+  }
+
+  desktopBackendServer = server;
+  desktopBackendOrigin = 'http://127.0.0.1:' + address.port;
+
+  // Confirm that the server is actually serving its health endpoint before opening UI.
+  const health = await fetch(desktopBackendOrigin + '/api/health');
+  if (!health.ok) {
+    server.close();
+    desktopBackendServer = null;
+    desktopBackendOrigin = '';
+    throw new Error('Embedded backend health check failed with HTTP ' + health.status + '.');
+  }
+  return desktopBackendOrigin + '/';
+}
+
 // ============================================================================
 // 1. HARDENED SECURITY CONSTANTS & NAVIGATION / PERMISSION GUARDS
 // ============================================================================
@@ -90,7 +140,7 @@ export const RESTRICTIVE_CSP_HEADER =
   "style-src 'self' 'unsafe-inline'; " +
   "img-src 'self' data: blob:; " +
   "font-src 'self' data:; " +
-  "connect-src 'self' http://localhost:3000 http://127.0.0.1:3000 https://api.meta.ai; " +
+  "connect-src 'self' ws://127.0.0.1:* https://api.meta.ai; " +
   "object-src 'none'; " +
   "base-uri 'self'; " +
   "frame-ancestors 'none'; " +
@@ -121,7 +171,7 @@ export function isAllowedNavigationOrigin(
   try {
     const parsed = new URL(rawUrl);
     if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
-      return ALLOWED_DEV_ORIGINS.has(parsed.origin);
+      return ALLOWED_DEV_ORIGINS.has(parsed.origin) || Boolean(desktopBackendOrigin && parsed.origin === desktopBackendOrigin);
     }
     if (parsed.protocol === 'app:') {
       return parsed.origin === 'app://blaize' || parsed.host === 'blaize';
@@ -497,6 +547,12 @@ export function gracefulShutdown(): void {
   }
   systemTray = null;
 
+  if (desktopBackendServer) {
+    try { desktopBackendServer.close(); } catch { /* ignore shutdown race */ }
+    desktopBackendServer = null;
+    desktopBackendOrigin = '';
+  }
+
   if (desktopDurableDb) {
     try {
       desktopDurableDb.close();
@@ -596,7 +652,7 @@ export function getShellCapabilitiesState(): DesktopShellCapabilities {
   };
 }
 
-export function createWindow(): any {
+export function createWindow(startUrlOverride?: string): any {
   if (!BrowserWindow) return null;
 
   const preloadPath = fs.existsSync(path.join(CURRENT_DIR, 'preload.cjs'))
@@ -624,9 +680,11 @@ export function createWindow(): any {
         { urls: ['http://localhost:*/*', 'http://127.0.0.1:*/*', 'http://[::1]:*/*'] },
         (details: any, callback: any) => {
           const requestHeaders = { ...details.requestHeaders };
-          const token = process.env.BLAIZE_LAUNCH_TOKEN;
-          if (token) {
-            requestHeaders['X-Blaize-Launch-Token'] = token;
+          let requestOrigin = '';
+          try { requestOrigin = new URL(details.url).origin; } catch { /* malformed URL: do not attach token */ }
+          if (desktopBackendOrigin && requestOrigin === desktopBackendOrigin) {
+            const token = process.env.BLAIZE_LAUNCH_TOKEN;
+            if (token) requestHeaders['X-Blaize-Launch-Token'] = token;
           }
           callback({ requestHeaders });
         }
@@ -696,11 +754,7 @@ export function createWindow(): any {
   });
 
   const packagedIndexHtml = path.join(allowedDistRoot, 'index.html');
-  const startUrl =
-    process.env.VITE_DEV_SERVER_URL ||
-    (process.env.NODE_ENV === 'production' && fs.existsSync(packagedIndexHtml)
-      ? `file://${packagedIndexHtml}`
-      : 'http://localhost:3000');
+  const startUrl = startUrlOverride || process.env.VITE_DEV_SERVER_URL || ('file://' + packagedIndexHtml);
 
   mainWindow.loadURL(startUrl).catch((err: any) => {
     const msg = redactSecretsFromText(err?.message || String(err));
@@ -713,6 +767,10 @@ export function createWindow(): any {
 
   mainWindow.on('closed', () => {
     mainWindow = null;
+    // Keep the 2D companion alive on the desktop when the Blaize main window is closed
+    if (floatingCompanionWindow && typeof floatingCompanionWindow.show === 'function') {
+      floatingCompanionWindow.show();
+    }
   });
 
   return mainWindow;
@@ -1017,6 +1075,9 @@ export function registerIpcHandlers(options?: {
             webPreferences: {
               ...HARDENED_WEB_PREFERENCES,
             },
+          });
+          floatingCompanionWindow.on?.('closed', () => {
+            floatingCompanionWindow = null;
           });
         }
         floatingCompanionWindow?.show?.();
@@ -1409,14 +1470,15 @@ export function initApp(): void {
   });
 
   app.on('window-all-closed', () => {
-    if (process.platform !== 'darwin') {
+    // Only quit the process once both the Blaize main window and the 2D companion figure have been exited
+    if (process.platform !== 'darwin' && !floatingCompanionWindow) {
       app.quit();
     }
   });
 
   app
     .whenReady()
-    .then(() => {
+    .then(async () => {
       initializeDesktopDirectories();
       registerIpcHandlers();
       isReady = true;
@@ -1439,7 +1501,8 @@ export function initApp(): void {
         return;
       }
 
-      createWindow();
+      const desktopStartUrl = await startEmbeddedBackend();
+      createWindow(desktopStartUrl);
 
       if (powerMonitor && typeof powerMonitor.on === 'function') {
         powerMonitor.on('suspend', () => {
@@ -1452,7 +1515,11 @@ export function initApp(): void {
 
       app.on('activate', () => {
         if (BrowserWindow && mainWindow === null) {
-          createWindow();
+          void startEmbeddedBackend().then((url) => createWindow(url)).catch((err) => {
+            const msg = redactSecretsFromText(err?.message || String(err));
+            startupErrors.push(msg);
+            recordLocalRedactedCrashReport({ source: 'main', message: 'Backend restart failed: ' + msg });
+          });
         }
       });
     })
@@ -1464,6 +1531,8 @@ export function initApp(): void {
         message: `Startup failure: ${msg}`,
         stack: err?.stack,
       });
+      try { app?.showErrorBox?.('Blaize startup failed', msg); } catch { /* ignore UI reporting failures */ }
+      try { app?.quit?.(); } catch { /* ignore shutdown failures */ }
     });
 }
 

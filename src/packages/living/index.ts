@@ -5266,4 +5266,54 @@ export function computePerchPlacement(params: {
   };
 }
 
+export interface FreeCompanionPosition {
+  x: number;
+  y: number;
+}
+
+export function clampFreeCompanionPosition(params: {
+  x: number;
+  y: number;
+  viewportWidth: number;
+  viewportHeight: number;
+  companionWidth?: number;
+  companionHeight?: number;
+}): FreeCompanionPosition {
+  const vw = Math.max(320, params.viewportWidth || 1440);
+  const vh = Math.max(320, params.viewportHeight || 900);
+  const cw = Math.max(40, params.companionWidth ?? 80);
+  const ch = Math.max(48, params.companionHeight ?? 96);
+
+  const minX = 8;
+  const maxX = Math.max(minX, vw - cw - 8);
+  const minY = 24;
+  const maxY = Math.max(minY, vh - ch - 8);
+
+  return {
+    x: Math.round(Math.max(minX, Math.min(maxX, params.x))),
+    y: Math.round(Math.max(minY, Math.min(maxY, params.y))),
+  };
+}
+
+export interface DesktopCompanionLifecycleState {
+  blaizeWindowOpen: boolean;
+  companionAliveOnDesktop: boolean;
+  allDesktopSurfacesClosed: boolean;
+}
+
+export function computeDesktopCompanionLifecycle(params: {
+  isBlaizeWindowClosed: boolean;
+  isCompanionExited: boolean;
+}): DesktopCompanionLifecycleState {
+  const blaizeWindowOpen = !params.isBlaizeWindowClosed;
+  // Morrow stays alive on the desktop even if Blaize is closed, until the user right-clicks and exits Morrow too
+  const companionAliveOnDesktop = !params.isCompanionExited;
+  return {
+    blaizeWindowOpen,
+    companionAliveOnDesktop,
+    allDesktopSurfacesClosed: !blaizeWindowOpen && !companionAliveOnDesktop,
+  };
+}
+
+
 

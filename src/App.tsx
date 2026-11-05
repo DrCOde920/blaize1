@@ -790,6 +790,8 @@ export default function App() {
   const [commandQuery, setCommandQuery] = useState<string>('');
   const [commandCategory, setCommandCategory] = useState<CommandPaletteCategory | 'all'>('all');
   const [shortcutsOpen, setShortcutsOpen] = useState<boolean>(false);
+  const [isBlaizeWindowClosed, setIsBlaizeWindowClosed] = useState<boolean>(false);
+  const [isMorrowExited, setIsMorrowExited] = useState<boolean>(false);
 
   // Workspace Projects, Artifacts, Reusable Skills, Connectors, Scheduler & IDE State
   const [projects, setProjects] = useState<WorkspaceProject[]>(INITIAL_WORKSPACE_PROJECTS);
@@ -1240,10 +1242,13 @@ export default function App() {
     useState<MeasuredEvaluationReport | null>(null);
   const [isRunningEval, setIsRunningEval] = useState<boolean>(false);
 
-  // Onboarding starts open if fresh install (onboardingCompleted: false)
-  const [onboardingModalOpen, setOnboardingModalOpen] = useState<boolean>(
-    !persistedInit.onboardingCompleted
-  );
+  // Onboarding starts open if fresh install (onboardingCompleted: false), unless ?autostart=1 is passed
+  const [onboardingModalOpen, setOnboardingModalOpen] = useState<boolean>(() => {
+    if (typeof window !== 'undefined' && window.location.search.includes('autostart=1')) {
+      return false;
+    }
+    return !persistedInit.onboardingCompleted;
+  });
   const [onboardingPinInput, setOnboardingPinInput] = useState<string>('');
   const [biometricSimulated, setBiometricSimulated] = useState<boolean>(
     persistedInit.biometricSimulatedEnabled
@@ -2615,35 +2620,106 @@ export default function App() {
       }`}
     >
       {/* Mobile Drawer Backdrop */}
-      {mobileSidebarOpen && (
+      {!isBlaizeWindowClosed && mobileSidebarOpen && (
         <div
           className="fixed inset-0 z-40 bg-black/50 md:hidden"
           onClick={() => setMobileSidebarOpen(false)}
         />
       )}
 
-      {/* LEFT SIDEBAR: Top-level buttons ONLY (Chat, Projects, Library, Workbench, Automations, Proof; Settings in footer). No sub-buttons listed under any button. */}
-      <aside
-        aria-label="Primary Sidebar Navigation"
-        className={`fixed md:static inset-y-0 left-0 z-50 flex flex-col justify-between border-r shrink-0 transition-all duration-150 select-none ${
-          mobileSidebarOpen ? 'translate-x-0 w-60' : '-translate-x-full md:translate-x-0'
-        } ${sidebarCollapsed ? 'md:w-14' : 'md:w-60'} ${
-          isLight
-            ? 'bg-[#F1F5F9] border-stone-200 text-stone-800'
-            : 'bg-[#10141D] border-stone-800/80 text-stone-200'
-        }`}
-      >
-        <div className="p-2.5 space-y-2.5 overflow-y-auto flex-1">
-          {/* Brand Header & Collapse Rail Toggle */}
-          <div className="flex items-center justify-between px-1">
-            {!sidebarCollapsed && (
-              <div className="flex items-center gap-2">
-                <div className="w-6 h-6 rounded-lg bg-sky-600 text-white font-semibold text-xs flex items-center justify-center">
-                  B
-                </div>
-                <span className="font-semibold text-sm tracking-tight">Blaize</span>
+      {isBlaizeWindowClosed ? (
+        <div
+          data-testid="desktop-backdrop-stage"
+          className={`flex-1 h-full w-full relative overflow-hidden flex flex-col justify-between p-6 select-none ${
+            isLight
+              ? 'bg-gradient-to-br from-slate-100 via-stone-100 to-sky-50 text-stone-800'
+              : 'bg-gradient-to-br from-[#060911] via-[#0B101B] to-[#0F172A] text-stone-100'
+          }`}
+        >
+          {/* Desktop Shortcut Icons (Top-Left) */}
+          <div className="flex flex-col items-start gap-3 z-10">
+            <button
+              type="button"
+              data-testid="relaunch-blaize-desktop-btn"
+              onClick={() => setIsBlaizeWindowClosed(false)}
+              className={`group flex flex-col items-center gap-1.5 p-3 rounded-2xl border transition-all ${
+                isLight
+                  ? 'bg-white/80 hover:bg-white border-stone-200/80 shadow-sm'
+                  : 'bg-stone-900/70 hover:bg-stone-900 border-stone-800/80 shadow-lg'
+              }`}
+            >
+              <div className="w-10 h-10 rounded-xl bg-sky-600 text-white font-bold text-base flex items-center justify-center shadow-md group-hover:scale-105 transition-transform">
+                B
               </div>
+              <span className="text-[11px] font-medium">Open Blaize</span>
+            </button>
+
+            {isMorrowExited && (
+              <button
+                type="button"
+                data-testid="relaunch-morrow-desktop-btn"
+                onClick={() => setIsMorrowExited(false)}
+                className={`group flex flex-col items-center gap-1.5 p-3 rounded-2xl border transition-all ${
+                  isLight
+                    ? 'bg-white/80 hover:bg-white border-stone-200/80 shadow-sm'
+                    : 'bg-stone-900/70 hover:bg-stone-900 border-stone-800/80 shadow-lg'
+                }`}
+              >
+                <div className="w-10 h-10 rounded-xl bg-emerald-600 text-white font-bold text-xs flex items-center justify-center shadow-md group-hover:scale-105 transition-transform">
+                  2D
+                </div>
+                <span className="text-[11px] font-medium">Wake {companionName}</span>
+              </button>
             )}
+          </div>
+
+          {/* Subtle Desktop Status Pill */}
+          <div className="self-center z-10">
+            <div
+              data-testid="desktop-companion-alive-banner"
+              className={`px-4 py-2 rounded-full border text-xs flex items-center gap-2.5 shadow-lg ${
+                isLight
+                  ? 'bg-white/90 border-stone-200 text-stone-700'
+                  : 'bg-stone-900/90 border-stone-800 text-stone-300'
+              }`}
+            >
+              <span
+                className={`w-2 h-2 rounded-full ${
+                  isMorrowExited ? 'bg-stone-500' : 'bg-emerald-400'
+                }`}
+              />
+              <span>
+                {isMorrowExited
+                  ? `Blaize and ${companionName} are closed.`
+                  : `Blaize window is closed · ${companionName} is still alive on your desktop (drag her anywhere, or right-click her → Exit).`}
+              </span>
+            </div>
+          </div>
+        </div>
+      ) : (
+        <>
+          {/* LEFT SIDEBAR: Top-level buttons ONLY (Chat, Projects, Library, Workbench, Automations, Proof; Settings in footer). No sub-buttons listed under any button. */}
+          <aside
+            aria-label="Primary Sidebar Navigation"
+            className={`fixed md:static inset-y-0 left-0 z-50 flex flex-col justify-between border-r shrink-0 transition-all duration-150 select-none ${
+              mobileSidebarOpen ? 'translate-x-0 w-60' : '-translate-x-full md:translate-x-0'
+            } ${sidebarCollapsed ? 'md:w-14' : 'md:w-60'} ${
+              isLight
+                ? 'bg-[#F1F5F9] border-stone-200 text-stone-800'
+                : 'bg-[#10141D] border-stone-800/80 text-stone-200'
+            }`}
+          >
+            <div className="p-2.5 space-y-2.5 overflow-y-auto flex-1">
+              {/* Brand Header & Collapse Rail Toggle */}
+              <div className="flex items-center justify-between px-1">
+                {!sidebarCollapsed && (
+                  <div className="flex items-center gap-2">
+                    <div className="w-6 h-6 rounded-lg bg-sky-600 text-white font-semibold text-xs flex items-center justify-center">
+                      B
+                    </div>
+                    <span className="font-semibold text-sm tracking-tight">Blaize</span>
+                  </div>
+                )}
             <button
               type="button"
               onClick={() => setSidebarCollapsed((c) => !c)}
@@ -2866,45 +2942,6 @@ export default function App() {
             >
               {topBarBreadcrumbText}
             </h1>
-            {activeView === 'projects' ? (
-              <>
-                <span className="text-stone-400">·</span>
-                <span
-                  className="text-xs text-stone-400 truncate"
-                  data-testid="top-bar-project-name"
-                >
-                  {activeGeneralProject.name}
-                </span>
-              </>
-            ) : activeView === 'chat' ? (
-              <>
-                <span className="text-stone-400">·</span>
-                <span
-                  className="text-xs text-stone-400 truncate"
-                  data-testid="top-bar-chat-title"
-                >
-                  {activeThread.title}
-                </span>
-              </>
-            ) : null}
-            <span
-              data-testid="runtime-mode-status-chip"
-              title="AgentRuntime mode & live event bus status"
-              className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-medium border ${
-                isLight
-                  ? 'bg-stone-100 border-stone-200 text-stone-700'
-                  : 'bg-stone-900 border-stone-800 text-stone-300'
-              }`}
-            >
-              <span
-                className={`w-1.5 h-1.5 rounded-full ${
-                  modelMode === 'live' ? 'bg-emerald-400' : 'bg-amber-400'
-                }`}
-              />
-              <span>
-                {modelMode === 'live' ? 'Live API' : 'Mock (Simulated)'} · {runtimeStatusChip}
-              </span>
-            </span>
           </div>
 
           <div
@@ -2912,51 +2949,6 @@ export default function App() {
               activeView !== 'chat' ? 'mr-36' : ''
             }`}
           >
-            <button
-              type="button"
-              data-testid="open-pc-operator-btn"
-              onClick={() => setActiveView('pc_operator')}
-              className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-xs font-medium transition-colors ${
-                activeView === 'pc_operator'
-                  ? 'bg-amber-500 text-black border-amber-400 font-semibold'
-                  : isLight
-                    ? 'bg-white border-stone-200 text-stone-700 hover:bg-stone-50'
-                    : 'bg-stone-900 border-amber-500/40 text-amber-300 hover:bg-stone-800'
-              }`}
-            >
-              <Laptop className="w-3.5 h-3.5" />
-              <span>PC Operator</span>
-            </button>
-
-            <button
-              type="button"
-              data-testid="open-onboarding-btn"
-              onClick={() => setOnboardingModalOpen(true)}
-              className={`hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-xs transition-colors ${
-                isLight
-                  ? 'bg-white border-stone-200 text-stone-600 hover:bg-stone-50'
-                  : 'bg-stone-900 border-stone-800 text-stone-300 hover:bg-stone-800'
-              }`}
-            >
-              <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
-              <span>Setup</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setCommandPaletteOpen(true)}
-              aria-label="Open command palette"
-              className={`hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-xs transition-colors ${
-                isLight
-                  ? 'bg-white border-stone-200 text-stone-600 hover:bg-stone-50'
-                  : 'bg-stone-900 border-stone-800 text-stone-300 hover:bg-stone-800'
-              }`}
-            >
-              <Command className="w-3.5 h-3.5 text-sky-400" />
-              <span>Command</span>
-              <kbd className="text-[10px] text-stone-400">Ctrl+K</kbd>
-            </button>
-
             {activeView === 'chat' && (
               <button
                 type="button"
@@ -2973,6 +2965,34 @@ export default function App() {
                 <span>Artifacts ({artifacts.length})</span>
               </button>
             )}
+            {isMorrowExited && (
+              <button
+                type="button"
+                data-testid="relaunch-morrow-topbar-btn"
+                onClick={() => setIsMorrowExited(false)}
+                className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-xs font-medium transition-colors ${
+                  isLight
+                    ? 'bg-emerald-50 border-emerald-200 text-emerald-700 hover:bg-emerald-100'
+                    : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/20'
+                }`}
+              >
+                <span>Wake {companionName}</span>
+              </button>
+            )}
+            <button
+              type="button"
+              data-testid="close-blaize-window-btn"
+              onClick={() => setIsBlaizeWindowClosed(true)}
+              aria-label={`Close Blaize window (${companionName} stays alive on desktop)`}
+              title={`Close Blaize window (${companionName} stays alive on desktop)`}
+              className={`p-1.5 rounded-lg border transition-colors ${
+                isLight
+                  ? 'border-stone-200 text-stone-500 hover:bg-rose-50 hover:text-rose-600 hover:border-rose-200'
+                  : 'border-stone-800 text-stone-400 hover:bg-rose-500/15 hover:text-rose-300 hover:border-rose-500/30'
+              }`}
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
           </div>
         </header>
 
@@ -5458,6 +5478,8 @@ export default function App() {
           className="pointer-events-none fixed bottom-0 right-0 w-40 h-2"
         />
       </div>
+      </>
+      )}
 
       {/* COMMAND PALETTE MODAL (Ctrl/Cmd+K) */}
       {commandPaletteOpen && (
@@ -5597,7 +5619,7 @@ export default function App() {
 
       {/* FIRST-RUN BRIEFING MODAL (Name Companion, Role Templates, Job Description, Off Limits, Vault Identity, Spoken Summary Card) */}
       <FirstRunBriefingModal
-        isOpen={onboardingModalOpen}
+        isOpen={onboardingModalOpen && !isBlaizeWindowClosed}
         onClose={() => setOnboardingModalOpen(false)}
         isLight={isLight}
         companionName={companionName}
@@ -6013,6 +6035,10 @@ export default function App() {
         onMarkRecordingCheckpoint={() => {
           handleAddManualKeyframe('User marked checkpoint from Morrow floating bar');
         }}
+        isBlaizeWindowClosed={isBlaizeWindowClosed}
+        onReopenBlaizeWindow={() => setIsBlaizeWindowClosed(false)}
+        isCompanionExited={isMorrowExited}
+        onExitCompanion={() => setIsMorrowExited(true)}
         characterParametricState={characterParametricState}
       />
     </div>

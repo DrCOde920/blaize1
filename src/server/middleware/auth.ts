@@ -14,6 +14,7 @@ import {
   getPerLaunchAuthToken,
   isAllowedOrigin,
   isAllowedHost,
+  isExactCloudRunHost,
   isLoopbackAddress,
 } from '../config';
 
@@ -22,6 +23,10 @@ import {
  * Rejects arbitrary or spoofed Host headers (e.g. evil.com) with 403 Forbidden.
  */
 export function hostValidationMiddleware(req: Request, res: Response, next: NextFunction): void {
+  const normalizedPath = req.path?.replace(/\/+$/, '') || '/';
+  if (normalizedPath === '/api/health' || normalizedPath === '/health') {
+    return next();
+  }
   const host = req.headers.host;
   if (!host || !isAllowedHost(host)) {
     res.status(403).json({
@@ -35,7 +40,8 @@ export function hostValidationMiddleware(req: Request, res: Response, next: Next
 }
 
 /**
- * Prevents remote access to privileged desktop APIs from non-loopback network interfaces.
+ * Prevents remote access to privileged desktop APIs from non-loopback network interfaces,
+ * while permitting requests through the Cloud Run ingress proxy when targeting exact Cloud Run hosts.
  */
 export function remoteAccessProtectionMiddleware(req: Request, res: Response, next: NextFunction): void {
   const normalizedPath = req.path.replace(/\/+$/, '') || '/';
@@ -47,8 +53,19 @@ export function remoteAccessProtectionMiddleware(req: Request, res: Response, ne
     return next();
   }
 
+  const hostHeader = req.headers?.host;
+  const xForwardedHost = req.headers?.['x-forwarded-host'];
+  const isCloudRunHost =
+    isExactCloudRunHost(typeof hostHeader === 'string' ? hostHeader : undefined) ||
+    isExactCloudRunHost(typeof xForwardedHost === 'string' ? xForwardedHost : undefined);
+
   const remoteIp = req.socket?.remoteAddress;
-  if (remoteIp && !isLoopbackAddress(remoteIp) && process.env.ALLOW_REMOTE_API_ACCESS !== 'true') {
+  if (
+    remoteIp &&
+    !isLoopbackAddress(remoteIp) &&
+    !isCloudRunHost &&
+    process.env.ALLOW_REMOTE_API_ACCESS !== 'true'
+  ) {
     res.status(403).json({
       ok: false,
       errorCode: 'REMOTE_ACCESS_DENIED',

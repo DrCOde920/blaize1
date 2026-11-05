@@ -1,5 +1,7 @@
 import React, { useState, useMemo } from 'react';
 import { apiFetch } from '../utils/api_client';
+import { NativeDesktopHostPanel } from './NativeDesktopHostPanel';
+import { getPlatformBridge } from '../packages/platform';
 import {
   Terminal,
   Shield,
@@ -80,8 +82,12 @@ export const PCOperatorView: React.FC<PCOperatorViewProps> = ({
   onRecordAuditEvent,
   onSendPatchToReview,
 }) => {
+  const platformBridge = getPlatformBridge();
+  const initialPlatform: DesktopOSPlatform = platformBridge.isElectron
+    ? platformBridge.platform === 'win32' ? 'windows' : platformBridge.platform === 'darwin' ? 'macos' : 'linux'
+    : 'linux';
   const [activeTab, setActiveTab] = useState<PCOperatorTabId>(initialTab);
-  const [platform, setPlatform] = useState<DesktopOSPlatform>('macos');
+  const [platform, setPlatform] = useState<DesktopOSPlatform>(initialPlatform);
   const [localHowMuch, setLocalHowMuch] = useState<HowMuchShouldIAskPreference>(
     DEFAULT_HOW_MUCH_SHOULD_I_ASK
   );
@@ -117,7 +123,7 @@ export const PCOperatorView: React.FC<PCOperatorViewProps> = ({
   const [hardStopMaxCost, setHardStopMaxCost] = useState<number>(0.25);
   const [loopResult, setLoopResult] = useState(() =>
     runDesktopExecutionLoop({
-      driver: createDesktopDriver('macos'),
+      driver: createDesktopDriver(initialPlatform),
       profileStore: new AppCapabilityProfileStore(),
       commands: [
         {
@@ -457,6 +463,8 @@ export const PCOperatorView: React.FC<PCOperatorViewProps> = ({
         </div>
       </div>
 
+      <NativeDesktopHostPanel />
+
       {/* Navigation Tabs */}
       <div className="flex flex-wrap items-center gap-1.5 border-b border-[#1E2430] pb-3">
         {[
@@ -494,7 +502,7 @@ export const PCOperatorView: React.FC<PCOperatorViewProps> = ({
           {/* Active Driver Banner */}
           <div className="bg-[#12161F] border border-[#1E2430] rounded-xl p-4 flex flex-wrap items-center justify-between gap-4">
             <div>
-              <div className="text-xs font-mono text-amber-400 uppercase">Active DesktopDriver Implementation</div>
+              <div className="text-xs font-mono text-amber-400 uppercase">Scenario Driver Preview (native host controls are above)</div>
               <div className="text-sm font-semibold text-white mt-0.5">{driver.driverName}</div>
               <div className="flex flex-wrap gap-2 mt-2">
                 {driver.nativeApisUsed.map((api) => (

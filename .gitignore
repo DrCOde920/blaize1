@@ -19,3 +19,4 @@ coverage/
 *.webm
 *.mp4
 !public/*
+.blaize-desktop-remediation-backup/

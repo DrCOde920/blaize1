@@ -23,6 +23,7 @@ export interface DesktopBuildManifest {
   files: {
     mainCjs: { path: string; sha256: string; bytes: number };
     preloadCjs: { path: string; sha256: string; bytes: number };
+    serverEsm: { path: string; sha256: string; bytes: number };
     rendererIndexHtml: { path: string; sha256: string; bytes: number };
   };
 }
@@ -74,6 +75,21 @@ export async function buildDesktopArtifacts(options?: { skipFrontend?: boolean }
     logLevel: 'warning',
   });
 
+  const serverOut = path.join(distElectronDir, 'server.mjs');
+  console.log('[desktop:build] Bundling server.ts -> dist-electron/server.mjs ...');
+  await build({
+    entryPoints: [path.join(rootDir, 'server.ts')],
+    outfile: serverOut,
+    bundle: true,
+    platform: 'node',
+    target: 'node22',
+    format: 'esm',
+    packages: 'external',
+    external: ['node:sqlite'],
+    sourcemap: true,
+    logLevel: 'warning',
+  });
+
   const pkgJson = JSON.parse(fs.readFileSync(path.join(rootDir, 'package.json'), 'utf8'));
   const electronVersion =
     pkgJson.devDependencies?.electron || pkgJson.dependencies?.electron || 'unknown';
@@ -85,6 +101,7 @@ export async function buildDesktopArtifacts(options?: { skipFrontend?: boolean }
 
   const mainStats = sha256File(mainOut);
   const preloadStats = sha256File(preloadOut);
+  const serverStats = sha256File(serverOut);
   const indexStats = sha256File(indexHtmlPath);
 
   const manifest: DesktopBuildManifest = {
@@ -95,6 +112,7 @@ export async function buildDesktopArtifacts(options?: { skipFrontend?: boolean }
     files: {
       mainCjs: { path: 'dist-electron/main.cjs', ...mainStats },
       preloadCjs: { path: 'dist-electron/preload.cjs', ...preloadStats },
+      serverEsm: { path: 'dist-electron/server.mjs', ...serverStats },
       rendererIndexHtml: { path: 'dist/index.html', ...indexStats },
     },
   };
