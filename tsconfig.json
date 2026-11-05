@@ -24,5 +24,5 @@
     "allowImportingTsExtensions": true,
     "noEmit": true
   },
-  "exclude": ["dist", "dist-electron", "release", "Blaize_Desktop_Remediation_Patch", "Blaize_Desktop_Updated_Repository"]
+  "exclude": ["dist", "dist-electron", "release", "Blaize_Desktop_Remediation_Patch"]
 }

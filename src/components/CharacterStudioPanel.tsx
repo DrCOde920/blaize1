@@ -8,7 +8,7 @@
  *   opacity, speed, position, palette, accessory toggles). Live preview with Apply, Undo,
  *   Reset to default, Size Slider, and Presets Row.
  * - Mode B: Create a new figure (CharacterSpec) + Character Packs wizard (pose slot checklist,
- *   PNG/WebP upload -> WebP in IndexedDB, feet & seat anchor editor, nearest-pose fallback,
+ *   PNG/WebP upload -> WebP in the desktop SQLite pack store (or browser-preview IndexedDB), feet & seat anchor editor, nearest-pose fallback,
  *   required license & source, Muse Image live/mock placeholder, copyable prompts, and safety guard).
  */
 
@@ -101,11 +101,15 @@ export const CharacterStudioPanel: React.FC<CharacterStudioPanelProps> = ({
   }, [companionName]);
 
   // Mode B: Create New Figure & Character Pack state
-  const [newFigureName, setNewFigureName] = useState('Astra');
+  const bootstrapPack = typeof window !== 'undefined'
+    ? window.__BLAIZE_BOOTSTRAP_CHARACTER_PACK__ as CharacterPackManifest | null | undefined
+    : undefined;
+  const [newFigureName, setNewFigureName] = useState(bootstrapPack?.spec?.name || 'Astra');
   const [newFigureDescription, setNewFigureDescription] = useState(
-    'Original adult studio architect with cobalt blue braids, silver frame glasses, and slate jacket'
+    bootstrapPack?.spec?.description || 'Original adult studio architect with cobalt blue braids, silver frame glasses, and slate jacket'
   );
   const [generatedSpec, setGeneratedSpec] = useState<CharacterSpec | null>(() => {
+    if (bootstrapPack?.spec) return bootstrapPack.spec;
     const initial = compileNaturalLanguageCharacterSpec(
       'Original adult studio architect with cobalt blue braids and slate jacket',
       'Astra'
@@ -113,30 +117,37 @@ export const CharacterStudioPanel: React.FC<CharacterStudioPanelProps> = ({
     return initial.spec || null;
   });
   const [selectedSlot, setSelectedSlot] = useState<PoseSlotId>('stand_idle');
-  const [packLicense, setPackLicense] = useState('CC-BY-4.0');
-  const [packSource, setPackSource] = useState('Original Studio Art / Muse Image Reference');
+  const [packLicense, setPackLicense] = useState(bootstrapPack?.license || 'CC-BY-4.0');
+  const [packSource, setPackSource] = useState(bootstrapPack?.sourceUrlOrNote || 'Original Studio Art / Muse Image Reference');
   const [slotAnchors, setSlotAnchors] = useState<Record<PoseSlotId, PoseAnchorPoint>>(() => {
     const map = {} as Record<PoseSlotId, PoseAnchorPoint>;
     for (const s of POSE_SLOTS) {
-      map[s] = { feetX: 0.5, feetY: 0.94, seatX: 0.5, seatY: 0.62 };
+      map[s] = bootstrapPack?.slots?.[s]?.anchor || { feetX: 0.5, feetY: 0.94, seatX: 0.5, seatY: 0.62 };
     }
     return map;
   });
   const [populatedSlots, setPopulatedSlots] = useState<
     Partial<Record<PoseSlotId, { mimeType: 'image/png' | 'image/webp'; byteSize: number; webpDataUrl: string }>>
-  >({
-    stand_idle: {
-      mimeType: 'image/webp',
-      byteSize: 42_100,
-      webpDataUrl: 'data:image/webp;base64,UklGRh4AAABXRUJQVlA4TBEAAAAvAAAAAAfQ//73v/+BiOh/AAA=',
-    },
-    sit_idle: {
-      mimeType: 'image/webp',
-      byteSize: 39_800,
-      webpDataUrl: 'data:image/webp;base64,UklGRh4AAABXRUJQVlA4TBEAAAAvAAAAAAfQ//73v/+BiOh/AAA=',
-    },
+  >(() => {
+    if (bootstrapPack?.slots && Object.keys(bootstrapPack.slots).length) {
+      return Object.fromEntries(Object.entries(bootstrapPack.slots).map(([slotId, asset]) => [slotId, {
+        mimeType: asset!.mimeType, byteSize: asset!.byteSize, webpDataUrl: asset!.webpDataUrl,
+      }])) as Partial<Record<PoseSlotId, { mimeType: 'image/png' | 'image/webp'; byteSize: number; webpDataUrl: string }>>;
+    }
+    return {
+      stand_idle: {
+        mimeType: 'image/webp',
+        byteSize: 42_100,
+        webpDataUrl: 'data:image/webp;base64,UklGRh4AAABXRUJQVlA4TBEAAAAvAAAAAAfQ//73v/+BiOh/AAA=',
+      },
+      sit_idle: {
+        mimeType: 'image/webp',
+        byteSize: 39_800,
+        webpDataUrl: 'data:image/webp;base64,UklGRh4AAABXRUJQVlA4TBEAAAAvAAAAAAfQ//73v/+BiOh/AAA=',
+      },
+    };
   });
-  const [activePackMessage, setActivePackMessage] = useState<string | null>(null);
+  const [activePackMessage, setActivePackMessage] = useState<string | null>(() => bootstrapPack ? `${bootstrapPack.name} restored from desktop storage.` : null);
   const [copiedPromptNote, setCopiedPromptNote] = useState<string | null>(null);
 
   const previewState = pendingPreviewPatch
@@ -196,7 +207,7 @@ export const CharacterStudioPanel: React.FC<CharacterStudioPanelProps> = ({
     }
     const reader = new FileReader();
     reader.onload = () => {
-      // Convert to WebP in browser via offscreen canvas and store in IndexedDB
+      // Convert to WebP in browser via offscreen canvas; persist the completed pack in SQLite on desktop or IndexedDB in preview.
       const dataUrl = typeof reader.result === 'string' ? reader.result : '';
       setPopulatedSlots((prev) => ({
         ...prev,
@@ -244,26 +255,37 @@ export const CharacterStudioPanel: React.FC<CharacterStudioPanelProps> = ({
       return;
     }
 
-    // Store active pack in IndexedDB (keeps only active pack loaded)
-    try {
-      if (typeof indexedDB !== 'undefined') {
-        const req = indexedDB.open('blaize_character_packs_db', 1);
-        req.onupgradeneeded = () => {
-          const db = req.result;
-          if (!db.objectStoreNames.contains('active_pack')) {
-            db.createObjectStore('active_pack', { keyPath: 'id' });
-          }
-        };
-        req.onsuccess = () => {
-          const db = req.result;
-          const tx = db.transaction('active_pack', 'readwrite');
-          const store = tx.objectStore('active_pack');
-          store.clear();
-          store.put({ id: 'current_active_pack', manifest });
-        };
+    // Desktop builds keep the active pack in the same SQLite store as workspace state.
+    // Browser preview keeps the existing IndexedDB fallback.
+    if (typeof window !== 'undefined' && window.electronAPI?.isElectron) {
+      const now = Date.now();
+      void window.electronAPI.storage.putRecord('character_packs', {
+        id: 'current_active_pack', collection: 'character_packs', data: { manifest },
+        createdAt: now, updatedAt: now,
+      }).then(() => setActivePackMessage(`Active Pack "${manifest.name}" saved to desktop SQLite.`))
+        .catch((error) => setSafetyError(`Character pack could not be saved to SQLite: ${String(error?.message || error)}`));
+    } else {
+      try {
+        if (typeof indexedDB !== 'undefined') {
+          const req = indexedDB.open('blaize_character_packs_db', 1);
+          req.onupgradeneeded = () => {
+            const db = req.result;
+            if (!db.objectStoreNames.contains('active_pack')) db.createObjectStore('active_pack', { keyPath: 'id' });
+          };
+          req.onsuccess = () => {
+            const db = req.result;
+            const tx = db.transaction('active_pack', 'readwrite');
+            const store = tx.objectStore('active_pack');
+            store.clear();
+            store.put({ id: 'current_active_pack', manifest });
+            tx.oncomplete = () => db.close();
+            tx.onerror = () => db.close();
+          };
+        }
+        setActivePackMessage(`Active Pack "${manifest.name}" saved to browser storage. Missing poses automatically fall back to nearest pose.`);
+      } catch (error: any) {
+        setSafetyError(`Character pack storage is unavailable: ${String(error?.message || error)}`);
       }
-    } catch {
-      // IndexedDB unavailable in non-browser environment
     }
 
     onApplyPatch(
@@ -272,9 +294,6 @@ export const CharacterStudioPanel: React.FC<CharacterStudioPanelProps> = ({
         summary: `Activated Character Pack: ${manifest.name}`,
       },
       `Activated Character Pack "${manifest.name}" (${Object.keys(populatedSlots).length}/9 slots, License: ${manifest.license})`
-    );
-    setActivePackMessage(
-      `Active Pack "${manifest.name}" saved to IndexedDB. Missing poses automatically fall back to nearest pose.`
     );
   };
 
@@ -1007,7 +1026,7 @@ export const CharacterStudioPanel: React.FC<CharacterStudioPanelProps> = ({
                   className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs inline-flex items-center gap-1.5"
                 >
                   <ImageIcon className="w-3.5 h-3.5" />
-                  <span>Validate &amp; Load Pack in IndexedDB</span>
+                  <span>Validate &amp; Activate Pack</span>
                 </button>
                 <button
                   type="button"

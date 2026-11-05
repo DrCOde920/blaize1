@@ -34,9 +34,12 @@ import {
   stageVerifiedUpdateBundle,
   verifySafeStorage,
   gracefulShutdown,
+  getDesktopDurableDb,
+  pruneExpiredRecordingSessions,
   type IpcSenderEventLike,
 } from '../../../electron/main.js';
 import { UniversalPlatformBridge } from './index.js';
+import { isSensitiveAccessibleValue } from '../recorder/privacy_detector.js';
 import { buildDesktopArtifacts } from '../../../scripts/build-desktop.js';
 import { packageDesktopTarget } from '../../../scripts/package-desktop.js';
 
@@ -74,7 +77,7 @@ describe('Phase 5 — Reproducible, Secure Electron Desktop Foundation', () => {
     const registered = new Set(getRegisteredIpcChannels());
     const manifestKeys = Object.keys(IPC_CONTRACT_MANIFEST) as Array<keyof ElectronIpcChannels>;
 
-    assert.equal(manifestKeys.length, 26, 'Expected 26 explicit IPC channels in manifest');
+    assert.equal(manifestKeys.length, 28, 'Expected 28 explicit IPC channels in manifest');
     assert.equal(
       registered.size,
       manifestKeys.length,
@@ -444,7 +447,86 @@ describe('Phase 5 — Reproducible, Secure Electron Desktop Foundation', () => {
     }
   });
 
-  it('6. handles single-instance lock, local secret-redacted crash reports, and Ed25519 + SHA-256 verified update staging', async () => {
+  it('6. expires keep_24h recordings, keyframes and WebM blobs while preserving keep_until_deleted sessions', async () => {
+    const db = getDesktopDurableDb();
+    const expiredAt = Date.now() - (25 * 60 * 60 * 1000);
+    const blobBytes = Buffer.from('recorded-video-segment', 'utf8');
+    const blobHash = crypto.createHash('sha256').update(blobBytes).digest('hex');
+    db.setBlob(blobHash, 'video/webm', blobBytes.toString('base64'));
+    db.setRecord('recorder_keyframes', 'kf-expired', { id: 'kf-expired', blobHash });
+    db.setRecord('recorder_media_segments', 'seg-expired', { id: 'seg-expired', sessionId: 'session-expired', blobHash });
+    db.setRecord('recorder_sessions', 'session-expired', {
+      session: {
+        id: 'session-expired', startedAt: new Date(expiredAt - 60_000).toISOString(), endedAt: new Date(expiredAt).toISOString(),
+        retentionPolicy: 'keep_24h', keyframes: [{ id: 'kf-expired', blobHash }], mediaSegments: [{ id: 'seg-expired', blobHash }],
+      },
+    });
+    db.setRecord('recorder_sessions', 'session-preserved', {
+      session: { id: 'session-preserved', startedAt: new Date(expiredAt).toISOString(), endedAt: new Date(expiredAt).toISOString(), retentionPolicy: 'keep_until_deleted', keyframes: [], mediaSegments: [] },
+    });
+
+    const result = pruneExpiredRecordingSessions(Date.now());
+    assert.equal(result.sessionsDeleted, 1);
+    assert.equal(result.blobsDeleted, 1);
+    assert.equal(db.getRecord('session-expired'), null);
+    assert.equal(db.getRecord('kf-expired'), null);
+    assert.equal(db.getRecord('seg-expired'), null);
+    assert.equal(db.getBlob(blobHash), null);
+    assert.ok(db.getRecord('session-preserved'));
+  });
+
+  it('6b. recovers the actual active-session row and expires it after its last persisted update', async () => {
+    const db = getDesktopDurableDb();
+    const startedAt = new Date(Date.now() - 26 * 60 * 60 * 1000).toISOString();
+    const bytes = Buffer.from('interrupted-video', 'utf8');
+    const blobHash = crypto.createHash('sha256').update(bytes).digest('hex');
+    db.setBlob(blobHash, 'video/webm', bytes.toString('base64'));
+    db.setRecord('recorder_media_segments', 'seg-interrupted', { id: 'seg-interrupted', sessionId: 'interrupted-session', blobHash });
+    db.setRecord('recorder_sessions', 'active', {
+      session: { id: 'interrupted-session', startedAt, retentionPolicy: 'keep_24h', keyframes: [], mediaSegments: [{ id: 'seg-interrupted', blobHash }] },
+    });
+
+    const now = Date.now();
+    const recovered = pruneExpiredRecordingSessions(now, true);
+    assert.equal(recovered.sessionsDeleted, 0, 'the recent last durable update starts the recovery retention window');
+    const archived = db.getRecord('interrupted-session');
+    assert.ok(archived, 'active row is archived using the same ID convention as the app');
+    assert.equal((archived?.data as any).session.interrupted, true);
+    assert.equal(db.getRecord('active'), null);
+
+    const expired = pruneExpiredRecordingSessions(now + 24 * 60 * 60 * 1000 + 1);
+    assert.equal(expired.sessionsDeleted, 1);
+    assert.equal(expired.blobsDeleted, 1);
+    assert.equal(db.getRecord('interrupted-session'), null);
+    assert.equal(db.getBlob(blobHash), null);
+  });
+
+  it('6c. recurring retention sweeps never archive a live active recording', async () => {
+    const db = getDesktopDurableDb();
+    const liveSession = {
+      id: 'live-session', startedAt: new Date().toISOString(), retentionPolicy: 'keep_24h',
+      keyframes: [], mediaSegments: [],
+    };
+    db.setRecord('recorder_sessions', 'active', { session: liveSession });
+
+    // This models the 15-minute interval; only the one-time startup pass may recover 'active'.
+    const result = pruneExpiredRecordingSessions(Date.now() + 15 * 60 * 1000, false);
+    assert.equal(result.sessionsDeleted, 0);
+    assert.ok(db.getRecord('active'), 'the active row must remain active during periodic cleanup');
+    assert.equal(db.getRecord('live-session'), null, 'the live session must not be archived');
+
+    db.deleteRecord('active');
+  });
+
+  it('6d. privacy detector masks accessible personal identifiers and secret-like values', () => {
+    assert.equal(isSensitiveAccessibleValue('person@example.com'), true);
+    assert.equal(isSensitiveAccessibleValue('4111 1111 1111 1111'), true);
+    assert.equal(isSensitiveAccessibleValue('123-45-6789'), true);
+    assert.equal(isSensitiveAccessibleValue('sk_live_0123456789abcdefghijkl'), true);
+    assert.equal(isSensitiveAccessibleValue('Quarterly revenue summary'), false);
+  });
+
+  it('7. handles single-instance lock, local secret-redacted crash reports, and Ed25519 + SHA-256 verified update staging', async () => {
     registerIpcHandlers();
     const sender = createTrustedSenderEvent();
 
@@ -532,7 +614,7 @@ describe('Phase 5 — Reproducible, Secure Electron Desktop Foundation', () => {
     assert.equal(badSigRes.errorCode, 'UPDATE_SIGNATURE_INVALID');
   });
 
-  it('7. reports honest UNSUPPORTED states for tray, floating companion, global shortcut, and PC input in Web Preview and headless environments', async () => {
+  it('8. reports honest UNSUPPORTED states for tray, floating companion, global shortcut, and PC input in Web Preview and headless environments', async () => {
     registerIpcHandlers();
     const sender = createTrustedSenderEvent();
 
@@ -572,7 +654,7 @@ describe('Phase 5 — Reproducible, Secure Electron Desktop Foundation', () => {
     assert.equal(webAction.targetWindowVerified, false);
   });
 
-  it('8. builds desktop bundles, packages the Linux artifact with SHA-256 manifest, refuses fake cross-OS installers on Linux, and passes clean-machine launch smoke test', async () => {
+  it('9. builds desktop bundles, packages the Linux artifact with SHA-256 manifest, refuses fake cross-OS installers on Linux, and passes clean-machine launch smoke test', async () => {
     const buildManifest = await buildDesktopArtifacts({ skipFrontend: false });
     assert.ok(fs.existsSync(path.join(process.cwd(), buildManifest.files.mainCjs.path)));
     assert.ok(fs.existsSync(path.join(process.cwd(), buildManifest.files.preloadCjs.path)));
@@ -615,8 +697,8 @@ describe('Phase 5 — Reproducible, Secure Electron Desktop Foundation', () => {
 
         const smokeSummary = JSON.parse(stdout.trim());
         assert.equal(smokeSummary.smokeVerified, true);
-        assert.equal(smokeSummary.registeredChannels, 26);
-        assert.equal(smokeSummary.manifestChannels, 26);
+        assert.equal(smokeSummary.registeredChannels, 28);
+        assert.equal(smokeSummary.manifestChannels, 28);
         assert.equal(smokeSummary.sqliteIntegrityOk, true);
         assert.ok(fs.existsSync(path.join(cleanMachineDir, 'blaize.sqlite')));
       } finally {

@@ -6,9 +6,9 @@
  *
  * 100% Domain-Neutral Core Module:
  * 1. Capture Sources (`RecorderSource` interface):
- *    - `ScreenCaptureSource` (REAL in browser via `navigator.mediaDevices.getDisplayMedia`):
- *      meaningful pixel-delta keyframe sampling, max frame & FPS caps, JPEG downscaling,
- *      IndexedDB storage (0 frames held in RAM), automatic track teardown, and iframe block fallback.
+ *    - `ScreenCaptureSource` (REAL in Electron): OS-selected display capture is composited through a local
+ *      privacy canvas before either WebM or JPEG persistence. Sensitive windows/controls are blurred;
+ *      stale or missing native accessibility evidence causes full-frame blur. Raw capture is never stored.
  *    - `InAppSource` (REAL): captures clicks with element descriptors, navigation, typing,
  *      scrolling, and sandboxed file operations inside Blaize Browser and Desktop Stage.
  *    - `NativeInputSource` (STUB): documented stub for future native OS shell.
@@ -31,6 +31,7 @@
  *      parallel execution for read-only non-UI skills, version pinning, token/cost budget, and failure policies.
  */
 
+import type { RecordingPrivacyState } from '../../../electron/ipc-contracts.js';
 import {
   ActionProposal,
   CoreVerifierStrategyId,
@@ -194,6 +195,9 @@ export interface RecorderSourceStatus {
   videoRecordingActive?: boolean;
   mediaSegmentsCaptured?: number;
   mediaRecordingError?: string;
+  privacyMode?: RecordingPrivacyState['mode'];
+  blurredRegionsCount?: number;
+  privacyExplanation?: string;
   active: boolean;
   paused: boolean;
   blockedByIframePermission?: boolean;
@@ -316,14 +320,16 @@ export async function loadRecordingMediaBlob(session: RecordingSession): Promise
       mimeType = blob.type || mimeType;
     }
     if (!bytes) throw new Error('VIDEO_STORAGE_UNAVAILABLE: no persistent media store is available.');
-    const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes.buffer as ArrayBuffer);
+    const exactBuffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+    const digest = await globalThis.crypto.subtle.digest('SHA-256', exactBuffer);
     const actualHash = Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, '0')).join('');
     if (actualHash !== segment.blobHash) throw new Error(`VIDEO_INTEGRITY_FAILED: ${segment.id}`);
-    const exactBuffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
     parts.push(exactBuffer);
   }
   return new Blob(parts, { type: mimeType });
 }
+
+export type RecordedMediaSegmentMeta = RecordingMediaSegmentMeta;
 
 export async function deleteRecordingMediaSegments(segments: RecordingMediaSegmentMeta[]): Promise<number> {
   let deleted = 0;
@@ -362,9 +368,12 @@ export async function deleteRecordingMediaSegments(segments: RecordingMediaSegme
 // Fallback map for Node.js unit test environment where window.indexedDB is absent
 const NODE_IDB_FALLBACK = new Map<string, { meta: StoredKeyframeMeta; jpegDataUrl: string }>();
 
-export async function saveKeyframeToIndexedDb(
+const PRIVACY_FRAME_WRITE_AUTHORITY = Symbol('privacy-compositor-frame-write');
+
+async function saveKeyframeToStorage(
   metaOrKey: StoredKeyframeMeta | string,
-  jpegDataUrl: string
+  jpegDataUrl: string,
+  authority?: symbol
 ): Promise<StoredKeyframeMeta> {
   const match = /^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/=]+)$/.exec(jpegDataUrl);
   if (!match) throw new Error('KEYFRAME_INVALID_DATA_URL: expected a base64 JPEG, PNG, or WebP data URL.');
@@ -381,6 +390,11 @@ export async function saveKeyframeToIndexedDb(
         storedInIndexedDb: false,
       }
     : { ...metaOrKey, mimeType, byteSize: bytes.byteLength, sha256Hash: blobHash };
+
+  const requestedSourceKind = typeof metaOrKey === 'string' ? 'in_app' : metaOrKey.sourceKind;
+  if (typeof window !== 'undefined' && requestedSourceKind === 'screen_capture' && authority !== PRIVACY_FRAME_WRITE_AUTHORITY) {
+    throw new Error('PRIVACY_COMPOSITOR_REQUIRED: screen-capture keyframes can only be written by the internal filtered compositor.');
+  }
 
   // Native desktop mode: binary frame bytes and metadata share the durable SQLite database.
   if (typeof window !== 'undefined' && window.electronAPI?.isElectron) {
@@ -426,6 +440,14 @@ export async function saveKeyframeToIndexedDb(
     return fallback;
   }
   throw new Error('KEYFRAME_STORAGE_UNAVAILABLE: persistent IndexedDB storage is unavailable.');
+}
+
+/** Public keyframe storage only accepts in-app captures; screen captures need the private compositor authority. */
+export async function saveKeyframeToIndexedDb(
+  metaOrKey: StoredKeyframeMeta | string,
+  jpegDataUrl: string
+): Promise<StoredKeyframeMeta> {
+  return saveKeyframeToStorage(metaOrKey, jpegDataUrl);
 }
 
 export async function deleteKeyframesFromIndexedDb(frameIds: string[]): Promise<number> {
@@ -681,12 +703,16 @@ export interface MockableMediaStream {
 
 export type DisplayMediaProvider = () => Promise<MockableMediaStream>;
 
+export type { PixelPrivacyRegion } from './privacy_filter';
+export { effectiveRecordingPrivacyMode, mapRecordingPrivacyRegionsToPixels, shouldUseFullFramePrivacyFallback } from './privacy_filter';
+import { effectiveRecordingPrivacyMode, mapRecordingPrivacyRegionsToPixels, shouldUseFullFramePrivacyFallback } from './privacy_filter';
+
 /**
- * 1. ScreenCaptureSource (REAL in browser via `navigator.mediaDevices.getDisplayMedia`):
- *    - Samples keyframes only on meaningful change
- *    - Downscales to JPEG & saves to IndexedDB
- *    - Stops all MediaStream tracks immediately when recording ends
- *    - Gracefully explains iframe permission blocks and provides upload/in-app fallback
+ * 1. ScreenCaptureSource (REAL, consent-gated selected-display capture):
+ *    - Composites the display through the native-accessibility Privacy Shield before encoding
+ *    - Saves only filtered WebM segments and filtered JPEG keyframes
+ *    - Fails closed to full-frame blur when native privacy evidence is stale or unavailable
+ *    - Stops all source and compositor tracks immediately when recording ends
  */
 export class ScreenCaptureSource implements RecorderSource {
   public readonly kind: RecorderSourceKind = 'screen_capture';
@@ -720,6 +746,15 @@ export class ScreenCaptureSource implements RecorderSource {
   private mediaRecordingError?: string;
   private onMediaError?: (message: string) => void;
   private sampling = false;
+  private outputStream: MediaStream | null = null;
+  private privacyState: RecordingPrivacyState | null = null;
+  private privacyPollTimer: ReturnType<typeof setInterval> | null = null;
+  private privacyPollPending = false;
+  private drawFrameHandle: number | null = null;
+  private lastRenderedPrivacyMode: RecordingPrivacyState['mode'] = 'blur_all';
+  private lastBlurredRegionCount = 0;
+  private onPrivacyState?: (state: RecordingPrivacyState) => void;
+  private lastPrivacyNoticeSignature = '';
 
   constructor(
     customDisplayMedia?: DisplayMediaProvider,
@@ -727,7 +762,8 @@ export class ScreenCaptureSource implements RecorderSource {
     onFrame?: (frame: StoredKeyframeMeta) => void,
     onEnded?: () => void,
     onMediaSegment?: (segment: RecordingMediaSegmentMeta) => void,
-    onMediaError?: (message: string) => void
+    onMediaError?: (message: string) => void,
+    onPrivacyState?: (state: RecordingPrivacyState) => void
   ) {
     this.customDisplayMedia = customDisplayMedia;
     this.samplerConfig = samplerConfig;
@@ -735,6 +771,7 @@ export class ScreenCaptureSource implements RecorderSource {
     this.onEnded = onEnded;
     this.onMediaSegment = onMediaSegment;
     this.onMediaError = onMediaError;
+    this.onPrivacyState = onPrivacyState;
   }
 
   public async start(consent: RecorderConsentRecord): Promise<RecorderSourceStatus> {
@@ -749,6 +786,9 @@ export class ScreenCaptureSource implements RecorderSource {
     this.mediaSegmentWrites = [];
     this.allTracksStopped = false;
     this.blockedByIframe = false;
+    this.privacyState = null;
+    this.lastRenderedPrivacyMode = 'blur_all';
+    this.lastBlurredRegionCount = 0;
 
     try {
       if (this.customDisplayMedia) {
@@ -760,9 +800,9 @@ export class ScreenCaptureSource implements RecorderSource {
       ) {
         const realStream = await navigator.mediaDevices.getDisplayMedia({
           video: {
-            width: { ideal: 1280, max: 1920 },
-            height: { ideal: 720, max: 1080 },
-            frameRate: { ideal: 2, max: 5 },
+            width: { ideal: 1920, max: 1920 },
+            height: { ideal: 1080, max: 1080 },
+            frameRate: { ideal: 15, max: 15 },
           },
           audio: false,
         });
@@ -774,8 +814,14 @@ export class ScreenCaptureSource implements RecorderSource {
       this.active = true;
       this.paused = false;
       this.startedAtMs = Date.now();
-      this.startFrameSampler();
-      this.startMediaRecorder();
+      if (typeof document === 'undefined') {
+        // Node tests can exercise sampling/storage helpers but cannot create a real compositor.
+        // Never fall back to recording the raw display stream when the privacy compositor is absent.
+        this.mediaRecordingError = 'PRIVACY_COMPOSITOR_UNAVAILABLE: This runtime cannot create a privacy-filtered video stream. No raw display video will be stored.';
+        this.onMediaError?.(this.mediaRecordingError);
+      } else {
+        await this.startPrivacyFilteredPipeline();
+      }
       for (const track of this.stream.getTracks()) {
         track.addEventListener?.('ended', () => {
           if (!this.active) return;
@@ -786,6 +832,10 @@ export class ScreenCaptureSource implements RecorderSource {
             for (const remainingTrack of this.stream?.getTracks() || []) {
               try { remainingTrack.stop(); } catch { /* already ended */ }
             }
+            for (const outputTrack of this.outputStream?.getTracks() || []) {
+              try { outputTrack.stop(); } catch { /* already ended */ }
+            }
+            this.outputStream = null;
             this.allTracksStopped = true;
             this.stream = null;
             this.onEnded?.();
@@ -797,21 +847,211 @@ export class ScreenCaptureSource implements RecorderSource {
       this.active = false;
       this.paused = false;
       this.stopFrameSampler();
-      if (this.stream) {
-        for (const track of this.stream.getTracks()) { try { track.stop(); } catch { /* no-op */ } }
-        this.stream = null;
-      }
+      await this.stopMediaRecorder().catch(() => undefined);
+      for (const track of this.stream?.getTracks() || []) { try { track.stop(); } catch { /* no-op */ } }
+      for (const track of this.outputStream?.getTracks() || []) { try { track.stop(); } catch { /* no-op */ } }
+      this.outputStream = null;
+      this.stream = null;
       const msg = err?.message || String(err);
       const isElectron = typeof window !== 'undefined' && Boolean(window.electronAPI?.isElectron);
       this.blockedByIframe = !isElectron && err?.name === 'NotAllowedError';
       this.blockExplanation = isElectron
-        ? `Display capture did not start (${msg}). Choose a display and approve the operating-system picker; no recording session was saved.`
-        : `Browser display capture did not start (${msg}). This can be caused by a user cancellation, browser permission, or an embedded-frame policy.`;
+        ? `Privacy-filtered display capture did not start (${msg}). Choose a display and approve the operating-system picker; no unfiltered recording was saved.`
+        : `Privacy-filtered display capture did not start (${msg}). Use In-app events in browser preview; unfiltered screen recording is disabled.`;
       this.fallbackSuggestion = isElectron
-        ? 'Reopen the consent sheet and select a display in the native picker, or choose In-app events.'
-        : 'Open Blaize in a standalone browser tab and allow display capture, or choose In-app events.';
+        ? 'Reopen the consent sheet and select a display in the native picker, then grant the requested desktop accessibility permission.'
+        : 'Install Blaize Desktop for native privacy detection, or choose In-app events.';
       return this.getStatus();
     }
+  }
+
+  private async refreshPrivacyState(): Promise<void> {
+    if (this.privacyPollPending) return;
+    this.privacyPollPending = true;
+    try {
+      if (!window.electronAPI?.isElectron || !window.electronAPI.pcOperator?.getRecordingPrivacyState) {
+        this.privacyState = {
+          available: false, mode: 'blur_all', capturedAtMs: Date.now(), regions: [],
+          reason: 'Native accessibility privacy detection is unavailable in browser preview. Entire frame is redacted.',
+        };
+      } else {
+        const state = await window.electronAPI.pcOperator.getRecordingPrivacyState();
+        this.privacyState = state;
+      }
+    } catch (error: any) {
+      this.privacyState = {
+        available: false, mode: 'blur_all', capturedAtMs: Date.now(), regions: [],
+        reason: `Privacy detector unavailable; fail-closed frame redaction active (${String(error?.message || error)}).`,
+      };
+    } finally {
+      this.privacyPollPending = false;
+      const state = this.privacyState;
+      if (state) {
+        const signature = `${state.mode}|${state.regions.length}|${state.reason}`;
+        if (signature !== this.lastPrivacyNoticeSignature) {
+          this.lastPrivacyNoticeSignature = signature;
+          this.onPrivacyState?.(state);
+        }
+      }
+    }
+  }
+
+  private async startPrivacyFilteredPipeline(): Promise<void> {
+    if (!this.stream || typeof document === 'undefined') throw new Error('Privacy compositor requires a document and a live display stream.');
+    const video = document.createElement('video');
+    video.muted = true;
+    video.playsInline = true;
+    video.srcObject = this.stream as unknown as MediaStream;
+    this.videoElement = video;
+    await video.play();
+    if (video.videoWidth < 1 || video.videoHeight < 1) {
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('Display video did not produce frame dimensions within 5 seconds.')), 5000);
+        video.addEventListener('loadedmetadata', () => { clearTimeout(timer); resolve(); }, { once: true });
+      });
+    }
+    if (video.videoWidth < 1 || video.videoHeight < 1) throw new Error('Display capture returned an invalid video size.');
+    const scale = Math.min(1, 1920 / video.videoWidth, 1080 / video.videoHeight);
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.floor(video.videoWidth * scale));
+    canvas.height = Math.max(1, Math.floor(video.videoHeight * scale));
+    this.canvasElement = canvas;
+    if (!canvas.getContext('2d')) throw new Error('Canvas 2D context is unavailable; refusing to record an unfiltered display stream.');
+
+    // Initial privacy scan is awaited before the first frame can enter any storage pipeline.
+    await this.refreshPrivacyState();
+    this.renderPrivacyFilteredFrame();
+    if (typeof canvas.captureStream !== 'function') throw new Error('Canvas captureStream is unavailable; refusing raw display recording.');
+    this.outputStream = canvas.captureStream(10);
+    if (!this.outputStream.getVideoTracks().length) throw new Error('Privacy compositor did not produce a video track.');
+    this.startMediaRecorder(this.outputStream);
+    this.captureTimer = setInterval(() => { void this.sampleActualFrame(); }, 1200);
+    this.privacyPollTimer = setInterval(() => { void this.refreshPrivacyState(); }, 250);
+  }
+
+  private renderPrivacyFilteredFrame(): void {
+    if (!this.active || this.paused || !this.videoElement || !this.canvasElement) return;
+    const video = this.videoElement;
+    const canvas = this.canvasElement;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) {
+      // Capture was already started from this canvas. If its context disappears, stop the
+      // recorder immediately rather than leaving a potentially stale/unredacted frame live.
+      this.mediaRecordingError = 'PRIVACY_COMPOSITOR_CONTEXT_LOST: Recording stopped because the privacy filter is unavailable.';
+      this.onMediaError?.(this.mediaRecordingError);
+      this.active = false;
+      this.paused = true;
+      this.stopFrameSampler();
+      void this.stopMediaRecorder().finally(() => {
+        for (const track of this.stream?.getTracks() || []) { try { track.stop(); } catch { /* already stopped */ } }
+        for (const track of this.outputStream?.getTracks() || []) { try { track.stop(); } catch { /* already stopped */ } }
+        this.stream = null;
+        this.outputStream = null;
+        this.allTracksStopped = true;
+        this.onEnded?.();
+      });
+      return;
+    }
+
+    const paintFullFrameFallback = () => {
+      ctx.save();
+      try {
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.globalAlpha = 1;
+        ctx.globalCompositeOperation = 'source-over';
+        ctx.filter = 'none';
+        ctx.fillStyle = '#101722';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+      } finally {
+        ctx.restore();
+      }
+      this.lastRenderedPrivacyMode = 'blur_all';
+      this.lastBlurredRegionCount = 1;
+    };
+
+    try {
+      if (video.readyState >= 2 && video.videoWidth > 0) {
+        const state = this.privacyState;
+        const mode = effectiveRecordingPrivacyMode(state, Date.now());
+        this.lastRenderedPrivacyMode = mode;
+
+        if (mode === 'blur_all') {
+          ctx.save();
+          try {
+            const canvasFilterAvailable = 'filter' in ctx;
+            if (canvasFilterAvailable) ctx.filter = 'blur(42px)';
+            const blurAvailable = canvasFilterAvailable && typeof ctx.filter === 'string' && ctx.filter.includes('blur');
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            ctx.filter = 'none';
+            // The transformed frame is darkened after blur so fine text does not remain legible.
+            // If CanvasFilter is unavailable, use a solid mask instead of a translucent fallback.
+            ctx.fillStyle = blurAvailable ? 'rgba(10, 14, 22, 0.94)' : '#101722';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+          } finally {
+            ctx.restore();
+          }
+          this.lastBlurredRegionCount = 1;
+        } else if (mode === 'clear') {
+          ctx.filter = 'none';
+          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+          this.lastBlurredRegionCount = 0;
+        } else {
+          const expectedRegions = state?.regions?.length || 0;
+          const regions = state ? mapRecordingPrivacyRegionsToPixels(state, canvas.width, canvas.height) : [];
+          const canvasFilterAvailable = 'filter' in ctx;
+          // A detected region that cannot be mapped precisely must never degrade to a clear frame.
+          if (shouldUseFullFramePrivacyFallback(mode, expectedRegions, regions.length, canvasFilterAvailable)) {
+            paintFullFrameFallback();
+          } else {
+            ctx.filter = 'none';
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            let allRegionsBlurred = true;
+            for (const region of regions) {
+              const pad = 48;
+              const x = Math.max(0, region.x - pad);
+              const y = Math.max(0, region.y - pad);
+              const right = Math.min(canvas.width, region.x + region.width + pad);
+              const bottom = Math.min(canvas.height, region.y + region.height + pad);
+              let blurAvailable = false;
+              ctx.save();
+              try {
+                ctx.beginPath();
+                ctx.rect(x, y, right - x, bottom - y);
+                ctx.clip();
+                ctx.filter = 'blur(34px)';
+                blurAvailable = typeof ctx.filter === 'string' && ctx.filter.includes('blur');
+                if (blurAvailable) ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                ctx.filter = 'none';
+              } finally {
+                // Always restore the unclipped full-canvas context before a fail-closed mask.
+                ctx.restore();
+              }
+              if (!blurAvailable) {
+                allRegionsBlurred = false;
+                break;
+              }
+              // Add a dark veil over the already-blurred pixels for legibility protection.
+              ctx.fillStyle = 'rgba(8, 12, 20, 0.92)';
+              ctx.fillRect(region.x, region.y, region.width, region.height);
+            }
+            if (!allRegionsBlurred) paintFullFrameFallback();
+            else this.lastBlurredRegionCount = regions.length;
+          }
+        }
+      } else {
+        // A missing source frame is treated as uncertain, never as a transparent/clear frame.
+        paintFullFrameFallback();
+      }
+    } catch (error: any) {
+      paintFullFrameFallback();
+      this.privacyState = {
+        available: false, mode: 'blur_all', capturedAtMs: Date.now(), regions: [],
+        reason: `Privacy compositor failed closed: ${String(error?.message || error).slice(0, 180)}`,
+      };
+      this.onPrivacyState?.(this.privacyState);
+    }
+
+    this.drawFrameHandle = window.setTimeout(() => this.renderPrivacyFilteredFrame(), 100);
   }
 
   /**
@@ -824,9 +1064,12 @@ export class ScreenCaptureSource implements RecorderSource {
     caption: string;
     jpegDataUrl?: string;
     forceCheckpoint?: boolean;
-  }): Promise<{ sampled: boolean; reason: string; frame?: StoredKeyframeMeta }> {
+  }, authority?: symbol): Promise<{ sampled: boolean; reason: string; frame?: StoredKeyframeMeta }> {
     if (!this.active || this.paused) {
       return { sampled: false, reason: 'recorder_not_active_or_paused' };
+    }
+    if (typeof window !== 'undefined' && authority !== PRIVACY_FRAME_WRITE_AUTHORITY) {
+      return { sampled: false, reason: 'privacy_compositor_required' };
     }
 
     const decision = shouldSampleKeyframe({
@@ -865,7 +1108,7 @@ export class ScreenCaptureSource implements RecorderSource {
       storedInIndexedDb: false,
     };
 
-    const stored = await saveKeyframeToIndexedDb(meta, dataUrl);
+    const stored = await saveKeyframeToStorage(meta, dataUrl, authority);
     this.framesCaptured.push(stored);
     this.lastSampleTimeMs = params.timestampMs;
     this.onFrame?.(stored);
@@ -873,8 +1116,8 @@ export class ScreenCaptureSource implements RecorderSource {
     return { sampled: true, reason: decision.reason, frame: stored };
   }
 
-  private startMediaRecorder(): void {
-    if (!this.stream || typeof MediaRecorder === 'undefined') {
+  private startMediaRecorder(filteredStream: MediaStream): void {
+    if (!filteredStream || typeof MediaRecorder === 'undefined') {
       this.mediaRecordingError = 'This runtime does not support MediaRecorder; continuous video capture is unavailable.';
       this.onMediaError?.(this.mediaRecordingError);
       return;
@@ -883,8 +1126,8 @@ export class ScreenCaptureSource implements RecorderSource {
       const candidates = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
       const mimeType = candidates.find((type) => MediaRecorder.isTypeSupported?.(type)) || '';
       const recorder = mimeType
-        ? new MediaRecorder(this.stream as unknown as MediaStream, { mimeType, videoBitsPerSecond: 1_200_000 })
-        : new MediaRecorder(this.stream as unknown as MediaStream);
+        ? new MediaRecorder(filteredStream, { mimeType, videoBitsPerSecond: 1_200_000 })
+        : new MediaRecorder(filteredStream);
       this.mediaRecorder = recorder;
       this.mediaSegmentStartMs = Date.now();
       recorder.addEventListener('dataavailable', (event: BlobEvent) => {
@@ -906,6 +1149,7 @@ export class ScreenCaptureSource implements RecorderSource {
           this.mediaRecordingError = `Video segment ${sequence} was not saved: ${String(error?.message || error)}`;
           this.paused = true;
           for (const track of this.stream?.getTracks() || []) track.enabled = false;
+          for (const track of this.outputStream?.getTracks() || []) track.enabled = false;
           if (this.mediaRecorder?.state === 'recording') { try { this.mediaRecorder.pause(); } catch { /* no-op */ } }
           this.onMediaError?.(this.mediaRecordingError);
         });
@@ -919,6 +1163,7 @@ export class ScreenCaptureSource implements RecorderSource {
         this.mediaRecordingError = String(detail);
         this.paused = true;
         for (const track of this.stream?.getTracks() || []) track.enabled = false;
+        for (const track of this.outputStream?.getTracks() || []) track.enabled = false;
         this.onMediaError?.(this.mediaRecordingError);
       });
       recorder.start(1000);
@@ -949,23 +1194,6 @@ export class ScreenCaptureSource implements RecorderSource {
     this.mediaRecorder = null;
   }
 
-  private startFrameSampler(): void {
-    if (typeof document === 'undefined' || !this.stream) return;
-    const video = document.createElement('video');
-    video.muted = true;
-    video.playsInline = true;
-    video.srcObject = this.stream as unknown as MediaStream;
-    this.videoElement = video;
-    const canvas = document.createElement('canvas');
-    canvas.width = 960;
-    canvas.height = 540;
-    this.canvasElement = canvas;
-    void video.play().catch((err) => {
-      this.blockExplanation = `Screen capture stream opened, but video playback failed: ${String(err?.message || err)}`;
-    });
-    this.captureTimer = setInterval(() => { void this.sampleActualFrame(); }, 1200);
-  }
-
   public async captureCheckpoint(caption = 'User checkpoint'): Promise<StoredKeyframeMeta | undefined> {
     const before = this.framesCaptured.length;
     await this.sampleActualFrame(true, caption);
@@ -981,7 +1209,7 @@ export class ScreenCaptureSource implements RecorderSource {
       const canvas = this.canvasElement;
       const ctx = canvas.getContext('2d', { willReadFrequently: true });
       if (!ctx) return;
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      // The canvas is continuously rendered by renderPrivacyFilteredFrame; never sample the raw video element.
       const sampleCanvas = document.createElement('canvas');
       sampleCanvas.width = 64;
       sampleCanvas.height = 36;
@@ -1008,7 +1236,7 @@ export class ScreenCaptureSource implements RecorderSource {
         caption: captionOverride || `Captured desktop frame · ${new Date().toLocaleTimeString()}`,
         jpegDataUrl,
         forceCheckpoint: forceCheckpoint || this.framesCaptured.length === 0,
-      });
+      }, PRIVACY_FRAME_WRITE_AUTHORITY);
     } catch (err: any) {
       this.blockExplanation = `Frame sampling failed: ${String(err?.message || err)}`;
     } finally {
@@ -1019,6 +1247,12 @@ export class ScreenCaptureSource implements RecorderSource {
   private stopFrameSampler(): void {
     if (this.captureTimer) clearInterval(this.captureTimer);
     this.captureTimer = null;
+    if (this.privacyPollTimer) clearInterval(this.privacyPollTimer);
+    this.privacyPollTimer = null;
+    if (this.drawFrameHandle !== null && typeof window !== 'undefined') {
+      try { window.clearTimeout(this.drawFrameHandle); } catch { /* no-op */ }
+    }
+    this.drawFrameHandle = null;
     if (this.videoElement) {
       try { this.videoElement.pause(); this.videoElement.srcObject = null; } catch { /* no-op */ }
     }
@@ -1030,6 +1264,7 @@ export class ScreenCaptureSource implements RecorderSource {
     if (this.active) {
       this.paused = true;
       for (const track of this.stream?.getTracks() || []) track.enabled = false;
+      for (const track of this.outputStream?.getTracks() || []) track.enabled = false;
       if (this.mediaRecorder?.state === 'recording') { try { this.mediaRecorder.pause(); } catch { /* no-op */ } }
     }
     return this.getStatus();
@@ -1042,7 +1277,9 @@ export class ScreenCaptureSource implements RecorderSource {
     if (this.active) {
       this.paused = false;
       for (const track of this.stream?.getTracks() || []) track.enabled = true;
+      for (const track of this.outputStream?.getTracks() || []) track.enabled = true;
       if (this.mediaRecorder?.state === 'paused') { try { this.mediaRecorder.resume(); } catch { /* no-op */ } }
+      this.renderPrivacyFilteredFrame();
     }
     return this.getStatus();
   }
@@ -1066,6 +1303,8 @@ export class ScreenCaptureSource implements RecorderSource {
     } else {
       this.allTracksStopped = true;
     }
+    for (const track of this.outputStream?.getTracks() || []) { try { track.stop(); } catch { /* already ended */ } }
+    this.outputStream = null;
     return this.getStatus();
   }
 
@@ -1088,6 +1327,9 @@ export class ScreenCaptureSource implements RecorderSource {
       videoRecordingActive: this.mediaRecorder?.state === 'recording',
       mediaSegmentsCaptured: this.mediaSegmentsSaved,
       mediaRecordingError: this.mediaRecordingError,
+      privacyMode: this.lastRenderedPrivacyMode,
+      blurredRegionsCount: this.lastBlurredRegionCount,
+      privacyExplanation: this.privacyState?.reason || 'No native privacy scan has completed; fail-closed redaction is active.',
       allTracksStopped: this.allTracksStopped,
     };
   }

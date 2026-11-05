@@ -16,6 +16,8 @@ import type {
   PCOperatorWindowTarget,
   PCOperatorActionRequest,
   PCOperatorActionResult,
+  PCOperatorActionApprovalResult,
+  RecordingPrivacyState,
   DesktopLifecycleState,
   DesktopShellCapabilities,
   CrashReportRequest,
@@ -137,8 +139,12 @@ export function buildPreloadApi(
     pcOperator: Object.freeze({
       listWindows: () =>
         ipc.invoke('pc-operator:list-windows') as Promise<PCOperatorWindowTarget[]>,
-      executeAction: (request: PCOperatorActionRequest) =>
+      approveAction: (request: PCOperatorActionRequest) =>
+        ipc.invoke('pc-operator:approve-action', request) as Promise<PCOperatorActionApprovalResult>,
+      executeAction: (request: PCOperatorActionRequest & { approvalToken: string }) =>
         ipc.invoke('pc-operator:execute-action', request) as Promise<PCOperatorActionResult>,
+      getRecordingPrivacyState: () =>
+        ipc.invoke('pc-operator:get-recording-privacy') as Promise<RecordingPrivacyState>,
     }),
   };
 

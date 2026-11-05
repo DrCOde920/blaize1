@@ -15,7 +15,7 @@
  * 2. ARTIFACTS:
  *    - Documents (md, txt, docx, pdf), Spreadsheets & CSV, Slides, Images (png, jpg, webp, svg),
  *      Audio, Video, Web pages, Code & data.
- *    - IndexedDB blob storage (with in-memory fallback for Node tests) storing MIME type, size,
+ *    - SQLite desktop artifact state; IndexedDB browser-preview blobs (with an in-memory fallback for Node tests) store MIME type, size,
  *      thumbnail, version history, creator (agent or user), chat/mission origin, and tags.
  *    - Preview descriptors for every type: image viewer, video/audio player, PDF viewer,
  *      document reader, CSV table view, slides deck viewer, sandboxed HTML preview, and code viewer.
@@ -273,7 +273,7 @@ export function createGeneralProject(input: {
 }
 
 // ============================================================================
-// 2. UNIVERSAL ARTIFACTS (Any file created or imported, IndexedDB + Previews)
+// 2. UNIVERSAL ARTIFACTS (Any file created or imported, SQLite on desktop / IndexedDB in preview + Previews)
 // ============================================================================
 
 export type ArtifactMediaCategory =
@@ -906,14 +906,15 @@ export const INITIAL_UNIVERSAL_ARTIFACTS: UniversalArtifact[] = [
 
 /**
  * UniversalArtifactStore:
- * Manages artifacts across all projects, persists blobs in IndexedDB when available
- * (with automatic in-memory map fallback in Node tests), supports version rollback,
+ * Manages artifacts across all projects, persists desktop snapshots in SQLite and browser-preview
+ * blobs in IndexedDB (with an in-memory map fallback in Node tests), supports version rollback,
  * delete with Undo, and exposes agent tools (artifact.create, artifact.update, artifact.read, artifact.list).
  */
 export class UniversalArtifactStore {
   private items: UniversalArtifact[];
   private blobMap: Map<string, string> = new Map();
   private undoStack: Map<string, DeletedArtifactUndoTicket> = new Map();
+  private desktopPersistenceQueue: Promise<void> = Promise.resolve();
 
   constructor(initialItems: UniversalArtifact[] = INITIAL_UNIVERSAL_ARTIFACTS) {
     this.items = initialItems.map((item) => ({
@@ -926,8 +927,27 @@ export class UniversalArtifactStore {
     }
   }
 
+  private persistDesktopSnapshot(): void {
+    if (typeof window === 'undefined') return;
+    const api = window.electronAPI;
+    if (!api?.isElectron) return;
+    const now = Date.now();
+    const snapshot = this.items.map((item) => ({ ...item, tags: [...item.tags], versions: item.versions.map((version) => ({ ...version })) }));
+    this.desktopPersistenceQueue = this.desktopPersistenceQueue
+      .then(() => api.storage.putRecord('universal_artifacts', {
+        id: 'current', collection: 'universal_artifacts', data: { items: snapshot },
+        createdAt: now, updatedAt: now,
+      }))
+      .then(() => undefined)
+      .catch((error) => { console.error('Unable to persist universal artifacts to SQLite.', error); });
+  }
+
   private persistBlobToIndexedDb(id: string, content: string, mimeType: string): void {
     this.blobMap.set(id, content);
+    if (typeof window !== 'undefined' && window.electronAPI?.isElectron) {
+      this.persistDesktopSnapshot();
+      return;
+    }
     if (typeof indexedDB === 'undefined') return;
     try {
       const req = indexedDB.open('blaize_universal_artifacts_v1', 1);
@@ -1135,6 +1155,7 @@ export class UniversalArtifactStore {
       updatedAt: 'Just now',
     };
     this.items[idx] = updated;
+    this.persistDesktopSnapshot();
     return updated;
   }
 
@@ -1167,6 +1188,7 @@ export class UniversalArtifactStore {
       deletedAt: new Date().toISOString(),
     };
     this.undoStack.set(ticket.undoId, ticket);
+    this.persistDesktopSnapshot();
     return ticket;
   }
 

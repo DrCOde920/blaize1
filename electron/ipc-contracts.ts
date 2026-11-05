@@ -72,7 +72,9 @@ export interface PCOperatorActionRequest {
   text?: string;
   key?: string;
   deltaY?: number;
+  /** Renderer confirmation is advisory only; the main process enforces its own approval token. */
   requiresConfirmation: boolean;
+  approvalToken?: string;
 }
 
 export interface PCOperatorActionResult {
@@ -83,6 +85,30 @@ export interface PCOperatorActionResult {
   message?: string;
   targetWindowVerified: boolean;
   timestamp: number;
+}
+
+export interface PCOperatorActionApprovalResult {
+  approved: boolean;
+  approvalToken?: string;
+  message: string;
+}
+
+export interface RecordingPrivacyRegion {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  label: string;
+}
+
+export interface RecordingPrivacyState {
+  available: boolean;
+  mode: 'clear' | 'blur_regions' | 'blur_window' | 'blur_all';
+  capturedAtMs: number;
+  displayBounds?: { x: number; y: number; width: number; height: number };
+  regions: RecordingPrivacyRegion[];
+  windowLabel?: string;
+  reason: string;
 }
 
 export interface DesktopLifecycleState {
@@ -169,6 +195,11 @@ export const PCOperatorActionRequestSchema = z.object({
   deltaY: z.number().finite().optional(),
   requiresConfirmation: z.boolean(),
 });
+
+export const PCOperatorActionExecutionRequestSchema = PCOperatorActionRequestSchema.extend({
+  approvalToken: z.string().uuid(),
+});
+
 
 export const StageUpdateRequestSchema = z.object({
   version: z.string().min(1).max(64).regex(/^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$/),
@@ -274,7 +305,9 @@ export interface ElectronIpcChannels {
 
   // PC Operator (Desktop control)
   'pc-operator:list-windows': { req: void; res: PCOperatorWindowTarget[] };
-  'pc-operator:execute-action': { req: PCOperatorActionRequest; res: PCOperatorActionResult };
+  'pc-operator:approve-action': { req: PCOperatorActionRequest; res: PCOperatorActionApprovalResult };
+  'pc-operator:execute-action': { req: PCOperatorActionRequest & { approvalToken: string }; res: PCOperatorActionResult };
+  'pc-operator:get-recording-privacy': { req: void; res: RecordingPrivacyState };
 }
 
 export const IPC_CONTRACT_MANIFEST: Record<
@@ -679,13 +712,22 @@ export const IPC_CONTRACT_MANIFEST: Record<
       })
     ),
   },
+  'pc-operator:approve-action': {
+    channel: 'pc-operator:approve-action',
+    preloadNamespace: 'pcOperator',
+    preloadMethod: 'approveAction',
+    riskClass: 'system_privilege',
+    requiresMainFrame: true,
+    reqSchema: PCOperatorActionRequestSchema,
+    resSchema: z.object({ approved: z.boolean(), approvalToken: z.string().uuid().optional(), message: z.string() }),
+  },
   'pc-operator:execute-action': {
     channel: 'pc-operator:execute-action',
     preloadNamespace: 'pcOperator',
     preloadMethod: 'executeAction',
     riskClass: 'system_privilege',
     requiresMainFrame: true,
-    reqSchema: PCOperatorActionRequestSchema,
+    reqSchema: PCOperatorActionExecutionRequestSchema,
     resSchema: z.object({
       success: z.boolean(),
       actionId: z.string(),
@@ -694,6 +736,23 @@ export const IPC_CONTRACT_MANIFEST: Record<
       message: z.string().optional(),
       targetWindowVerified: z.boolean(),
       timestamp: z.number(),
+    }),
+  },
+  'pc-operator:get-recording-privacy': {
+    channel: 'pc-operator:get-recording-privacy',
+    preloadNamespace: 'pcOperator',
+    preloadMethod: 'getRecordingPrivacyState',
+    riskClass: 'read',
+    requiresMainFrame: true,
+    reqSchema: VoidOrEmptySchema,
+    resSchema: z.object({
+      available: z.boolean(),
+      mode: z.enum(['clear', 'blur_regions', 'blur_window', 'blur_all']),
+      capturedAtMs: z.number(),
+      displayBounds: z.object({ x: z.number(), y: z.number(), width: z.number(), height: z.number() }).optional(),
+      regions: z.array(z.object({ x: z.number(), y: z.number(), width: z.number(), height: z.number(), label: z.string() })),
+      windowLabel: z.string().optional(),
+      reason: z.string(),
     }),
   },
 };
@@ -796,7 +855,9 @@ export interface BlaizeElectronAPI {
   };
   pcOperator: {
     listWindows: () => Promise<PCOperatorWindowTarget[]>;
-    executeAction: (request: PCOperatorActionRequest) => Promise<PCOperatorActionResult>;
+    approveAction: (request: PCOperatorActionRequest) => Promise<PCOperatorActionApprovalResult>;
+    executeAction: (request: PCOperatorActionRequest & { approvalToken: string }) => Promise<PCOperatorActionResult>;
+    getRecordingPrivacyState: () => Promise<RecordingPrivacyState>;
   };
 }
 
@@ -807,6 +868,8 @@ declare global {
     __BLAIZE_BOOTSTRAP_PREFS__?: Record<string, unknown>;
     __BLAIZE_BOOTSTRAP_ACTIVE_RECORDING__?: unknown;
     __BLAIZE_BOOTSTRAP_RECORDED_SKILLS__?: unknown;
+    __BLAIZE_BOOTSTRAP_ARTIFACTS__?: unknown;
+    __BLAIZE_BOOTSTRAP_CHARACTER_PACK__?: unknown;
     __BLAIZE_RUNTIME_PREFS__?: Record<string, unknown>;
   }
 }

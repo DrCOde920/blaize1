@@ -332,3 +332,38 @@ test('4. Pre-Enable Plugin Evaluation: automatically evaluates a new or agent-cr
   assert.equal(failedPreEnable.canEnableImmediately, false);
   assert.equal(reviewInbox.getPendingCount(), 2);
 });
+
+test('2b. Universal artifacts use the SQLite desktop store instead of IndexedDB in Electron', async () => {
+  const priorWindow = (globalThis as any).window;
+  const writes: Array<{ collection: string; record: any }> = [];
+  (globalThis as any).window = {
+    electronAPI: {
+      isElectron: true,
+      storage: {
+        putRecord: async (collection: string, record: any) => {
+          writes.push({ collection, record });
+          return { success: true };
+        },
+      },
+    },
+  };
+  try {
+    const store = new UniversalArtifactStore([]);
+    store.create({
+      projectId: 'proj-test', title: 'SQLite note', fileName: 'note.md', category: 'document',
+      mimeType: 'text/markdown', content: '# Persisted', creator: 'user', originChatOrMission: 'test', tags: ['test'],
+    });
+    store.rename(store.getAll()[0].id, 'Renamed SQLite note');
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.ok(writes.length >= 2, 'create and rename both schedule durable snapshots');
+    const last = writes[writes.length - 1];
+    assert.equal(last.collection, 'universal_artifacts');
+    assert.equal(last.record.id, 'current');
+    assert.equal(last.record.data.items[0].title, 'Renamed SQLite note');
+    assert.equal(last.record.data.items[0].content, '# Persisted');
+  } finally {
+    if (priorWindow === undefined) delete (globalThis as any).window;
+    else (globalThis as any).window = priorWindow;
+  }
+});
+

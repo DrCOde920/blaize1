@@ -34,6 +34,8 @@ import {
   type PCOperatorWindowTarget,
   type PCOperatorActionRequest,
   type PCOperatorActionResult,
+  type PCOperatorActionApprovalResult,
+  type RecordingPrivacyState,
   type DesktopLifecycleState,
   type DesktopShellCapabilities,
   type CrashReportRequest,
@@ -50,6 +52,8 @@ import {
 import { LinuxDesktopDriver } from '../src/packages/pc_operator/linux_driver.js';
 import { WindowsDesktopDriver } from '../src/packages/pc_operator/windows_driver.js';
 import { MacOSDesktopDriver } from '../src/packages/pc_operator/macos_driver.js';
+import { OneTimeActionApprovalVault } from '../src/packages/pc_operator/action_approval.js';
+import { SENSITIVE_CONTROL_PATTERN, SENSITIVE_WINDOW_PATTERN, isSensitiveAccessibleValue } from '../src/packages/recorder/privacy_detector.js';
 
 function redactSecretsFromText(raw: string): string {
   const base = redactSensitiveText(raw).redacted;
@@ -59,7 +63,7 @@ function redactSecretsFromText(raw: string): string {
     .replace(/Bearer\s+[A-Za-z0-9\-._~+/]+=*/gi, 'Bearer [REDACTED_TOKEN]');
 }
 
-const { app, BrowserWindow, ipcMain, safeStorage, powerMonitor, session, shell, Tray, Menu, globalShortcut, nativeImage, desktopCapturer, dialog } =
+const { app, BrowserWindow, ipcMain, safeStorage, powerMonitor, session, shell, Tray, Menu, globalShortcut, nativeImage, desktopCapturer, dialog, screen } =
   (electronPkg as any) || {};
 
 const CURRENT_DIR =
@@ -321,6 +325,10 @@ let isShuttingDown = false;
 const startupErrors: string[] = [];
 const registeredShortcuts = new Set<string>();
 
+const nativeActionApprovalVault = new OneTimeActionApprovalVault();
+let selectedCaptureDisplayId: string | null = null;
+let recorderRetentionSweepTimer: ReturnType<typeof setInterval> | null = null;
+
 export interface DesktopDirectories {
   userDataDir: string;
   logsDir: string;
@@ -382,6 +390,9 @@ export function resetDesktopHostForTesting(customBaseDir?: string): DesktopDirec
     desktopDurableDb = null;
   }
   registeredShortcuts.clear();
+  nativeActionApprovalVault.clear();
+  selectedCaptureDisplayId = null;
+  if (recorderRetentionSweepTimer) { clearInterval(recorderRetentionSweepTimer); recorderRetentionSweepTimer = null; }
   startupErrors.length = 0;
   isShuttingDown = false;
   isReady = true;
@@ -520,6 +531,8 @@ export function stageVerifiedUpdateBundle(req: StageUpdateRequest): StageUpdateR
  */
 export function gracefulShutdown(): void {
   isShuttingDown = true;
+  if (recorderRetentionSweepTimer) { clearInterval(recorderRetentionSweepTimer); recorderRetentionSweepTimer = null; }
+  nativeActionApprovalVault.clear();
   try {
     if (globalShortcut && typeof globalShortcut.unregisterAll === 'function') {
       globalShortcut.unregisterAll();
@@ -719,6 +732,9 @@ export function createWindow(startUrlOverride?: string): any {
     backgroundColor: '#0a0a0c',
     webPreferences: {
       ...HARDENED_WEB_PREFERENCES,
+      // Keep the 10fps privacy compositor and native detector running while the window is minimized
+      // or another desktop app is foregrounded for a consented recording session.
+      backgroundThrottling: false,
       preload: preloadPath,
     },
   });
@@ -883,9 +899,212 @@ function registerChannel<K extends keyof ElectronIpcChannels>(
   }
 }
 
+
+function actionDigest(request: PCOperatorActionRequest): string {
+  const canonical = {
+    actionId: request.actionId,
+    type: request.type,
+    targetWindowId: request.targetWindowId || null,
+    targetElementId: request.targetElementId || null,
+    coordinates: request.coordinates || null,
+    text: request.text || null,
+    key: request.key || null,
+    deltaY: request.deltaY ?? null,
+  };
+  return crypto.createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
+}
+
+function createNativeDesktopDriver(): LinuxDesktopDriver | WindowsDesktopDriver | MacOSDesktopDriver {
+  return process.platform === 'win32'
+    ? new WindowsDesktopDriver()
+    : process.platform === 'darwin' ? new MacOSDesktopDriver() : new LinuxDesktopDriver();
+}
+
+function fullFramePrivacyState(reason: string): RecordingPrivacyState {
+  return { available: false, mode: 'blur_all', capturedAtMs: Date.now(), regions: [], reason };
+}
+
+function intersects(a: { x: number; y: number; width: number; height: number }, b: { x: number; y: number; width: number; height: number }): boolean {
+  return a.width > 0 && a.height > 0 && b.width > 0 && b.height > 0 &&
+    a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y;
+}
+
+/**
+ * A local, deterministic privacy detector. It never transmits screen contents or labels
+ * to a model. Protected applications are masked as a whole; sensitive/editable controls
+ * are masked by their native accessibility bounds. Missing/stale native evidence fails closed.
+ */
+export function captureRecordingPrivacyState(): RecordingPrivacyState {
+  try {
+    if (isHeadlessEnvironment() || !screen?.getAllDisplays) {
+      return fullFramePrivacyState('Native display geometry is unavailable; the entire recording frame is redacted.');
+    }
+    const displays = screen.getAllDisplays();
+    const selectedDisplay = selectedCaptureDisplayId
+      ? displays.find((d: any) => String(d.id) === String(selectedCaptureDisplayId))
+      : displays.length === 1 ? displays[0] : undefined;
+    if (!selectedDisplay) {
+      return fullFramePrivacyState('The selected capture display could not be matched to native display geometry.');
+    }
+    const displayBounds = {
+      x: Number(selectedDisplay.bounds?.x), y: Number(selectedDisplay.bounds?.y),
+      width: Number(selectedDisplay.bounds?.width), height: Number(selectedDisplay.bounds?.height),
+    };
+    if (![displayBounds.x, displayBounds.y, displayBounds.width, displayBounds.height].every(Number.isFinite) || displayBounds.width <= 0 || displayBounds.height <= 0) {
+      return fullFramePrivacyState('Native display bounds are invalid; the entire recording frame is redacted.');
+    }
+
+    const snapshot = createNativeDesktopDriver().capturePerception();
+    if (!snapshot || snapshot.isSimulated || Date.now() - snapshot.capturedAtMs > 3000) {
+      return fullFramePrivacyState('Fresh, real accessibility evidence is unavailable; the entire recording frame is redacted.');
+    }
+    if (!Array.isArray(snapshot.windows) || snapshot.windows.length === 0) {
+      return fullFramePrivacyState('No native windows were detected; the entire recording frame is redacted.');
+    }
+    if (!Array.isArray(snapshot.elements) || snapshot.elements.length === 0) {
+      return fullFramePrivacyState('The desktop accessibility tree is empty; the entire recording frame is redacted rather than assuming the screen is safe.');
+    }
+    const regions: RecordingPrivacyState['regions'] = [];
+    let maskedWindowCount = 0;
+    let visibleWindowCount = 0;
+    let accessibilityUncertain = false;
+    let windowLabel: string | undefined;
+
+    for (const win of snapshot.windows) {
+      const bounds = { x: win.bounds.x, y: win.bounds.y, width: win.bounds.width, height: win.bounds.height };
+      if (win.isMinimized) continue;
+      if (![bounds.x, bounds.y, bounds.width, bounds.height].every(Number.isFinite) || bounds.width <= 0 || bounds.height <= 0) {
+        accessibilityUncertain = true;
+        continue;
+      }
+      if (!intersects(bounds, displayBounds)) continue;
+      visibleWindowCount++;
+      const label = `${win.appName || ''} ${win.title || ''} ${win.processName || ''}`.trim();
+      const isProtectedApp = SENSITIVE_WINDOW_PATTERN.test(label) || isSensitiveAccessibleValue(label);
+      const elements = snapshot.elements.filter((el) => el.windowId === win.id);
+      // If any visible app window cannot provide its own accessibility tree, obscure the
+      // whole window. This protects background dialogs/forms as well as the focused app.
+      const missingWindowTree = elements.length === 0;
+      if (isProtectedApp || missingWindowTree) {
+        regions.push({ ...bounds, label: isProtectedApp ? 'Protected application window' : 'Uninspected application window' });
+        maskedWindowCount++;
+        windowLabel = win.appName || win.title || win.processName;
+        continue;
+      }
+
+      for (const element of elements) {
+        const role = String(element.role || '').toLowerCase();
+        const name = String(element.name || '');
+        const editable = element.supportedActions?.includes('set_value') || /text|password|secure|entry|input|searchbox/.test(role);
+        // Mask every editable control, not only fields whose labels match known secret words.
+        // This is deliberately conservative: unknown form fields can still contain private data.
+        const sensitive = /password|secure|secret|pin|otp|credential/.test(role) ||
+          SENSITIVE_CONTROL_PATTERN.test(name) || isSensitiveAccessibleValue(name) || isSensitiveAccessibleValue(element.value) || editable;
+        if (!sensitive) continue;
+        const elementBounds = { x: element.bounds.x, y: element.bounds.y, width: element.bounds.width, height: element.bounds.height };
+        if (![elementBounds.x, elementBounds.y, elementBounds.width, elementBounds.height].every(Number.isFinite) || elementBounds.width <= 0 || elementBounds.height <= 0) {
+          accessibilityUncertain = true;
+          continue;
+        }
+        if (intersects(elementBounds, displayBounds)) {
+          regions.push({ ...elementBounds, label: `Sensitive ${role || 'editable'} control` });
+        }
+      }
+    }
+
+    if (accessibilityUncertain) {
+      return fullFramePrivacyState('Native accessibility returned invalid control geometry; the entire recording frame is redacted.');
+    }
+    if (visibleWindowCount === 0) {
+      return fullFramePrivacyState('No visible windows could be confidently mapped to the selected display; the entire recording frame is redacted.');
+    }
+    if (regions.length > 150) {
+      return fullFramePrivacyState('The privacy scanner found too many regions to map safely; the entire recording frame is redacted.');
+    }
+    const mode: RecordingPrivacyState['mode'] = regions.length === 0 ? 'clear' : maskedWindowCount > 0 ? 'blur_window' : 'blur_regions';
+    return {
+      available: true, mode, capturedAtMs: Date.now(), displayBounds, regions,
+      windowLabel,
+      reason: regions.length ? `Privacy shield detected ${regions.length} sensitive region(s) and redacted them before video encoding.` : 'Native window and accessibility scan found no configured sensitive app or field.',
+    };
+  } catch (error: any) {
+    return fullFramePrivacyState(`Privacy scan failed closed: ${redactSecretsFromText(error?.message || String(error))}`);
+  }
+}
+
+function startRecorderRetentionSweep(): void {
+  const runSweep = (recoverInterruptedActive = false) => {
+    try { pruneExpiredRecordingSessions(Date.now(), recoverInterruptedActive); }
+    catch (error: any) { startupErrors.push(`Recording retention sweep failed: ${redactSecretsFromText(error?.message || String(error))}`); }
+  };
+  // Only the first pass runs at process startup, before a new UI recording can be active.
+  runSweep(true);
+  if (recorderRetentionSweepTimer) clearInterval(recorderRetentionSweepTimer);
+  // Recurring passes only expire archived recordings; they must never recover/close live sessions.
+  recorderRetentionSweepTimer = setInterval(() => runSweep(false), 15 * 60 * 1000);
+  (recorderRetentionSweepTimer as any).unref?.();
+}
+
+/** Expire archived keep_24h recordings and delete unreferenced binary blobs. */
+export function pruneExpiredRecordingSessions(
+  nowMs = Date.now(),
+  recoverInterruptedActive = false
+): { sessionsDeleted: number; blobsDeleted: number } {
+  const db = getDesktopDurableDb();
+  const activeRow = recoverInterruptedActive
+    ? db.listRecords('recorder_sessions').find((record) => record.id === 'active')
+    : undefined;
+  const activeSession = (activeRow?.data as any)?.session;
+  if (activeRow && activeSession) {
+    // A process restart means a previous capture cannot still be active. Use the row's last
+    // durable update as the best available end time; this prevents crashed sessions from
+    // becoming immortal and allows an already-expired session to be purged on this startup.
+    const lastPersistedAt = Date.parse(String(activeRow.updatedAt || ''));
+    const recoveredEnd = activeSession.endedAt || new Date(Number.isFinite(lastPersistedAt) ? Math.min(nowMs, lastPersistedAt) : nowMs).toISOString();
+    const interrupted = { ...activeSession, endedAt: recoveredEnd, interrupted: !activeSession.endedAt };
+    if (interrupted.id) db.setRecord('recorder_sessions', interrupted.id, { session: interrupted });
+    db.deleteRecord(activeRow.id);
+  }
+  const sessions = db.listRecords('recorder_sessions');
+  let sessionsDeleted = 0;
+  let blobsDeleted = 0;
+  for (const row of sessions) {
+    if (row.id === 'active') continue;
+    const session = (row.data as any)?.session || row.data;
+    if (!session || session.retentionPolicy !== 'keep_24h') continue;
+    const expiryBase = Date.parse(String(session.endedAt || session.startedAt || ''));
+    if (!Number.isFinite(expiryBase) || nowMs - expiryBase < 24 * 60 * 60 * 1000) continue;
+
+    const keyframeIds = new Set<string>((Array.isArray(session.keyframes) ? session.keyframes : []).map((frame: any) => String(frame.id || '')).filter(Boolean));
+    const mediaIds = new Set<string>((Array.isArray(session.mediaSegments) ? session.mediaSegments : []).map((segment: any) => String(segment.id || '')).filter(Boolean));
+    const blobs = new Set<string>();
+    for (const rowFrame of db.listRecords('recorder_keyframes')) {
+      if (keyframeIds.has(String(rowFrame.data?.id || rowFrame.id.split(':').pop()))) {
+        if (typeof rowFrame.data?.blobHash === 'string') blobs.add(rowFrame.data.blobHash);
+        db.deleteRecord(rowFrame.id);
+      }
+    }
+    for (const rowSegment of db.listRecords('recorder_media_segments')) {
+      if (mediaIds.has(String(rowSegment.data?.id || rowSegment.id.split(':').pop())) || rowSegment.data?.sessionId === session.id) {
+        if (typeof rowSegment.data?.blobHash === 'string') blobs.add(rowSegment.data.blobHash);
+        db.deleteRecord(rowSegment.id);
+      }
+    }
+    db.deleteRecord(row.id);
+    sessionsDeleted++;
+    const remainingRecords = db.listRecords();
+    for (const hash of blobs) {
+      const referenced = remainingRecords.some((record) => JSON.stringify(record.data).includes(hash));
+      if (!referenced && db.deleteBlob(hash)) blobsDeleted++;
+    }
+  }
+  return { sessionsDeleted, blobsDeleted };
+}
+
 export function registerIpcHandlers(options?: {
   ipcMainOverride?: { handle: (ch: string, listener: (ev: any, arg: any) => any) => void };
   safeStorageOverride?: any;
+  dialogOverride?: any;
 }): void {
   initializeDesktopDirectories();
 
@@ -1382,14 +1601,84 @@ export function registerIpcHandlers(options?: {
   );
 
   registerChannel(
+    'pc-operator:get-recording-privacy',
+    () => captureRecordingPrivacyState(),
+    options?.ipcMainOverride
+  );
+
+  registerChannel(
+    'pc-operator:approve-action',
+    async (request: PCOperatorActionRequest, event: any): Promise<PCOperatorActionApprovalResult> => {
+      if (!request.requiresConfirmation) return { approved: false, message: 'A fresh native confirmation is required.' };
+      if (request.type === 'type' && request.text && request.text.length > 240) {
+        return { approved: false, message: 'Long text entry is not eligible for one-action desktop approval. Use a separately reviewed file or editor workflow.' };
+      }
+      if (request.type === 'type' && request.text && (/(password|passcode|one.?time.?code|otp|\bpin\b|api.?key|secret|bearer\s+)/i.test(request.text) || isSensitiveAccessibleValue(request.text))) {
+        return { approved: false, message: 'Credential-like or personal-identifier text is blocked before approval and cannot be entered by the autonomous desktop channel.' };
+      }
+      if (isHeadlessEnvironment()) return { approved: false, message: 'Native approval dialog is unavailable in a headless session.' };
+      const driver = createNativeDesktopDriver();
+      const snapshot = driver.capturePerception();
+      const target = request.targetWindowId
+        ? snapshot.windows.find((window) => window.id === request.targetWindowId)
+        : snapshot.windows.find((window) => window.isFocused);
+      if (!target) return { approved: false, message: 'Target window is no longer present. Refresh desktop perception.' };
+      if (SENSITIVE_WINDOW_PATTERN.test(`${target.title} ${target.processName} ${target.appName}`)) {
+        return { approved: false, message: 'Sensitive applications cannot be controlled by the autonomous PC Operator.' };
+      }
+      const element = request.targetElementId
+        ? snapshot.elements.find((candidate) => candidate.id === request.targetElementId && candidate.windowId === target.id)
+        : undefined;
+      if (request.targetElementId && !element) return { approved: false, message: 'Target accessibility element is no longer present.' };
+      if (element && (SENSITIVE_CONTROL_PATTERN.test(element.name) || isSensitiveAccessibleValue(element.name) || isSensitiveAccessibleValue(element.value) || /pay|payment|transfer|send money|purchase|checkout|delete|remove account|confirm|approve|submit|security settings/i.test(element.name))) {
+        return { approved: false, message: 'This control is too sensitive for autonomous execution.' };
+      }
+      const dialogApi = options?.dialogOverride ?? dialog;
+      if (!dialogApi || typeof dialogApi.showMessageBox !== 'function') {
+        return { approved: false, message: 'Native approval dialog is unavailable; action rejected.' };
+      }
+      const actionLabel = request.type === 'type'
+        ? `Enter ${String(request.text || '').length} character(s) in a visible control`
+        : request.type === 'click' ? 'Click a visible control'
+          : request.type === 'scroll' ? 'Scroll the selected window'
+            : request.type === 'key' ? `Send shortcut: ${request.key || 'unknown'}` : 'Navigate';
+      const safeTextPreview = request.type === 'type'
+        ? `\nText to enter: ${JSON.stringify(redactSecretsFromText(String(request.text || '')))}`
+        : '';
+      const dialogResult = await dialogApi.showMessageBox(mainWindow || undefined, {
+        type: 'warning',
+        title: 'Approve one Blaize desktop action?',
+        message: actionLabel,
+        detail: `Application: ${redactSecretsFromText(target.appName || target.processName).slice(0, 120)}\nWindow: ${redactSecretsFromText(target.title).slice(0, 160)}\nControl: ${redactSecretsFromText(element?.name || 'focused window').slice(0, 120)}${safeTextPreview}\n\nThis approval applies to this exact action only and expires after 60 seconds.`,
+        buttons: ['Approve this action', 'Cancel'],
+        defaultId: 1,
+        cancelId: 1,
+        noLink: true,
+      });
+      if (dialogResult?.response !== 0) return { approved: false, message: 'You declined the native desktop action.' };
+      const approvalToken = crypto.randomUUID();
+      nativeActionApprovalVault.issue(approvalToken, {
+        senderId: Number(event?.sender?.id),
+        actionDigest: actionDigest(request),
+        expiresAtMs: Date.now() + 60_000,
+      });
+      return { approved: true, approvalToken, message: 'Native one-time approval granted.' };
+    },
+    options?.ipcMainOverride
+  );
+
+  registerChannel(
     'pc-operator:execute-action',
-    (request: PCOperatorActionRequest): PCOperatorActionResult => {
+    (request: PCOperatorActionRequest & { approvalToken: string }, event: any): PCOperatorActionResult => {
       const fail = (state: PCOperatorActionResult['executionState'], message: string): PCOperatorActionResult => ({
         success: false, actionId: request.actionId, executionState: state, isSimulated: false,
         message, targetWindowVerified: false, timestamp: Date.now(),
       });
-      if (!request.requiresConfirmation) {
-        return fail('BLOCKED', 'APPROVAL_REQUIRED: A human must approve each native desktop action in the PC Operator panel.');
+      const approvalValid = nativeActionApprovalVault.consume(
+        request.approvalToken, Number(event?.sender?.id), actionDigest(request), Date.now()
+      );
+      if (!approvalValid) {
+        return fail('BLOCKED', 'APPROVAL_INVALID: A fresh, unexpired, action-specific native approval is required.');
       }
       if (request.type === 'navigate') {
         return fail('UNSUPPORTED', 'DIRECT_NAVIGATION_UNSUPPORTED: Use the visible browser address bar with a separately reviewed keyboard action.');
@@ -1418,8 +1707,11 @@ export function registerIpcHandlers(options?: {
       if (request.type === 'scroll' && request.deltaY !== undefined && (!Number.isFinite(request.deltaY) || Math.abs(request.deltaY) > 100)) {
         return fail('BLOCKED', 'SCROLL_RANGE_BLOCKED: Scroll movement must be within -100 to 100.');
       }
-      if (request.text && /(password|passcode|one.?time.?code|otp|\bpin\b|api.?key|secret|bearer\s+)/i.test(request.text)) {
-        return fail('BLOCKED', 'SENSITIVE_INPUT_BLOCKED: Blaize will not type credentials or secret material through the autonomous desktop channel.');
+      if (request.type === 'type' && request.text && request.text.length > 240) {
+        return fail('BLOCKED', 'TEXT_LENGTH_BLOCKED: Long text must use a separately reviewed content workflow.');
+      }
+      if (request.type === 'type' && request.text && (/(password|passcode|one.?time.?code|otp|\bpin\b|api.?key|secret|bearer\s+)/i.test(request.text) || isSensitiveAccessibleValue(request.text))) {
+        return fail('BLOCKED', 'SENSITIVE_INPUT_BLOCKED: Blaize will not type credentials or detected personal identifiers through the autonomous desktop channel.');
       }
       if (process.platform !== 'linux' && process.platform !== 'win32' && process.platform !== 'darwin') {
         return fail('UNSUPPORTED', 'UNSUPPORTED: Native desktop control is unavailable on this platform.');
@@ -1427,16 +1719,14 @@ export function registerIpcHandlers(options?: {
       if (isHeadlessEnvironment()) {
         return fail('UNSUPPORTED', 'UNSUPPORTED: Native OS input dispatch requires an active display session (X11/Wayland/Quartz/Win32).');
       }
-      const driver = process.platform === 'win32'
-        ? new WindowsDesktopDriver()
-        : process.platform === 'darwin' ? new MacOSDesktopDriver() : new LinuxDesktopDriver();
+      const driver = createNativeDesktopDriver();
       const beforeSnap = driver.capturePerception();
       const target = request.targetWindowId
         ? beforeSnap.windows.find((window) => window.id === request.targetWindowId)
         : beforeSnap.windows.find((window) => window.isFocused);
       if (!target) return fail('BLOCKED', 'TARGET_WINDOW_NOT_FOUND: The requested application window is no longer present.');
       if (target.isElevatedAdmin) return fail('BLOCKED', 'UIPI_ELEVATION_DENIED: Elevated administrative windows cannot be controlled.');
-      if (/(password manager|1password|bitwarden|keepass|keychain|credential manager|banking|online bank|brokerage|trading|tax portal|medical record|health portal|payroll)/i.test(`${target.title} ${target.processName}`)) {
+      if (SENSITIVE_WINDOW_PATTERN.test(`${target.title} ${target.processName} ${target.appName}`)) {
         return fail('BLOCKED', 'SENSITIVE_APPLICATION_BLOCKED: Blaize will not autonomously control password, banking, brokerage, tax, payroll, or medical applications.');
       }
       if (request.coordinates) {
@@ -1459,7 +1749,7 @@ export function registerIpcHandlers(options?: {
       if (requiredCapability && !targetElement?.supportedActions?.includes(requiredCapability)) {
         return fail('BLOCKED', `ACTION_NOT_SUPPORTED: The refreshed accessibility target does not expose ${requiredCapability}.`);
       }
-      if (targetElement && /(pay|payment|transfer|send money|purchase|checkout|delete|remove account|confirm|approve|submit|sign in|log in|password|credential|security settings)/i.test(targetElement.name)) {
+      if (targetElement && (SENSITIVE_CONTROL_PATTERN.test(targetElement.name) || isSensitiveAccessibleValue(targetElement.name) || isSensitiveAccessibleValue(targetElement.value) || /(pay|payment|transfer|send money|purchase|checkout|delete|remove account|confirm|approve|submit|sign in|log in|security settings)/i.test(targetElement.name))) {
         return fail('BLOCKED', 'SENSITIVE_CONTROL_BLOCKED: This control could commit a payment, delete data, submit a form, or modify security settings. Use a separately reviewed workflow.');
       }
       const action = request.type === 'type' ? 'set_value'
@@ -1547,6 +1837,7 @@ export function initApp(): void {
     .then(async () => {
       initializeDesktopDirectories();
       registerIpcHandlers();
+      startRecorderRetentionSweep();
       // getDisplayMedia is handled in the privileged process so the user chooses an
       // actual desktop display. This handler only runs after the app's consent sheet
       // has explicitly initiated capture; cancelling the picker grants no stream.
@@ -1564,13 +1855,14 @@ export function initApp(): void {
               buttons: labels, cancelId: labels.length - 1, defaultId: 0,
             });
             const source = sources[picked.response];
-            if (!source) { callback({}); return; }
+            if (!source) { selectedCaptureDisplayId = null; callback({}); return; }
+            selectedCaptureDisplayId = source.display_id ? String(source.display_id) : null;
             callback({ video: source, audio: undefined });
           } catch (err: any) {
             startupErrors.push(`Display capture picker failed: ${redactSecretsFromText(err?.message || String(err))}`);
             callback({});
           }
-        }, { useSystemPicker: process.platform === 'darwin' });
+        }, { useSystemPicker: false });
       }
       isReady = true;
 

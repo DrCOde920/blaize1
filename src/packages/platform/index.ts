@@ -279,7 +279,14 @@ export class UniversalPlatformBridge implements PlatformBridge {
 
   async executeAction(request: PCOperatorActionRequest): Promise<PCOperatorActionResult> {
     if (this.isElectron && this.electronApi) {
-      return this.electronApi.pcOperator.executeAction(request);
+      const approval = await this.electronApi.pcOperator.approveAction(request);
+      if (!approval.approved || !approval.approvalToken) {
+        return {
+          success: false, actionId: request.actionId, executionState: 'BLOCKED', isSimulated: false,
+          message: approval.message || 'A fresh native approval was not granted.', targetWindowVerified: false, timestamp: Date.now(),
+        };
+      }
+      return this.electronApi.pcOperator.executeAction({ ...request, approvalToken: approval.approvalToken });
     }
     return {
       success: false,

@@ -237,7 +237,7 @@ import {
   ScreenAwarenessMode,
   RecordingSession,
   RecordedKeyframe,
-  RecordingMediaSegmentMeta,
+  RecordedMediaSegmentMeta,
   RecordedInteractionEvent,
   DraftRecordedSkill,
   SkillPlan,
@@ -1172,7 +1172,7 @@ export default function App() {
   const [indexedPlaceFiles, setIndexedPlaceFiles] =
     useState<IndexedFileMetadata[]>(INITIAL_INDEXED_FILES);
 
-  // Prompt 2/4: General Projects (for any user), Universal Artifacts (IndexedDB + type previews), & General Evaluations
+  // Prompt 2/4: General Projects (for any user), Universal Artifacts (SQLite on desktop; IndexedDB in preview), & General Evaluations
   const [generalProjects, setGeneralProjects] = useState<GeneralProject[]>(
     INITIAL_GENERAL_PROJECTS
   );
@@ -1184,9 +1184,10 @@ export default function App() {
 
   const universalArtifactStoreRef = useRef<UniversalArtifactStore | null>(null);
   if (!universalArtifactStoreRef.current) {
-    universalArtifactStoreRef.current = new UniversalArtifactStore(
-      INITIAL_UNIVERSAL_ARTIFACTS
-    );
+    const bootArtifacts = Array.isArray(window.__BLAIZE_BOOTSTRAP_ARTIFACTS__)
+      ? window.__BLAIZE_BOOTSTRAP_ARTIFACTS__ as UniversalArtifact[]
+      : INITIAL_UNIVERSAL_ARTIFACTS;
+    universalArtifactStoreRef.current = new UniversalArtifactStore(bootArtifacts);
   }
   const [universalArtifacts, setUniversalArtifacts] = useState<UniversalArtifact[]>(() =>
     universalArtifactStoreRef.current!.getAll()
@@ -1416,6 +1417,7 @@ export default function App() {
   }, [isRecordingSkill, isRecordingPaused]);
 
   const handleStartRecordingAfterConsent = async () => {
+    let privacyNotice: string | null = null;
     const newSession: RecordingSession = {
       id: `rec_${Date.now()}`,
       startedAt: new Date().toISOString(),
@@ -1460,13 +1462,22 @@ export default function App() {
         setShowSkillRecorderStudio(true);
         setActiveView('skills');
         setAutoPauseReason('The selected display stopped sharing. Blaize finalized the video and keyframe timeline.');
-      }, (segment: RecordingMediaSegmentMeta) => {
+      }, (segment: RecordedMediaSegmentMeta) => {
         setActiveRecordingSession((previous) => previous ? {
           ...previous, mediaSegments: [...(previous.mediaSegments || []), segment],
         } : previous);
       }, (message: string) => {
         setIsRecordingPaused(true);
         setAutoPauseReason(message);
+      }, (privacyState) => {
+        if (privacyState.mode === 'clear') {
+          setAutoPauseReason(null);
+        } else {
+          const detail = privacyState.mode === 'blur_all'
+            ? 'Privacy Shield is blurring the entire recording because native detection is uncertain.'
+            : `Privacy Shield blurred ${privacyState.regions.length} sensitive area(s) in the saved video and keyframes.`;
+          setAutoPauseReason(detail);
+        }
       });
       screenCaptureRef.current = capture;
       const captureStatus = await capture.start(consent);
@@ -1474,6 +1485,9 @@ export default function App() {
         screenCaptureRef.current = null;
         window.alert(captureStatus.blockExplanation || captureStatus.fallbackSuggestion || 'Screen capture could not be started. No recording session was created.');
         return;
+      }
+      if (captureStatus.privacyMode && captureStatus.privacyMode !== 'clear') {
+        privacyNotice = captureStatus.privacyExplanation || 'Privacy Shield is blurring the recording until it can confirm a safe desktop state.';
       }
       if (!captureStatus.videoRecordingActive) {
         screenCaptureRef.current = null;
@@ -1489,7 +1503,7 @@ export default function App() {
     setIsRecordingSkill(true);
     setIsRecordingPaused(false);
     setRecordingElapsedSec(0);
-    setAutoPauseReason(null);
+    setAutoPauseReason(privacyNotice);
     setMorrowState('attentive');
     ledger.appendEvent({
       actor: 'user', type: 'recording_started',
@@ -1594,6 +1608,10 @@ export default function App() {
     dataUrl?: string,
     pixelInferred = false
   ) => {
+    if (recorderSourceType !== 'in_app' && dataUrl) {
+      setAutoPauseReason('Desktop keyframes must come from the Privacy Shield compositor. Unfiltered image uploads are not accepted into a desktop recording.');
+      return;
+    }
     if (!dataUrl && screenCaptureRef.current) {
       const saved = await screenCaptureRef.current.captureCheckpoint(label);
       if (!saved) setAutoPauseReason(screenCaptureRef.current.getStatus().blockExplanation || 'The live display frame is not ready yet. Try the checkpoint again after the screen is shared.');

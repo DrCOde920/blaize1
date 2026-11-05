@@ -8,7 +8,7 @@
  *    Consumes zero extra vertical layout space.
  * 2. Other pages ('panel-top-right', 'screen-floor', 'sidebar-footer'):
  *    She perches on the top-right edge of the content panel or stands on the floor line.
- *    Users can drag her or move her to any perch, remembered per page in localStorage.
+ *    Users can drag her or move her to any perch, remembered per page in SQLite on desktop and browser storage in preview.
  * 3. Obstacle Avoidance: Moves aside automatically when the approval sheet is open or
  *    nearby inputs are focused.
  * 4. Click Popover: Header with name, status chip (icon + plain text), gear icon at top right;
@@ -193,6 +193,50 @@ const FREE_POS_STORAGE_KEY = 'blaize_morrow_free_position_v1';
 const DOT_COLLAPSED_STORAGE_KEY = 'blaize_morrow_collapsed_dot_v1';
 const COMPANION_SCALE_STORAGE_KEY = 'blaize_companion_scale_pct_v1';
 
+function readCompanionPreference<T>(key: string, fallback: T): T {
+  if (typeof window === 'undefined') return fallback;
+  const runtime = window.__BLAIZE_RUNTIME_PREFS__;
+  const bootstrap = window.__BLAIZE_BOOTSTRAP_PREFS__;
+  if (runtime && Object.prototype.hasOwnProperty.call(runtime, key)) return runtime[key] as T;
+  if (bootstrap && Object.prototype.hasOwnProperty.call(bootstrap, key)) return bootstrap[key] as T;
+  // Electron preferences are loaded from SQLite before the React tree is mounted.
+  if (window.electronAPI?.isElectron) return fallback;
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (raw === null) return fallback;
+    try { return JSON.parse(raw) as T; } catch { return raw as T; }
+  } catch { return fallback; }
+}
+
+function writeCompanionPreference<T>(key: string, value: T): void {
+  if (typeof window === 'undefined') return;
+  if (window.electronAPI?.isElectron) {
+    const prefs = (window.__BLAIZE_RUNTIME_PREFS__ ||= { ...(window.__BLAIZE_BOOTSTRAP_PREFS__ || {}) });
+    prefs[key] = value;
+    void window.electronAPI.storage.putRecord('ui_preferences', {
+      id: 'ui', collection: 'ui_preferences', data: { values: prefs },
+      createdAt: Date.now(), updatedAt: Date.now(),
+    }).catch((error) => console.error('Unable to persist Morrow companion preferences.', error));
+    return;
+  }
+  try { window.localStorage.setItem(key, typeof value === 'string' ? value : JSON.stringify(value)); }
+  catch { /* browser preview storage is best effort */ }
+}
+
+function removeCompanionPreference(key: string): void {
+  if (typeof window === 'undefined') return;
+  if (window.electronAPI?.isElectron) {
+    const prefs = (window.__BLAIZE_RUNTIME_PREFS__ ||= { ...(window.__BLAIZE_BOOTSTRAP_PREFS__ || {}) });
+    prefs[key] = null;
+    void window.electronAPI.storage.putRecord('ui_preferences', {
+      id: 'ui', collection: 'ui_preferences', data: { values: prefs },
+      createdAt: Date.now(), updatedAt: Date.now(),
+    }).catch((error) => console.error('Unable to clear Morrow companion preferences.', error));
+    return;
+  }
+  try { window.localStorage.removeItem(key); } catch { /* browser preview storage is best effort */ }
+}
+
 export const MorrowCompanion: React.FC<MorrowCompanionProps> = ({
   morrowState,
   focusMode,
@@ -263,17 +307,8 @@ export const MorrowCompanion: React.FC<MorrowCompanionProps> = ({
     if (typeof characterParametricState?.scalePct === 'number') {
       return characterParametricState.scalePct;
     }
-    if (typeof window !== 'undefined') {
-      try {
-        const raw = window.localStorage.getItem(COMPANION_SCALE_STORAGE_KEY);
-        if (raw) {
-          const parsed = Number(raw);
-          if (!Number.isNaN(parsed) && parsed >= 50 && parsed <= 200) return parsed;
-        }
-      } catch {
-        // ignore storage errors
-      }
-    }
+    const storedScale = readCompanionPreference<number | null>(COMPANION_SCALE_STORAGE_KEY, null);
+    if (typeof storedScale === 'number' && storedScale >= 50 && storedScale <= 200) return storedScale;
     return 100;
   });
 
@@ -295,11 +330,7 @@ export const MorrowCompanion: React.FC<MorrowCompanionProps> = ({
     (nextPctRaw: number) => {
       const clamped = Math.max(50, Math.min(200, Math.round(nextPctRaw)));
       setLocalScalePct(clamped);
-      try {
-        window.localStorage.setItem(COMPANION_SCALE_STORAGE_KEY, String(clamped));
-      } catch {
-        // ignore storage errors
-      }
+      writeCompanionPreference(COMPANION_SCALE_STORAGE_KEY, clamped);
       if (onChangeCompanionScale) {
         onChangeCompanionScale(clamped / 100);
       }
@@ -315,33 +346,18 @@ export const MorrowCompanion: React.FC<MorrowCompanionProps> = ({
 
   // Per-page remembered perch registry
   const [rememberedPerches, setRememberedPerches] = useState<Partial<Record<string, PerchTargetId>>>(() => {
-    if (typeof window === 'undefined') return {};
-    try {
-      const raw = window.localStorage.getItem(PERCH_STORAGE_KEY);
-      return raw ? JSON.parse(raw) : {};
-    } catch {
-      return {};
-    }
+    return readCompanionPreference<Partial<Record<string, PerchTargetId>>>(PERCH_STORAGE_KEY, {});
   });
 
   // Collapse to small status dot
   const [collapsedToDot, setCollapsedToDot] = useState<boolean>(() => {
-    if (typeof window === 'undefined') return false;
-    try {
-      return window.localStorage.getItem(DOT_COLLAPSED_STORAGE_KEY) === 'true';
-    } catch {
-      return false;
-    }
+    return readCompanionPreference<boolean>(DOT_COLLAPSED_STORAGE_KEY, false);
   });
 
   const toggleCollapsedToDot = useCallback((next?: boolean) => {
     setCollapsedToDot((prev) => {
       const val = next !== undefined ? next : !prev;
-      try {
-        window.localStorage.setItem(DOT_COLLAPSED_STORAGE_KEY, String(val));
-      } catch {
-        // ignore storage errors
-      }
+      writeCompanionPreference(DOT_COLLAPSED_STORAGE_KEY, val);
       return val;
     });
   }, []);
@@ -442,36 +458,22 @@ export const MorrowCompanion: React.FC<MorrowCompanionProps> = ({
   // Free-roam screen coordinates (null = anchored to activePerchId; {x, y} = user moved figure to any screen coordinate)
   const [customPosition, setCustomPosition] = useState<FreeCompanionPosition | null>(() => {
     if (typeof window === 'undefined') return null;
-    try {
-      const raw = window.localStorage.getItem(FREE_POS_STORAGE_KEY);
-      if (!raw) return null;
-      const parsed = JSON.parse(raw);
-      if (parsed && typeof parsed.x === 'number' && typeof parsed.y === 'number') {
-        return clampFreeCompanionPosition({
-          x: parsed.x,
-          y: parsed.y,
-          viewportWidth: window.innerWidth || 1440,
-          viewportHeight: window.innerHeight || 900,
-        });
-      }
-      return null;
-    } catch {
-      return null;
+    const parsed = readCompanionPreference<FreeCompanionPosition | null>(FREE_POS_STORAGE_KEY, null);
+    if (parsed && typeof parsed.x === 'number' && typeof parsed.y === 'number') {
+      return clampFreeCompanionPosition({
+        x: parsed.x, y: parsed.y,
+        viewportWidth: window.innerWidth || 1440,
+        viewportHeight: window.innerHeight || 900,
+      });
     }
+    return null;
   });
 
   const saveCustomPosition = useCallback((nextPos: FreeCompanionPosition | null) => {
     setCustomPosition(nextPos);
     if (typeof window === 'undefined') return;
-    try {
-      if (nextPos) {
-        window.localStorage.setItem(FREE_POS_STORAGE_KEY, JSON.stringify(nextPos));
-      } else {
-        window.localStorage.removeItem(FREE_POS_STORAGE_KEY);
-      }
-    } catch {
-      // ignore storage errors
-    }
+    if (nextPos) writeCompanionPreference(FREE_POS_STORAGE_KEY, nextPos);
+    else removeCompanionPreference(FREE_POS_STORAGE_KEY);
   }, []);
 
   const setPerchForCurrentPage = useCallback(
@@ -479,11 +481,7 @@ export const MorrowCompanion: React.FC<MorrowCompanionProps> = ({
       saveCustomPosition(null);
       setRememberedPerches((prev) => {
         const next = { ...prev, [resolvedPageId]: perchId };
-        try {
-          window.localStorage.setItem(PERCH_STORAGE_KEY, JSON.stringify(next));
-        } catch {
-          // ignore storage errors
-        }
+        writeCompanionPreference(PERCH_STORAGE_KEY, next);
         return next;
       });
     },
